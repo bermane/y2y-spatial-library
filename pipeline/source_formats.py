@@ -1,0 +1,301 @@
+"""Source-format detection for lenient ingestion (DESIGN.md §8 Phase 1).
+
+Phase A scope: single-layer / single-band sources only. Multi-layer
+formats (FGDB, multi-layer GPKG, mixed-geometry GeoJSON) are rejected
+at scan with a clear "extract layers first" message.
+
+Vector allow-list:
+    .shp           Shapefile (with sidecars)
+    .gpkg          GeoPackage (single-layer only in Phase A)
+    .geojson/.json GeoJSON (single concrete geometry type only)
+    .kml/.kmz      KML / KMZ (treated as single-layer)
+
+Raster allow-list:
+    .tif/.tiff     GeoTIFF / Cloud Optimized GeoTIFF (single-band only)
+
+Anything else is silently skipped at scan (the steward's stray files
+in incoming/ don't trigger errors).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+import fiona
+import rasterio
+
+
+VECTOR_EXTENSIONS: dict[str, str] = {
+    ".shp": "Shapefile",
+    ".gpkg": "GeoPackage",
+    ".geojson": "GeoJSON",
+    ".json": "GeoJSON",
+    ".kml": "KML",
+    ".kmz": "KML",
+}
+
+RASTER_EXTENSIONS: dict[str, str] = {
+    ".tif": "GeoTIFF",
+    ".tiff": "GeoTIFF",
+}
+
+# All sidecar extensions associated with a Shapefile bundle. Captured so
+# the bundle moves together through processing/ → archived/.
+SHAPEFILE_SIDECAR_EXTS: frozenset[str] = frozenset({
+    ".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj",
+    ".sbn", ".sbx", ".qix", ".aih", ".ain", ".ixs",
+    ".mxs", ".atx", ".shp.xml",
+})
+
+# Concrete (single-type) geometries acceptable at scan. "Unknown" / mixed
+# is rejected because GPKG cannot store mixed-geometry layers.
+_CONCRETE_GEOMETRY_TYPES = frozenset({
+    "Point", "MultiPoint",
+    "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon",
+})
+
+
+class SourceRejected(Exception):
+    """Raised when a candidate file cannot be admitted at scan."""
+
+
+@dataclass(frozen=True)
+class SourceMetadata:
+    """What scan captures from an incoming file before any transformation."""
+
+    source_format: str          # e.g., "Shapefile", "GeoTIFF"
+    source_filename: str        # original filename in incoming/
+    source_crs: str | None      # authority:code form, may be null
+    source_layer: str | None    # always None in Phase A
+    is_vector: bool
+
+
+def is_recognized(path: Path) -> bool:
+    """True if the extension is in the allow-list (regardless of openability)."""
+    ext = path.suffix.lower()
+    if ext in VECTOR_EXTENSIONS or ext in RASTER_EXTENSIONS:
+        return True
+    # Compound extensions like .shp.xml shouldn't show up here as primary —
+    # they're sidecars and only travel with their .shp leader.
+    return False
+
+
+def is_shapefile_sidecar(path: Path) -> bool:
+    """True if ``path`` is a Shapefile sidecar (anything but .shp itself)."""
+    name = path.name.lower()
+    if name.endswith(".shp"):
+        return False
+    return any(name.endswith(ext) for ext in SHAPEFILE_SIDECAR_EXTS)
+
+
+def shapefile_bundle(shp_path: Path) -> list[Path]:
+    """Return all files belonging to a shapefile bundle, including the .shp."""
+    stem = shp_path.stem
+    parent = shp_path.parent
+    bundle: list[Path] = [shp_path]
+    for sibling in parent.iterdir():
+        if sibling == shp_path:
+            continue
+        if sibling.stem != stem and not sibling.name.startswith(stem + "."):
+            continue
+        sib_lower = sibling.name.lower()
+        if any(sib_lower.endswith(ext) for ext in SHAPEFILE_SIDECAR_EXTS):
+            bundle.append(sibling)
+    return bundle
+
+
+def detect(path: Path) -> tuple[str, bool]:
+    """Return ``(source_format, is_vector)`` for a recognized file.
+
+    Raises ``KeyError`` if the extension is not in the allow-list.
+    """
+    ext = path.suffix.lower()
+    if ext in VECTOR_EXTENSIONS:
+        return VECTOR_EXTENSIONS[ext], True
+    if ext in RASTER_EXTENSIONS:
+        return RASTER_EXTENSIONS[ext], False
+    raise KeyError(f"unrecognized extension: {ext}")
+
+
+def inspect(path: Path) -> SourceMetadata:
+    """Open the file, run Phase-A single-layer/single-band checks, capture metadata.
+
+    Raises :class:`SourceRejected` if the file is multi-layer/multi-band
+    or unreadable.
+    """
+    source_format, is_vector = detect(path)
+    if is_vector:
+        return _inspect_vector(path, source_format)
+    return _inspect_raster(path, source_format)
+
+
+def _inspect_vector(path: Path, source_format: str) -> SourceMetadata:
+    try:
+        layers = fiona.listlayers(str(path))
+    except Exception as exc:
+        raise SourceRejected(f"could not list layers: {exc}") from exc
+
+    if len(layers) > 1:
+        raise SourceRejected(
+            f"source contains {len(layers)} layers ({', '.join(layers[:3])}…); "
+            f"Phase A supports single-layer sources only. "
+            f"Extract one layer at a time with `ogr2ogr -f GPKG out.gpkg in.gpkg <layer>`."
+        )
+
+    try:
+        with fiona.open(str(path)) as src:
+            schema = src.schema or {}
+            geom_type = schema.get("geometry")
+            crs_wkt = src.crs_wkt or None
+            # Pull the first feature so we can probe for Z even when the
+            # schema reports plain 2D (some sources carry Z on features).
+            first_feat = next(iter(src), None)
+    except Exception as exc:
+        raise SourceRejected(f"could not open layer: {exc}") from exc
+
+    if not geom_type or geom_type == "Unknown":
+        raise SourceRejected(
+            "source has mixed or unknown geometry type; Phase A supports a "
+            "single concrete geometry type per layer (or mixed Polygon/MultiPolygon "
+            "and similar pairs, which the transformer auto-promotes)."
+        )
+
+    # Schema-level Z/M check. Use precise suffix match — "M" in "Multi…"
+    # would false-positive a substring search.
+    if (
+        geom_type.startswith("3D ")
+        or geom_type.endswith("Z")
+        or geom_type.endswith("M")
+    ):
+        raise SourceRejected(
+            f"source layer geometry '{geom_type}' has Z/M dimensions; "
+            f"Y2Y standard is 2D only. Strip with `ogr2ogr -dim 2 …` "
+            f"before re-dropping."
+        )
+
+    # Feature-level Z probe — catch sources whose schema lies about 2D-ness.
+    if first_feat is not None:
+        from shapely.geometry import shape
+
+        try:
+            geom_dict = (
+                first_feat.get("geometry")
+                if isinstance(first_feat, dict)
+                else first_feat["geometry"]
+            )
+            if geom_dict is not None and shape(geom_dict).has_z:
+                raise SourceRejected(
+                    "source has 3D (Z) geometries on individual features even "
+                    "though the layer schema reports 2D; Y2Y standard is 2D only. "
+                    "Strip with `ogr2ogr -dim 2 …` before re-dropping."
+                )
+        except SourceRejected:
+            raise
+        except Exception:
+            # If we can't probe the geometry, defer to post-transform validation.
+            pass
+
+    crs_str = _crs_authority_string_from_wkt(crs_wkt)
+    if not crs_str:
+        raise SourceRejected(
+            "source has no valid CRS defined. Set the CRS in the source "
+            "(e.g. add a .prj for Shapefile, or `gdal_edit -a_srs EPSG:4326 …`) "
+            "before re-dropping into queue/incoming/."
+        )
+
+    return SourceMetadata(
+        source_format=source_format,
+        source_filename=path.name,
+        source_crs=crs_str,
+        source_layer=None,
+        is_vector=True,
+    )
+
+
+def _inspect_raster(path: Path, source_format: str) -> SourceMetadata:
+    try:
+        with rasterio.open(path) as ds:
+            band_count = ds.count
+            crs = ds.crs
+    except Exception as exc:
+        raise SourceRejected(f"could not open raster: {exc}") from exc
+
+    if band_count != 1:
+        raise SourceRejected(
+            f"source has {band_count} bands; Phase A supports single-band only. "
+            f"Extract bands with `gdal_translate -b N in.tif out_band_N.tif` first."
+        )
+
+    crs_str = None
+    if crs:
+        try:
+            crs_str = _crs_authority_string_from_wkt(crs.to_wkt())
+        except Exception:
+            crs_str = None
+    if not crs_str:
+        raise SourceRejected(
+            "source raster has no valid CRS defined. Set the CRS in the source "
+            "(`gdal_edit -a_srs EPSG:… in.tif`) before re-dropping into queue/incoming/."
+        )
+
+    return SourceMetadata(
+        source_format=source_format,
+        source_filename=path.name,
+        source_crs=crs_str,
+        source_layer=None,
+        is_vector=False,
+    )
+
+
+def candidate_paths(incoming: Path) -> Iterable[Path]:
+    """Yield the *primary* file for each candidate dataset in incoming/.
+
+    Skips hidden files, directories, Shapefile sidecars, and unrecognized
+    extensions. Each yielded path becomes one row in pending.xlsx.
+    """
+    for entry in sorted(incoming.iterdir()):
+        if not entry.is_file():
+            continue
+        if entry.name.startswith("."):
+            continue
+        if not is_recognized(entry):
+            # Could be a Shapefile sidecar; only counts when there's a leader.
+            continue
+        yield entry
+
+
+def _crs_authority_string_from_wkt(wkt: str | None) -> str | None:
+    """Best-effort identifier string from a CRS WKT.
+
+    Preference order:
+
+    1. ``AUTHORITY:CODE`` from ESRI or EPSG when the CRS resolves to one.
+    2. The CRS's declared name (e.g. ``"WGS_1984_Albers"``) for custom
+       projections that lack an authority code. The leading absence of
+       a colon distinguishes these from authority-coded values; the name
+       alone is enough provenance to recover the source-archive .prj.
+    3. ``None`` only when nothing meaningful can be extracted.
+    """
+    if not wkt:
+        return None
+    from pyproj import CRS  # local import keeps module load light
+
+    try:
+        crs = CRS.from_wkt(wkt)
+    except Exception:
+        return None
+    for auth in ("ESRI", "EPSG"):
+        result = crs.to_authority(auth_name=auth)
+        if result:
+            return f"{result[0]}:{result[1]}"
+    result = crs.to_authority()
+    if result:
+        return f"{result[0]}:{result[1]}"
+    # No authority code resolves — fall back to the CRS name.
+    name = (crs.name or "").strip()
+    if name and name.lower() != "unknown":
+        return name
+    return None

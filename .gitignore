@@ -1,0 +1,60 @@
+# --- Canonical data (tracked via inventory, not git) ---
+library/**
+!library/
+!library/**/
+!library/**/.gitkeep
+
+# --- Queue working directories ---
+queue/incoming/**
+!queue/incoming/
+!queue/incoming/.gitkeep
+queue/processing/**
+!queue/processing/
+!queue/processing/.gitkeep
+queue/rejected/**
+!queue/rejected/
+!queue/rejected/.gitkeep
+queue/archived/**
+!queue/archived/
+!queue/archived/.gitkeep
+
+# --- Generated artifacts ---
+inventory/inventory.xlsx
+reports/**
+!reports/
+!reports/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- OS cruft ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.parallels-*
+*.lnk
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
