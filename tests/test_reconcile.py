@@ -57,6 +57,8 @@ def _populate_one_dataset(
 
 
 def _reconcile(project_tree: dict[str, Path], **kwargs: Any) -> reconcile.ReconcileResult:
+    kwargs.setdefault("actor", "tester")
+    kwargs.setdefault("changelog_path", project_tree["changelog"])
     return reconcile.reconcile(
         project_tree["library"], project_tree["inventory"],
         project_tree["root"] / "reports", **kwargs,
@@ -107,18 +109,59 @@ def test_reconcile_detects_ghost(project_tree, valid_gpkg_factory) -> None:
     assert result.ghosts[0].path == rel_path
 
 
-def test_reconcile_detects_drift_when_file_modified(project_tree, valid_gpkg_factory) -> None:
-    _, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
-    # Append bytes — changes size + mtime + checksum
+def test_reconcile_auto_resolves_drift_when_file_still_canonical(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """Canonical-passing drift is auto-resolved via lifecycle.refresh."""
+    dataset_id, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    # Append bytes — changes size + mtime + checksum. SQLite/GPKG tolerates
+    # trailing junk so the file stays readable and canonical.
     with (project_tree["library"] / rel_path).open("ab") as f:
-        f.write(b"extra bytes that bust the snapshot")
+        f.write(b"extra bytes that change the snapshot but stay canonical")
 
     result = _reconcile(project_tree)
 
+    # No outstanding drift — auto-resolved via refresh.
+    assert len(result.drift) == 0
+    assert len(result.auto_resolved) == 1
+    assert "size_bytes" in result.auto_resolved[0].reason
+
+    # Inventory snapshot updated to match the file
+    inv = inventory_manager.load_inventory(project_tree["inventory"])
+    assert int(inv[0]["size_bytes"]) == (project_tree["library"] / rel_path).stat().st_size
+
+    # Changelog records the auto-refresh
+    log = project_tree["changelog"].read_text()
+    assert "— refresh — " in log
+    assert dataset_id in log
+
+
+def test_reconcile_does_not_auto_resolve_when_file_no_longer_canonical(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """If the file fails canonical validators, drift stays as an action item."""
+    _, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    # Overwrite with garbage — file is no longer a valid GPKG.
+    (project_tree["library"] / rel_path).write_bytes(b"this is not a GPKG anymore")
+
+    result = _reconcile(project_tree)
+
+    # Schema violation fired; drift kept as action item; no auto-resolve.
+    assert len(result.schema_violations) >= 1
+    assert len(result.drift) >= 1
+    assert len(result.auto_resolved) == 0
+
+
+def test_reconcile_apply_drift_can_be_disabled(project_tree, valid_gpkg_factory) -> None:
+    """apply_drift=False reverts to read-only behaviour for drift findings."""
+    _, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    with (project_tree["library"] / rel_path).open("ab") as f:
+        f.write(b"more bytes")
+
+    result = _reconcile(project_tree, apply_drift=False)
+
     assert len(result.drift) == 1
-    # Fast mode catches via size or mtime first
-    reason = result.drift[0].reason
-    assert "size_bytes" in reason or "mtime" in reason
+    assert len(result.auto_resolved) == 0
 
 
 def test_reconcile_detects_tombstoned_but_present_as_violation(

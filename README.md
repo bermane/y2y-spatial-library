@@ -118,6 +118,7 @@ All three append a matching entry to `changelog.md`; the actor is
 y2y update <dataset_id> --set <field>=<value> [--set …]
 y2y rename <dataset_id> <new-library-relative-path>
 y2y tombstone <dataset_id> [--reason "…"]
+y2y refresh <dataset_id>
 ```
 
 - **`update`** changes non-locked fields on a row — `title`,
@@ -136,6 +137,14 @@ y2y tombstone <dataset_id> [--reason "…"]
 - **`tombstone`** sets `status=tombstoned`, deletes the file from
   `library/`, and retains the row as an audit record. Irreversible;
   prompts for confirmation.
+- **`refresh`** re-stats the file in `library/` and updates the
+  inventory's intrinsic snapshot (`checksum_sha256`, `size_bytes`,
+  `mtime`, `crs`, `geographic_extent_bbox`) to match. Use after
+  editing a library file in place. Validators gate the update:
+  refresh refuses to record a state where the file has lost canonical
+  compliance. Mostly redundant with reconcile's auto-apply (below) —
+  use it when you want to update *one* row immediately rather than
+  wait for the next reconcile.
 
 ## Reconciliation
 
@@ -149,22 +158,30 @@ y2y reconcile --deep         # recompute SHA-256 for every file
 y2y reconcile --fix-renames  # interactively confirm and apply detected renames
 ```
 
-Findings fall into five categories:
+Findings fall into six categories:
 
-| Category              | Meaning                                                                   |
-| --------------------- | ------------------------------------------------------------------------- |
-| **orphans**           | File in `library/` with no matching inventory row                         |
-| **ghosts**            | Inventory row whose file is missing from disk                             |
-| **drift**             | Path matches but checksum/size/mtime disagree with the snapshot           |
-| **schema violations** | File no longer satisfies format/CRS/naming, or `status=tombstoned` but file is still present |
-| **renames**           | (deep only) ghost+orphan pairs whose checksums match — the file was moved |
+| Category              | Meaning                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| **orphans**           | File in `library/` with no matching inventory row                                                    |
+| **ghosts**            | Inventory row whose file is missing from disk                                                        |
+| **drift**             | Path matches, content changed, **and** file is no longer canonical                                   |
+| **schema violations** | File no longer satisfies format/CRS/naming, or `status=tombstoned` but file is still present         |
+| **renames**           | (deep only) ghost+orphan pairs whose checksums match — the file was moved                            |
+| **auto-resolved drift** | Path matches, content changed, **but** file is still canonical — snapshot auto-refreshed (informational) |
 
-`--fix-renames` is the only command that mutates the inventory in
-response to a reconcile finding. It re-runs reconcile in deep mode,
-prompts the steward `apply this rename? [y/N]` for each detected pair,
-and applies confirmed ones via `lifecycle.rename`. Every other finding
-type is surfaced for the steward to investigate manually — auto-fixing
-is deliberately not offered (DESIGN.md §2).
+Reconcile mutates the inventory in two narrow cases (DESIGN.md §2):
+
+- **Drift on canonical files** auto-applies via `lifecycle.refresh` —
+  inventory's intrinsic snapshot updates to match the file. Logged to
+  the changelog as a `refresh` entry. Pass `--no-apply-drift` to
+  disable for a strict report-only run.
+- **Renames** apply only with `--fix-renames`, which prompts
+  `apply this rename? [y/N]` for each detected pair and applies
+  confirmed ones via `lifecycle.rename`.
+
+Other categories — orphans, ghosts (unpaired with orphans), schema
+violations — surface for manual investigation; auto-fixing them is
+deliberately not offered.
 
 ## Taxonomy
 

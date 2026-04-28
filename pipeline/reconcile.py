@@ -1,20 +1,25 @@
 """Reconciliation: detect drift between library/ and inventory.xlsx.
 
-Reconciliation is **read-only**. It never modifies library/ or the
-inventory — it only produces a timestamped markdown report in
-reports/ that the data steward acts on manually.
+Reconciliation produces a timestamped markdown report in ``reports/``.
+By default it is **almost-read-only**: the only mutation it performs is
+auto-applying drift findings whose files still pass canonical
+validators. Other findings (orphans, ghosts, schema violations,
+renames) remain steward-actioned via the report or via
+``--fix-renames``.
 
-Four drift categories (DESIGN.md §2):
+Categories (DESIGN.md §2):
 
     orphans            Files in library/ with no matching inventory row.
     ghosts             Inventory rows whose file is missing from disk.
-    drift              path matches but checksum/size/mtime disagree.
+    drift              Path matches, content changed, AND file is no
+                       longer canonical. Surfaces alongside schema_violations.
     schema_violations  File no longer satisfies format/CRS/naming, or
                        the inventory's status disagrees with disk
                        (e.g. row tombstoned but file still present).
-
-Plus a fifth derived category surfaced separately in the report:
-
+    auto_resolved      Path matches, content changed, but file is still
+                       canonical → snapshot auto-refreshed via
+                       ``lifecycle.refresh``. Informational only; no
+                       further steward action needed.
     renames            (deep only) ghost+orphan pairs where checksums
                        match — i.e. the file was moved within library/.
 
@@ -53,10 +58,12 @@ class ReconcileResult(NamedTuple):
     drift: list[Finding]
     schema_violations: list[Finding]
     renames: list[Finding]
+    auto_resolved: list[Finding]
     deep: bool
 
     @property
     def total_findings(self) -> int:
+        # auto_resolved is informational, not an action item.
         return (
             len(self.orphans)
             + len(self.ghosts)
@@ -71,12 +78,30 @@ def reconcile(
     inventory_path: Path,
     reports_dir: Path,
     *,
+    actor: str,
+    changelog_path: Path | None = None,
     deep: bool = False,
+    apply_drift: bool = True,
 ) -> ReconcileResult:
-    """Detect drift and write a report. Returns counts and report path.
+    """Detect drift, auto-resolve canonical-passing drift, write a report.
 
-    See DESIGN.md §2-§4 for category semantics and mode trade-offs.
+    For each row whose file is on disk:
+
+    1. Run canonical validators on the file.
+    2. Check for drift (size/mtime always; checksum if ``deep``).
+    3. If drift detected:
+       - **and** validators passed **and** ``apply_drift`` is True:
+         call ``lifecycle.refresh`` to update the inventory's snapshot.
+         Listed in ``auto_resolved`` (informational).
+       - **otherwise**: listed in ``drift`` (action item; the file is
+         non-canonical or apply was disabled).
+
+    See DESIGN.md §2 for the broader read-mostly policy and the
+    explicit auto-fix exceptions.
     """
+    if changelog_path is None:
+        changelog_path = inventory_path.parent / "changelog.md"
+
     library_root.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -91,6 +116,7 @@ def reconcile(
     ghosts: list[Finding] = []
     drift: list[Finding] = []
     schema_violations: list[Finding] = []
+    auto_resolved: list[Finding] = []
 
     matched_paths: set[str] = set()
 
@@ -119,15 +145,36 @@ def reconcile(
             matched_paths.add(fp)
             continue
 
-        # Path matches. Run drift + schema checks.
+        # Path matches. Run schema + drift checks.
         matched_paths.add(fp)
+
+        schema_failures = validate_all(full_path)
+        for check, reason in schema_failures:
+            schema_violations.append(Finding(did, fp, f"{check}: {reason}"))
 
         drift_reason = _check_drift(full_path, row, deep=deep)
         if drift_reason:
-            drift.append(Finding(did, fp, drift_reason))
+            if not schema_failures and apply_drift and did:
+                # Canonical drift → safe to auto-resolve via refresh.
+                from . import lifecycle
 
-        for check, reason in validate_all(full_path):
-            schema_violations.append(Finding(did, fp, f"{check}: {reason}"))
+                try:
+                    lifecycle.refresh(
+                        inventory_path,
+                        changelog_path,
+                        library_root,
+                        dataset_id=did,
+                        actor=actor,
+                    )
+                    auto_resolved.append(
+                        Finding(did, fp, f"snapshot refreshed: {drift_reason}")
+                    )
+                except lifecycle.LifecycleError as exc:
+                    drift.append(
+                        Finding(did, fp, f"{drift_reason} (auto-refresh failed: {exc})")
+                    )
+            else:
+                drift.append(Finding(did, fp, drift_reason))
 
     # Anything in library/ that no inventory row claimed → orphan.
     for rel_path in sorted(library_files):
@@ -150,6 +197,7 @@ def reconcile(
         drift=drift,
         schema_violations=schema_violations,
         renames=renames,
+        auto_resolved=auto_resolved,
         deep=deep,
     )
 
@@ -162,6 +210,7 @@ def reconcile(
         drift=drift,
         schema_violations=schema_violations,
         renames=renames,
+        auto_resolved=auto_resolved,
         deep=deep,
     )
 
@@ -257,6 +306,7 @@ def _write_report(
     drift: list[Finding],
     schema_violations: list[Finding],
     renames: list[Finding],
+    auto_resolved: list[Finding],
     deep: bool,
 ) -> Path:
     mode = "deep" if deep else "fast"
@@ -276,9 +326,10 @@ def _write_report(
         f"- Rows in inventory: {len(inventory_rows)}",
         f"- Orphans: {len(orphans)}",
         f"- Ghosts: {len(ghosts)}",
-        f"- Drift: {len(drift)}",
+        f"- Drift (action items): {len(drift)}",
         f"- Schema violations: {len(schema_violations)}",
         f"- Renames detected: {len(renames)}",
+        f"- Auto-resolved drift (informational): {len(auto_resolved)}",
         "",
     ]
 
@@ -295,9 +346,13 @@ def _write_report(
 
     section("Orphans (in library/ but not in inventory)", orphans)
     section("Ghosts (in inventory but missing from library/)", ghosts)
-    section("Drift (file changed since ingestion)", drift)
+    section("Drift (file changed AND not canonical — action required)", drift)
     section("Schema violations (file no longer matches its admission criteria)", schema_violations)
     section("Renames (deep mode — file moved within library/)", renames)
+    section(
+        "Auto-resolved drift (file changed but still canonical — snapshot refreshed)",
+        auto_resolved,
+    )
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return report_path

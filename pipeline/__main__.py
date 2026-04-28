@@ -197,6 +197,40 @@ def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None
 
 @cli.command()
 @click.argument("dataset_id")
+@click.option(
+    "--actor",
+    default=None,
+    help="Name to record as the changelog actor. Defaults to $USER.",
+)
+@click.pass_context
+def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
+    """Re-stat a library file after an in-place edit and update the inventory snapshot.
+
+    Use after editing a library file (e.g. adding a vector field). The
+    file must still pass canonical validators — refresh refuses to
+    record bad state in the inventory.
+    """
+    from . import lifecycle
+
+    inventory, changelog, library = _resolve_paths(ctx.obj["root"])
+
+    try:
+        row = lifecycle.refresh(
+            inventory, changelog, library,
+            dataset_id=dataset_id, actor=actor or _default_actor(),
+        )
+    except lifecycle.LifecycleError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print(
+        f"[green]refresh complete[/green] — "
+        f"dataset_id=[bold]{dataset_id}[/bold]"
+    )
+    console.print(f"  date_modified: [cyan]{row.get('date_modified')}[/cyan]")
+
+
+@cli.command()
+@click.argument("dataset_id")
 @click.option("--reason", default=None, help="Optional reason recorded in the changelog.")
 @click.option(
     "--actor",
@@ -263,7 +297,11 @@ def reconcile(
     if fix_renames:
         deep = True  # rename detection requires deep mode
 
-    result = reconcile_mod.reconcile(library, inventory, reports, deep=deep)
+    actor_name = actor or _default_actor()
+    result = reconcile_mod.reconcile(
+        library, inventory, reports,
+        actor=actor_name, changelog_path=changelog, deep=deep,
+    )
 
     mode = "deep" if deep else "fast"
     headline = "green" if result.total_findings == 0 else "yellow"
@@ -279,6 +317,11 @@ def reconcile(
         f"schema violations: [bold]{len(result.schema_violations)}[/bold], "
         f"renames: [bold]{len(result.renames)}[/bold]"
     )
+    if result.auto_resolved:
+        console.print(
+            f"  [dim]auto-resolved drift: {len(result.auto_resolved)} "
+            f"(snapshot refreshed; see changelog)[/dim]"
+        )
     console.print(f"  report: [cyan]{result.report_path}[/cyan]")
 
     if not fix_renames:

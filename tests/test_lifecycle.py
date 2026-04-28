@@ -227,6 +227,111 @@ def test_tombstone_handles_already_absent_file(project_tree, populate_dataset) -
     assert "file already absent" in log
 
 
+# --- refresh ------------------------------------------------------------
+
+def test_refresh_applies_when_mtime_changed(project_tree, populate_dataset) -> None:
+    """mtime change without content change still gets recorded."""
+    import os
+
+    dataset_id, rel = populate_dataset()
+    full = project_tree["library"] / rel
+
+    inv_before = inventory_manager.load_inventory(project_tree["inventory"])[0]
+
+    st = full.stat()
+    os.utime(full, (st.st_atime, st.st_mtime + 60))
+
+    row = lifecycle.refresh(
+        project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+        dataset_id=dataset_id, actor="ethan",
+    )
+
+    assert row["mtime"] != inv_before["mtime"]
+    assert row["checksum_sha256"] == inv_before["checksum_sha256"]
+    log = project_tree["changelog"].read_text()
+    assert "— refresh — " in log
+    assert "mtime" in log
+
+
+def test_refresh_records_size_and_checksum_diff(project_tree, populate_dataset) -> None:
+    dataset_id, rel = populate_dataset()
+    full = project_tree["library"] / rel
+
+    inv_before = inventory_manager.load_inventory(project_tree["inventory"])[0]
+    # Append bytes — changes size + mtime + checksum, file still canonical (GPKG/SQLite tolerates trailing junk)
+    with full.open("ab") as f:
+        f.write(b"trailing bytes that don't break canonical validity")
+
+    row = lifecycle.refresh(
+        project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+        dataset_id=dataset_id, actor="ethan",
+    )
+
+    assert row["checksum_sha256"] != inv_before["checksum_sha256"]
+    assert int(row["size_bytes"]) > int(inv_before["size_bytes"])
+    log = project_tree["changelog"].read_text()
+    assert "checksum_sha256" in log
+
+
+def test_refresh_noop_when_no_drift(project_tree, populate_dataset) -> None:
+    dataset_id, _ = populate_dataset()
+    log_before = project_tree["changelog"].read_text()
+
+    lifecycle.refresh(
+        project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+        dataset_id=dataset_id, actor="ethan",
+    )
+
+    log_after = project_tree["changelog"].read_text()
+    assert log_after == log_before  # no entry appended
+
+
+def test_refresh_rejects_missing_file(project_tree, populate_dataset) -> None:
+    dataset_id, rel = populate_dataset()
+    (project_tree["library"] / rel).unlink()
+
+    with pytest.raises(lifecycle.LifecycleError, match="not found"):
+        lifecycle.refresh(
+            project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+            dataset_id=dataset_id, actor="ethan",
+        )
+
+
+def test_refresh_rejects_tombstoned(project_tree, populate_dataset) -> None:
+    dataset_id, _ = populate_dataset()
+    lifecycle.tombstone(
+        project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+        dataset_id=dataset_id, actor="ethan",
+    )
+
+    with pytest.raises(lifecycle.LifecycleError, match="tombstoned"):
+        lifecycle.refresh(
+            project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+            dataset_id=dataset_id, actor="ethan",
+        )
+
+
+def test_refresh_rejects_unknown_dataset_id(project_tree) -> None:
+    with pytest.raises(lifecycle.LifecycleError, match="not found"):
+        lifecycle.refresh(
+            project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+            dataset_id="ds_unknownnnnn", actor="ethan",
+        )
+
+
+def test_refresh_rejects_when_canonical_validation_fails(project_tree, populate_dataset) -> None:
+    """If the in-place edit broke the file, refresh refuses to record bad state."""
+    dataset_id, rel = populate_dataset()
+    full = project_tree["library"] / rel
+    full.write_bytes(b"not a gpkg anymore")
+
+    with pytest.raises(lifecycle.LifecycleError, match="canonical validators"):
+        lifecycle.refresh(
+            project_tree["inventory"], project_tree["changelog"], project_tree["library"],
+            dataset_id=dataset_id, actor="ethan",
+        )
+
+
 def test_tombstone_rejects_already_tombstoned(project_tree, populate_dataset) -> None:
     dataset_id, _ = populate_dataset()
     lifecycle.tombstone(

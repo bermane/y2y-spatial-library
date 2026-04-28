@@ -26,45 +26,47 @@ CHANGELOG_FILENAME = "changelog.md"
 # Ordered (name, role) — matches DESIGN.md §7 groupings.
 # Roles: "locked" (auto-filled, never edited), "overridable" (auto-filled
 # but the steward may correct), "required" (steward must fill), "optional".
+# Column order is tuned for steward-UX readability when scanning
+# inventory.xlsx, not for canonical-grouping symmetry. The conceptual
+# groupings in DESIGN.md §7 are still the source-of-truth for
+# *what* each column means; this list controls *how* they're laid
+# out in the workbook.
 INVENTORY_COLUMNS: list[tuple[str, str]] = [
-    # Identity & location — file-identity columns the steward reviews first.
+    # Identity (lead): which dataset is this and where does it sit in the taxonomy?
     ("dataset_id", "locked"),
     ("category", "overridable"),
     ("subcategory", "overridable"),
-    ("file_path", "locked"),
-    ("format", "locked"),
-    # Source provenance — captured at scan, immutable thereafter.
-    ("source_format", "locked"),
-    ("source_filename", "locked"),
-    ("source_crs", "locked"),
-    ("source_layer", "locked"),
-    # Intrinsic snapshot — computed from the *transformed* file at approve.
-    ("crs", "locked"),
-    ("checksum_sha256", "locked"),
-    ("size_bytes", "locked"),
-    ("mtime", "locked"),
-    ("geographic_extent_bbox", "locked"),
-    # Classification (raster only; null for vector).
-    ("classification", "overridable"),
-    # History & governance
-    ("status", "overridable"),
-    ("date_added", "locked"),
-    ("date_modified", "locked"),
-    ("data_steward", "required"),
-    # AGOL Dublin Core+ — `title` is the AGOL item title; lives here, not
-    # in identity, because it's authored display text not a file identifier.
-    # Versioning, originating org, and licensing are folded into the
-    # free-text `terms_of_use` and `acknowledgements` fields by design;
-    # see DESIGN.md §7.
+    # AGOL-facing extrinsic content: what the steward authored.
     ("title", "required"),
     ("summary", "required"),
     ("description", "required"),
     ("tags", "required"),
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
-    # AGOL linkage & freeform
+    ("data_steward", "required"),
+    # Type and lifecycle state.
+    ("classification", "overridable"),
+    ("status", "overridable"),
+    # Dates and on-disk location of the canonical file.
+    ("date_added", "locked"),
+    ("date_modified", "locked"),
+    ("file_path", "locked"),
+    ("format", "locked"),
+    # Intrinsic snapshot (drift-detection only).
+    ("crs", "locked"),
+    ("checksum_sha256", "locked"),
+    ("size_bytes", "locked"),
+    ("mtime", "locked"),
+    ("geographic_extent_bbox", "locked"),
+    # AGOL linkage & freeform — between snapshot and source provenance.
     ("agol_item_id", "optional"),
     ("notes", "optional"),
+    # Source provenance — pushed to the back: forensic columns the
+    # steward reads occasionally, never edits.
+    ("source_format", "locked"),
+    ("source_filename", "locked"),
+    ("source_crs", "locked"),
+    ("source_layer", "locked"),
 ]
 
 INVENTORY_COLUMN_NAMES: list[str] = [name for name, _ in INVENTORY_COLUMNS]

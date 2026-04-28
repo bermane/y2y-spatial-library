@@ -20,6 +20,8 @@ queue/archived/**
 
 # --- Generated artifacts ---
 inventory/inventory.xlsx
+# Excel temp lock files (created when inventory.xlsx is open)
+**/~$*.xlsx
 reports/**
 !reports/
 !reports/.gitkeep

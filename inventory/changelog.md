@@ -9,12 +9,12 @@ Format (one block per entry):
 
 ```
 ## YYYY-MM-DDTHH:MM:SSZ — <action> — <dataset_id>
-actor:  <data_steward>
+actor:  <command-runner ($USER)>
 path:   <library-relative path, or "—" for metadata-only changes>
 detail: <one-line human-readable summary>
 ```
 
-Valid actions: `add`, `update`, `rename`, `remove`, `metadata`, `reconcile-note`.
+Valid actions: `add`, `update`, `rename`, `remove`, `refresh`, `metadata`, `reconcile-note`.
 
 ---
 

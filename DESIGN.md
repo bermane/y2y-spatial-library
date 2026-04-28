@@ -50,14 +50,29 @@ decisions belong to the steward. The cost of a false auto-heal (silently
 writing bad metadata back to the inventory, or deleting a real file as an
 "orphan") is much higher than the cost of the steward resolving a report.
 
-**Narrow exception — `--fix-renames`.** The one case where reconciliation
-*can* mutate inventory is rename detection in deep mode: a ghost+orphan
-pair whose checksums match is unambiguously a moved file. The fix is
-still steward-gated — `y2y reconcile --fix-renames` re-runs reconcile,
-prompts `apply this rename? [y/N]` for each candidate, and applies
-confirmed ones via `lifecycle.rename`. Every other finding is left for
-manual investigation; auto-fixing other categories would re-introduce
-the silent-decision risk above.
+**Narrow exceptions where reconcile mutates.** Two cases — both
+unambiguously safe under canonical validation:
+
+1. **Drift on a still-canonical file → auto-resolved.** When reconcile
+   finds size/mtime/checksum drift on a row whose file still passes
+   the format/CRS/naming validators, it calls
+   `lifecycle.refresh` to update the inventory snapshot. The change is
+   logged to the changelog as a `refresh` entry with the per-field
+   diff. Listed in the report under "Auto-resolved drift" for
+   visibility, not as an action item. Disable with `--no-apply-drift`
+   if you need a strict report-only run.
+2. **Renames** (deep mode, opt-in via `--fix-renames`). A ghost+orphan
+   pair whose checksums match is unambiguously a moved file. The fix
+   is steward-gated per-row — `y2y reconcile --fix-renames` prompts
+   `apply this rename? [y/N]` for each candidate and applies
+   confirmed ones via `lifecycle.rename`.
+
+Every other category — orphans, ghosts (not paired with an orphan),
+schema violations — is reported for manual investigation. Auto-fixing
+those re-introduces the silent-decision risk above. The two exceptions
+are safe because both rest on validation: drift only auto-resolves
+when the file is canonical; renames only auto-fix when the steward
+confirms the checksum-paired path mapping.
 
 ---
 
@@ -160,6 +175,13 @@ when the file has changed since ingestion. Everything else intrinsic is
 derived on read.
 
 ### Columns
+
+The groupings below describe the **conceptual roles** of each column.
+The on-disk **column order** in `inventory.xlsx` does not match these
+groupings — it's tuned for the steward's eye-flow when reading the
+sheet (identity → AGOL content → state → location → snapshot →
+freeform → source provenance at the back). The authoritative on-disk
+order is in `pipeline/inventory_manager.py:INVENTORY_COLUMNS`.
 
 #### Identity & location (required)
 
@@ -485,7 +507,7 @@ who receives library data.
 
 ## 10. Post-ingest lifecycle operations
 
-Three operations on rows that are already in `inventory.xlsx`. Each
+Four operations on rows that are already in `inventory.xlsx`. Each
 appends a corresponding action to the changelog.
 
 | Command         | What it changes                                                       | Changelog action |
@@ -493,6 +515,7 @@ appends a corresponding action to the changelog.
 | `y2y update`    | Non-locked fields on the row                                          | `update`         |
 | `y2y rename`    | The file's path within `library/`; inventory's `file_path`, `category`, and (if applicable) `subcategory` | `rename`         |
 | `y2y tombstone` | Sets `status=tombstoned` and deletes the file from `library/`         | `remove`         |
+| `y2y refresh`   | Re-stats the file on disk; updates the intrinsic snapshot (`checksum_sha256`, `size_bytes`, `mtime`, `crs`, `geographic_extent_bbox`) to match | `refresh`        |
 
 ### What `update` may and may not change
 
@@ -534,6 +557,30 @@ The new path's filename must pass the naming validator; its category
 is therefore also the way to **re-categorise** a dataset — point it
 at a path under a different `<Category>/` folder and the inventory's
 `category` field follows.
+
+### Refresh: accept canonical drift after editing in place
+
+Editing a library file directly (adding a vector field, recomputing
+attributes, regenerating overviews) leaves the inventory's intrinsic
+snapshot stale. `refresh` is the explicit "accept the new state"
+operation: it re-stats the file, recomputes the snapshot, runs the
+canonical validators, and writes a `refresh` changelog entry with the
+per-field diff.
+
+Two important properties:
+
+- **Validation gates the update.** If the in-place edit broke
+  canonical compliance (added Z, wrong CRS, mixed geometry, dropped
+  ZSTD, etc.), `refresh` errors and the inventory snapshot stays old.
+  The steward fixes the file and re-runs.
+- **It's the only operation that touches locked snapshot columns**,
+  and only by recomputing from the file — never from arbitrary
+  steward input.
+
+In practice the steward rarely runs this manually: `y2y reconcile`
+auto-applies refresh to drift findings whose files pass validators
+(see §2). The CLI is there for one-off use after an in-place edit
+when you don't want to wait for the next reconcile cycle.
 
 ### Tombstone is irreversible by design
 

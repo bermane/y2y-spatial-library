@@ -1,15 +1,19 @@
 """Post-ingest lifecycle operations on inventory rows.
 
-Three operations:
+Four operations:
 
 - ``update()``    Change non-locked fields on an existing row.
 - ``rename()``    Move a file within library/ and record the new path.
 - ``tombstone()`` Mark a row removed (status='tombstoned') and delete the file.
+- ``refresh()``   Re-stat a library file after an in-place edit and update
+                  the inventory's intrinsic snapshot to match.
 
 Each appends an entry to the changelog with the corresponding action
-(``update`` / ``rename`` / ``remove``). None of them touch the
-filesystem-derived locked columns (checksum, size, mtime, crs, bbox,
-dataset_id, date_added).
+(``update`` / ``rename`` / ``remove`` / ``refresh``). The first three
+never touch filesystem-derived locked columns (checksum, size, mtime,
+crs, bbox); ``refresh`` is the *only* operation that updates them, and
+only by recomputing them from the current file on disk — never from
+arbitrary steward input.
 
 See DESIGN.md §7 (column roles) and the changelog header (valid actions).
 """
@@ -20,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import inventory_manager, taxonomy, utils
+from .validators import validate_all
 from .validators.naming import validate_naming
 
 
@@ -288,5 +293,118 @@ def tombstone(
         actor=actor,
         path=file_path or "—",
         detail=detail,
+    )
+    return target
+
+
+# --- refresh ------------------------------------------------------------
+
+# Snapshot fields recomputed from disk. Other locked columns
+# (dataset_id, file_path, source_*, date_added) are not touched.
+_REFRESH_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "checksum_sha256", "size_bytes", "mtime", "crs", "geographic_extent_bbox",
+)
+
+
+def refresh(
+    inventory_path: Path,
+    changelog_path: Path,
+    library_root: Path,
+    *,
+    dataset_id: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Re-stat the canonical file in library/ and update the inventory snapshot.
+
+    Use after editing a library file in place — adding a vector field,
+    recomputing attribute values, regenerating overviews, etc. — to
+    bring the inventory's intrinsic snapshot up to date with the file
+    on disk. Logs a ``refresh`` entry with the per-field diff.
+
+    The file must still pass canonical validators: ``refresh`` will not
+    accept drift that breaks format/CRS/naming compliance. If the
+    in-place edit produced a non-canonical file, fix the file first
+    (the inventory snapshot stays old in the meantime; reconcile will
+    keep flagging the drift until refresh succeeds or the steward
+    rolls back).
+
+    No-op when nothing has changed.
+    """
+    rows = inventory_manager.load_inventory(inventory_path)
+    target = _find_row(rows, dataset_id)
+
+    if target.get("status") == "tombstoned":
+        raise LifecycleError(
+            f"dataset_id '{dataset_id}' is tombstoned; refresh not allowed"
+        )
+
+    file_path = str(target.get("file_path") or "")
+    if not file_path:
+        raise LifecycleError(f"dataset_id '{dataset_id}' has no file_path")
+
+    full_path = library_root / file_path
+    if not full_path.exists():
+        raise LifecycleError(
+            f"file '{file_path}' not found in library/ — run `y2y reconcile` "
+            f"to investigate the ghost before attempting refresh."
+        )
+
+    # Canonical re-validation. Refusing drift that breaks compliance is
+    # the whole point — refresh is "accept good drift," not "accept any drift."
+    failures = validate_all(full_path)
+    if failures:
+        reasons = "; ".join(f"{check}: {reason}" for check, reason in failures)
+        raise LifecycleError(
+            f"file '{file_path}' fails canonical validators; refusing to "
+            f"record bad state in the inventory. Fix the file first. "
+            f"Failures: {reasons}"
+        )
+
+    # Recompute the snapshot from disk.
+    new_size, new_mtime = utils.stat_signature(full_path)
+    new_checksum = utils.sha256_file(full_path)
+    if utils.is_vector(full_path):
+        crs_obj = utils.read_vector_crs(full_path)
+        bbox = utils.read_vector_bbox(full_path)
+    else:
+        crs_obj = utils.read_raster_crs(full_path)
+        bbox = utils.read_raster_bbox(full_path)
+    new_crs = utils.crs_to_authority_string(crs_obj) if crs_obj else None
+    new_bbox = utils.bbox_to_string(bbox) if bbox else None
+
+    new_snapshot = {
+        "checksum_sha256": new_checksum,
+        "size_bytes": new_size,
+        "mtime": new_mtime,
+        "crs": new_crs,
+        "geographic_extent_bbox": new_bbox,
+    }
+
+    # Diff against existing snapshot.
+    diffs: list[tuple[str, Any, Any]] = []
+    for field in _REFRESH_SNAPSHOT_FIELDS:
+        old = target.get(field)
+        new = new_snapshot[field]
+        if old != new:
+            diffs.append((field, old, new))
+
+    if not diffs:
+        return target  # no-op: nothing to record
+
+    for field, _, new in diffs:
+        target[field] = new
+    target["date_modified"] = utils.utc_now_date()
+
+    inventory_manager.save_inventory(inventory_path, rows)
+
+    detail = " | ".join(f"{f}: {old!r} → {new!r}" for f, old, new in diffs)
+    inventory_manager.append_changelog(
+        changelog_path,
+        timestamp=utils.utc_now_iso(),
+        action="refresh",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=file_path,
+        detail=f"snapshot refreshed from disk: {detail}",
     )
     return target
