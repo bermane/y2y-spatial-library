@@ -215,6 +215,7 @@ the typology file:
 - `Grizzly_Bear`
 - `Multi_Species`
 - `Wolverine`
+- `Other` — catch-all for species that don't fit the named taxa (e.g. fish, birds, single-species datasets outside the core ungulate/bear/wolverine set).
 
 ## Inventory schema
 

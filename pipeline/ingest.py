@@ -47,6 +47,7 @@ from .source_formats import (
     SourceMetadata,
     SourceRejected,
     candidate_paths,
+    raster_bundle,
     shapefile_bundle,
 )
 from .validators import validate_all
@@ -111,11 +112,12 @@ def scan(incoming_dir: Path, processing_dir: Path, rejected_dir: Path) -> ScanRe
             rejected += 1
             continue
 
-        bundle = (
-            shapefile_bundle(entry)
-            if metadata.source_format == "Shapefile"
-            else [entry]
-        )
+        if metadata.source_format == "Shapefile":
+            bundle = shapefile_bundle(entry)
+        elif metadata.source_format == "GeoTIFF":
+            bundle = raster_bundle(entry)
+        else:
+            bundle = [entry]
 
         dataset_id = utils.new_dataset_id()
         dataset_staging = processing_dir / dataset_id
@@ -242,12 +244,14 @@ def _reject_bundle_for(
     rejected_dir: Path,
     failures: list[tuple[str, str]],
 ) -> None:
-    """Move the primary file (and any Shapefile sidecars) to rejected/."""
-    bundle = (
-        shapefile_bundle(primary)
-        if primary.suffix.lower() == ".shp"
-        else [primary]
-    )
+    """Move the primary file (and any sidecars) to rejected/."""
+    ext = primary.suffix.lower()
+    if ext == ".shp":
+        bundle = shapefile_bundle(primary)
+    elif ext in (".tif", ".tiff"):
+        bundle = raster_bundle(primary)
+    else:
+        bundle = [primary]
 
     dest_dir = rejected_dir
     primary_dest = dest_dir / primary.name

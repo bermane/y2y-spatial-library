@@ -56,6 +56,10 @@ SUBCATEGORIES: dict[str, tuple[str, ...]] = {
         "Grizzly Bear",
         "Multi-Species",
         "Wolverine",
+        # Catch-all for species that don't fit the named taxa above
+        # (e.g., fish, birds, single-species datasets outside the
+        # core ungulate/bear/wolverine set).
+        "Other",
     ),
 }
 
@@ -68,6 +72,7 @@ SUBCATEGORY_FOLDERS: dict[str, dict[str, str]] = {
         "Grizzly Bear": "Grizzly_Bear",
         "Multi-Species": "Multi_Species",
         "Wolverine": "Wolverine",
+        "Other": "Other",
     },
 }
 
@@ -125,7 +130,14 @@ def is_valid_subcategory(category: str, subcategory: str | None) -> bool:
 # the steward has to fill manually. As the typology evolves, edit this
 # table — it's the single source of truth for keyword → category mapping.
 
-CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+# Each entry is either a keyword string (default weight 1) or a
+# (keyword, weight) tuple for high-signal terms that should outweigh
+# generic ties. E.g. "ipca" / "wma" / "iucn" are unambiguously
+# Protected Areas territory; if they co-occur with a generic word like
+# "boundary", they should win.
+KeywordEntry = str | tuple[str, int]
+
+CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
     "Administrative & Jurisdictional Boundaries": (
         "boundary", "boundaries", "border", "borders",
         "province", "provincial", "state", "states",
@@ -172,9 +184,10 @@ CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "vegetation", "forest", "grassland",
     ),
     "Protected Areas & Conservation Lands": (
-        "park", "parks", "wilderness", "wma", "ipca",
+        "park", "parks", "wilderness",
+        ("wma", 2), ("ipca", 2), ("iucn", 2),
         "conservation", "easement", "easements",
-        "protected", "iucn",
+        "protected",
     ),
     "Threats, Human Footprint & Infrastructure": (
         "road", "roads", "railway", "railways", "rail",
@@ -190,7 +203,7 @@ SPECIES_SUBCATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "Caribou": ("caribou",),
     "Elk": ("elk",),
     "Goat": ("goat", "goats", "mountain_goat"),
-    "Grizzly Bear": ("grizzly", "grizzlies", "grizzly_bear"),
+    "Grizzly Bear": ("grizzly", "grizzlies", "grizzly_bear", "gb"),
     "Multi-Species": ("multi_species", "multispecies"),
     "Wolverine": ("wolverine", "wolverines"),
 }
@@ -205,6 +218,13 @@ def _matches_word(slug: str, keyword: str) -> bool:
     return f"_{keyword}_" in f"_{slug}_"
 
 
+def _keyword_and_weight(entry: KeywordEntry) -> tuple[str, int]:
+    """Normalize a CATEGORY_KEYWORDS entry to (keyword, weight)."""
+    if isinstance(entry, str):
+        return entry, 1
+    return entry[0], entry[1]
+
+
 def guess_category(text: str) -> str | None:
     """Best-guess top-level category from arbitrary text. None if no match."""
     from . import utils  # local import — avoid circular at module load
@@ -212,7 +232,11 @@ def guess_category(text: str) -> str | None:
     best_cat: str | None = None
     best_score = 0
     for cat, keywords in CATEGORY_KEYWORDS.items():
-        score = sum(1 for kw in keywords if _matches_word(slug, kw))
+        score = 0
+        for entry in keywords:
+            kw, weight = _keyword_and_weight(entry)
+            if _matches_word(slug, kw):
+                score += weight
         if score > best_score:
             best_score = score
             best_cat = cat

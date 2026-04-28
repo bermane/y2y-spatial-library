@@ -33,6 +33,7 @@ def test_species_subcategories_use_display_names() -> None:
     assert "Caribou" in subs
     assert "Grizzly Bear" in subs  # display, not folder
     assert "Multi-Species" in subs
+    assert "Other" in subs  # catch-all for non-listed species
 
 
 def test_subcategory_folders_round_trip() -> None:
@@ -128,3 +129,24 @@ def test_guess_subcategory_only_for_species() -> None:
 
 def test_guess_subcategory_returns_none_when_no_match() -> None:
     assert taxonomy.guess_subcategory("Species & Species at Risk", "habitat_mapping_v1") is None
+
+
+# --- weighted keywords -------------------------------------------------
+
+def test_ipca_outweighs_boundary_for_protected_areas() -> None:
+    """Tied keyword counts: 'ipca' (high-signal, weight 2) beats 'boundary' (weight 1)."""
+    assert taxonomy.guess_category("ross_river_ipca_boundary") == "Protected Areas & Conservation Lands"
+
+
+def test_wma_outweighs_boundary() -> None:
+    assert taxonomy.guess_category("highwood_wma_boundary") == "Protected Areas & Conservation Lands"
+
+
+def test_iucn_outweighs_boundary() -> None:
+    assert taxonomy.guess_category("iucn_areas_boundary") == "Protected Areas & Conservation Lands"
+
+
+def test_gb_keyword_resolves_to_grizzly_bear_subcategory() -> None:
+    species = "Species & Species at Risk"
+    assert taxonomy.guess_subcategory(species, "gb_habitat_female_fall") == "Grizzly Bear"
+    assert taxonomy.guess_subcategory(species, "GBHabitat_Female_Fall") == "Grizzly Bear"

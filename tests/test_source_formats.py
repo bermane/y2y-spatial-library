@@ -55,6 +55,29 @@ def test_shapefile_bundle_collects_sidecars(tmp_path: Path) -> None:
     assert ".dbf" in suffixes
 
 
+def test_raster_bundle_collects_aux_sidecars(tmp_path: Path, valid_cog_factory) -> None:
+    """A .tif with a .tif.aux.xml sibling — both should be in the bundle."""
+    tif = valid_cog_factory("habitat.tif", dest_dir=tmp_path)
+    aux = tmp_path / "habitat.tif.aux.xml"
+    aux.write_text("<PAMDataset/>")  # minimal valid PAM xml stub
+
+    bundle = source_formats.raster_bundle(tif)
+    names = {p.name for p in bundle}
+    assert "habitat.tif" in names
+    assert "habitat.tif.aux.xml" in names
+
+
+def test_raster_bundle_ignores_unrelated_files(tmp_path: Path, valid_cog_factory) -> None:
+    """Sibling files with different stems are NOT in the bundle."""
+    tif = valid_cog_factory("habitat.tif", dest_dir=tmp_path)
+    (tmp_path / "habitat.tif.aux.xml").write_text("<PAMDataset/>")
+    (tmp_path / "different_name.tif.aux.xml").write_text("<PAMDataset/>")
+
+    bundle = source_formats.raster_bundle(tif)
+    names = {p.name for p in bundle}
+    assert "different_name.tif.aux.xml" not in names
+
+
 def test_is_shapefile_sidecar() -> None:
     assert source_formats.is_shapefile_sidecar(Path("roads.shx"))
     assert source_formats.is_shapefile_sidecar(Path("roads.dbf"))
