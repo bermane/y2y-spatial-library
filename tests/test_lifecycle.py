@@ -332,6 +332,32 @@ def test_refresh_rejects_when_canonical_validation_fails(project_tree, populate_
         )
 
 
+def test_lifecycle_ops_refuse_when_inventory_locked(project_tree, populate_dataset) -> None:
+    """All four lifecycle ops abort early if inventory.xlsx is held open by Excel."""
+    from pipeline import inventory_manager
+    dataset_id, _ = populate_dataset()
+
+    # Simulate Excel opening the inventory
+    lock = project_tree["inventory"].parent / f"~${project_tree['inventory'].name}"
+    lock.write_bytes(b"")
+
+    inv = project_tree["inventory"]
+    log = project_tree["changelog"]
+    lib = project_tree["library"]
+
+    with pytest.raises(inventory_manager.InventoryLockedError):
+        lifecycle.update(inv, log, dataset_id=dataset_id, fields={"summary": "x"}, actor="t")
+
+    with pytest.raises(inventory_manager.InventoryLockedError):
+        lifecycle.rename(inv, log, lib, dataset_id=dataset_id, new_path="Water/x.gpkg", actor="t")
+
+    with pytest.raises(inventory_manager.InventoryLockedError):
+        lifecycle.tombstone(inv, log, lib, dataset_id=dataset_id, actor="t")
+
+    with pytest.raises(inventory_manager.InventoryLockedError):
+        lifecycle.refresh(inv, log, lib, dataset_id=dataset_id, actor="t")
+
+
 def test_tombstone_rejects_already_tombstoned(project_tree, populate_dataset) -> None:
     dataset_id, _ = populate_dataset()
     lifecycle.tombstone(

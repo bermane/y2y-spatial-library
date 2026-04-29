@@ -102,6 +102,12 @@ def reconcile(
     if changelog_path is None:
         changelog_path = inventory_path.parent / "changelog.md"
 
+    # Fail fast if Excel has the inventory open and we'd be auto-applying
+    # drift through it. Otherwise a long deep reconcile would do hours of
+    # work and crash on the first refresh attempt.
+    if apply_drift and inventory_path.exists():
+        inventory_manager.assert_not_locked(inventory_path)
+
     library_root.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -169,7 +175,7 @@ def reconcile(
                     auto_resolved.append(
                         Finding(did, fp, f"snapshot refreshed: {drift_reason}")
                     )
-                except lifecycle.LifecycleError as exc:
+                except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
                     drift.append(
                         Finding(did, fp, f"{drift_reason} (auto-refresh failed: {exc})")
                     )

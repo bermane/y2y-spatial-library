@@ -78,6 +78,8 @@ def update(
     if not fields:
         raise LifecycleError("no fields supplied to update")
 
+    inventory_manager.assert_not_locked(inventory_path)
+
     bad = set(fields) - UPDATABLE_FIELDS
     if bad:
         raise LifecycleError(
@@ -151,6 +153,8 @@ def rename(
       This is the normal mode for ``y2y reconcile --fix-renames``.
     - file at both, or at neither: raise — operator must resolve.
     """
+    inventory_manager.assert_not_locked(inventory_path)
+
     new_path_obj = Path(new_path)
 
     ok, reason = validate_naming(new_path_obj)
@@ -262,6 +266,8 @@ def tombstone(
     If the file is already absent (manual deletion), the operation
     proceeds and notes that fact in the changelog.
     """
+    inventory_manager.assert_not_locked(inventory_path)
+
     rows = inventory_manager.load_inventory(inventory_path)
     target = _find_row(rows, dataset_id)
 
@@ -330,6 +336,8 @@ def refresh(
 
     No-op when nothing has changed.
     """
+    inventory_manager.assert_not_locked(inventory_path)
+
     rows = inventory_manager.load_inventory(inventory_path)
     target = _find_row(rows, dataset_id)
 

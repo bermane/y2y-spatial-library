@@ -74,6 +74,30 @@ def test_changelog_appends_and_creates_file(tmp_path: Path) -> None:
     assert "Ingested 'Streams 2024'" in text
 
 
+def test_assert_not_locked_passes_when_no_lock_file(tmp_path: Path) -> None:
+    p = tmp_path / "inventory.xlsx"
+    p.write_bytes(b"")
+    im.assert_not_locked(p)  # no exception
+
+
+def test_assert_not_locked_raises_when_lock_file_present(tmp_path: Path) -> None:
+    import pytest
+    p = tmp_path / "inventory.xlsx"
+    p.write_bytes(b"")
+    (tmp_path / "~$inventory.xlsx").write_bytes(b"")  # Excel-style lock
+    with pytest.raises(im.InventoryLockedError, match="open in Excel"):
+        im.assert_not_locked(p)
+
+
+def test_save_inventory_refuses_when_locked(tmp_path: Path) -> None:
+    import pytest
+    p = tmp_path / "inventory.xlsx"
+    im.save_inventory(p, [_row("ds_aaaaaaaaaaaa")])
+    (tmp_path / "~$inventory.xlsx").write_bytes(b"")  # simulate Excel opening it
+    with pytest.raises(im.InventoryLockedError):
+        im.save_inventory(p, [_row("ds_bbbbbbbbbbbb")])
+
+
 def test_changelog_is_append_only(tmp_path: Path) -> None:
     log = tmp_path / "changelog.md"
     im.append_changelog(

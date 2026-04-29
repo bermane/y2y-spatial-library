@@ -164,6 +164,12 @@ def approve(
     if not pending_path.exists():
         return ApproveResult(pending_path, 0, 0, 0, False)
 
+    # Fail fast if Excel has either xlsx open — otherwise file moves
+    # could happen before the inventory write fails, producing orphans.
+    inventory_manager.assert_not_locked(pending_path)
+    if inventory_path.exists():
+        inventory_manager.assert_not_locked(inventory_path)
+
     rows = pending_sheet.load_pending(pending_path)
     promoted = failed = skipped = 0
     next_pending: list[dict[str, Any]] = []

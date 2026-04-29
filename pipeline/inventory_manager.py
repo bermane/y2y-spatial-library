@@ -23,6 +23,36 @@ INVENTORY_SHEET_NAME = "inventory"
 CHANGELOG_FILENAME = "changelog.md"
 
 
+class InventoryLockedError(RuntimeError):
+    """Raised when an .xlsx pipeline-write target appears to be open in Excel.
+
+    Excel writes a ``~$<filename>`` lock file in the same directory while
+    a workbook is open. If the pipeline writes to that file at the same
+    time, Excel's subsequent save will silently overwrite the pipeline's
+    changes when the user saves manually. Refusing to write when a lock
+    file is present prevents this race.
+    """
+
+
+def assert_not_locked(path: Path) -> None:
+    """Raise :class:`InventoryLockedError` if ``path`` appears open in Excel.
+
+    Detection: presence of a sibling ``~$<filename>`` lock file. Excel
+    creates these when a workbook opens and removes them when it closes
+    (or sometimes leaves them if it crashed). False positives are
+    cheap to fix — just delete the stray lock file.
+    """
+    lock = path.parent / f"~${path.name}"
+    if lock.exists():
+        raise InventoryLockedError(
+            f"{path.name} appears to be open in Excel ({lock.name} present in "
+            f"{path.parent}). Close Excel before running this command — "
+            f"otherwise your manual save can clobber the pipeline's. "
+            f"If no Excel instance is actually open, delete the stray lock: "
+            f"`rm '{lock}'`"
+        )
+
+
 # Ordered (name, role) — matches DESIGN.md §7 groupings.
 # Roles: "locked" (auto-filled, never edited), "overridable" (auto-filled
 # but the steward may correct), "required" (steward must fill), "optional".
@@ -100,7 +130,11 @@ def load_inventory(path: Path) -> list[dict[str, Any]]:
 
 
 def save_inventory(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write rows to ``path``, replacing any existing content."""
+    """Write rows to ``path``, replacing any existing content.
+
+    Refuses to write if Excel has the file open (race-prevention).
+    """
+    assert_not_locked(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active

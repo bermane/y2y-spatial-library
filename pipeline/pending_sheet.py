@@ -29,7 +29,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from .inventory_manager import INVENTORY_COLUMNS
+from .inventory_manager import INVENTORY_COLUMNS, assert_not_locked
 
 PENDING_FILENAME = "pending.xlsx"
 PENDING_SHEET_NAME = "pending"
@@ -127,7 +127,11 @@ def load_pending(path: Path) -> list[dict[str, Any]]:
 
 
 def save_pending(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write ``rows`` to ``path``, replacing any existing content."""
+    """Write ``rows`` to ``path``, replacing any existing content.
+
+    Refuses to write if Excel has the file open (race-prevention).
+    """
+    assert_not_locked(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active

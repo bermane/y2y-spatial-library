@@ -83,10 +83,14 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
     changelog = root / "inventory" / "changelog.md"
 
     if approve_flag:
-        result = ingest_mod.approve(
-            processing, library, inventory, changelog,
-            actor=actor or _default_actor(),
-        )
+        from . import inventory_manager
+        try:
+            result = ingest_mod.approve(
+                processing, library, inventory, changelog,
+                actor=actor or _default_actor(),
+            )
+        except inventory_manager.InventoryLockedError as exc:
+            raise click.ClickException(str(exc))
         console.print(
             f"[green]approve complete[/green] — "
             f"promoted: [bold]{result.promoted}[/bold], "
@@ -141,7 +145,7 @@ def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
 @click.pass_context
 def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], actor: str | None) -> None:
     """Update non-locked fields on an inventory row."""
-    from . import lifecycle
+    from . import inventory_manager, lifecycle
 
     if not set_pairs:
         raise click.UsageError("Provide at least one --set key=value")
@@ -155,7 +159,7 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
             dataset_id=dataset_id, fields=fields,
             actor=actor or _default_actor(),
         )
-    except lifecycle.LifecycleError as exc:
+    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -176,7 +180,7 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
 @click.pass_context
 def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None) -> None:
     """Rename/move a file within library/ and update its inventory row."""
-    from . import lifecycle
+    from . import inventory_manager, lifecycle
 
     inventory, changelog, library = _resolve_paths(ctx.obj["root"])
 
@@ -186,7 +190,7 @@ def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None
             dataset_id=dataset_id, new_path=new_path,
             actor=actor or _default_actor(),
         )
-    except lifecycle.LifecycleError as exc:
+    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -210,7 +214,7 @@ def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
     file must still pass canonical validators — refresh refuses to
     record bad state in the inventory.
     """
-    from . import lifecycle
+    from . import inventory_manager, lifecycle
 
     inventory, changelog, library = _resolve_paths(ctx.obj["root"])
 
@@ -219,7 +223,7 @@ def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
             inventory, changelog, library,
             dataset_id=dataset_id, actor=actor or _default_actor(),
         )
-    except lifecycle.LifecycleError as exc:
+    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -246,7 +250,7 @@ def tombstone(
     actor: str | None,
 ) -> None:
     """Soft-delete a row (status=tombstoned) and erase its file from library/."""
-    from . import lifecycle
+    from . import inventory_manager, lifecycle
 
     inventory, changelog, library = _resolve_paths(ctx.obj["root"])
 
@@ -255,7 +259,7 @@ def tombstone(
             inventory, changelog, library,
             dataset_id=dataset_id, actor=actor or _default_actor(), reason=reason,
         )
-    except lifecycle.LifecycleError as exc:
+    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -286,7 +290,7 @@ def reconcile(
     actor: str | None,
 ) -> None:
     """Reconcile library/ against inventory.xlsx and write a timestamped report."""
-    from . import lifecycle, reconcile as reconcile_mod
+    from . import inventory_manager, lifecycle, reconcile as reconcile_mod
 
     root: Path = ctx.obj["root"]
     library = root / "library"
