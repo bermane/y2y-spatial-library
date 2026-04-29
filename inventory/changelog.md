@@ -104,3 +104,8 @@ actor:  ethanberman
 path:   Prot_Areas_Cons_Lands/parks_protected_areas_alberta.gpkg
 detail: Ingested 'Parks and Protected Areas in Alberta'; source: Shapefile 'parks_protected_areas_alberta.shp'.
 
+## 2026-04-29T17:42:39Z — add — ds_5fec788fce40
+actor:  ethanberman
+path:   Land_Cover_Use_Disturbance/y2y_land_cover_2020.tif
+detail: Ingested 'Y2Y Land Cover (2020)'; source: GeoTIFF 'landcover-2020-classification-y2y.tif'.
+

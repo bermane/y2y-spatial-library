@@ -299,11 +299,13 @@ def raster_to_canonical(
         if target.exists():
             target.unlink()
 
+        # Stream the reprojection through rasterio's block buffer instead
+        # of allocating the whole destination as a numpy array — keeps
+        # peak memory bounded for multi-billion-pixel rasters.
         with rasterio.open(target, "w", **profile) as dst:
-            dst_band = np.full((dst_height, dst_width), nodata, dtype=dtype)
             reproject(
                 source=rasterio.band(src, 1),
-                destination=dst_band,
+                destination=rasterio.band(dst, 1),
                 src_transform=src.transform,
                 src_crs=src_crs,
                 dst_transform=dst_transform,
@@ -312,5 +314,4 @@ def raster_to_canonical(
                 src_nodata=src.nodata,
                 dst_nodata=nodata,
             )
-            dst.write(dst_band, 1)
             dst.build_overviews([2], _RESAMPLING[classification])
