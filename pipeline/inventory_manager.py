@@ -36,7 +36,9 @@ INVENTORY_COLUMNS: list[tuple[str, str]] = [
     ("dataset_id", "locked"),
     ("category", "overridable"),
     ("subcategory", "overridable"),
-    # AGOL-facing extrinsic content: what the steward authored.
+    # AGOL-facing extrinsic content: what the steward authored, plus
+    # AGOL linkage and freeform notes (kept together so the whole AGOL
+    # block is contiguous).
     ("title", "required"),
     ("summary", "required"),
     ("description", "required"),
@@ -44,6 +46,8 @@ INVENTORY_COLUMNS: list[tuple[str, str]] = [
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
     ("data_steward", "required"),
+    ("agol_item_id", "optional"),
+    ("notes", "optional"),
     # Type and lifecycle state.
     ("classification", "overridable"),
     ("status", "overridable"),
@@ -58,9 +62,6 @@ INVENTORY_COLUMNS: list[tuple[str, str]] = [
     ("size_bytes", "locked"),
     ("mtime", "locked"),
     ("geographic_extent_bbox", "locked"),
-    # AGOL linkage & freeform — between snapshot and source provenance.
-    ("agol_item_id", "optional"),
-    ("notes", "optional"),
     # Source provenance — pushed to the back: forensic columns the
     # steward reads occasionally, never edits.
     ("source_format", "locked"),
