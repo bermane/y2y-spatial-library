@@ -77,6 +77,59 @@ class TransformError(Exception):
     """Raised when source data cannot be transformed into canonical form."""
 
 
+# --- pixel-size preservation ------------------------------------------
+
+def _matched_resolution(
+    src_transform,
+    src_crs: CRS,
+    dst_crs: CRS,
+) -> tuple[float, float] | None:
+    """Return ``(x, y)`` to force on the warp, or ``None`` to let rasterio fit.
+
+    The "force" path keeps a 30 m source at exactly 30 m in the
+    destination — without this, ``calculate_default_transform`` fits
+    the destination grid to the projected bounds and produces values
+    like 30.06938… m. We only force when both CRSs use the same
+    **linear** unit (typically metres). For a geographic source
+    (EPSG:4326, degrees) reprojecting into a projected destination
+    (ESRI:102008, metres), the source's pixel value isn't meaningful
+    in the destination's units, so the caller falls back to
+    rasterio's bounds-fit default.
+    """
+    if not (src_crs.is_projected and dst_crs.is_projected):
+        return None
+
+    src_unit = _linear_unit_name(src_crs)
+    dst_unit = _linear_unit_name(dst_crs)
+    if src_unit is None or dst_unit is None or src_unit != dst_unit:
+        return None
+
+    return (abs(src_transform.a), abs(src_transform.e))
+
+
+def _linear_unit_name(crs) -> str | None:
+    """Best-effort linear-axis unit name for a projected CRS, or None.
+
+    Accepts either ``pyproj.CRS`` or ``rasterio.crs.CRS`` — the latter
+    lacks ``coordinate_system`` so we re-hydrate via WKT.
+    """
+    if not hasattr(crs, "coordinate_system"):
+        try:
+            crs = CRS.from_wkt(crs.to_wkt())
+        except Exception:
+            return None
+    try:
+        axes = crs.coordinate_system.axis_list
+    except (AttributeError, TypeError):
+        return None
+    for axis in axes:
+        unit = getattr(axis, "unit_name", None)
+        if unit:
+            # Normalise common spellings: 'metre' / 'meter' → 'metre'
+            return unit.lower().replace("meter", "metre")
+    return None
+
+
 # --- passthrough --------------------------------------------------------
 
 def is_passthrough_eligible(source: Path) -> bool:
@@ -273,8 +326,20 @@ def raster_to_canonical(
 
         nodata = src.nodata if src.nodata is not None else _DEFAULT_NODATA[dtype]
 
+        # Preserve the source pixel size when both CRSs use the same
+        # linear unit. Without this, rasterio's
+        # ``calculate_default_transform`` fits a destination grid to
+        # the projected bounds — which gives values like 30.06938… m
+        # instead of a clean 30 m for an EPSG:26911 → ESRI:102008
+        # reproject. We only force the resolution when units match;
+        # for a geographic→projected reproject (degrees→metres) the
+        # source's pixel value isn't meaningful in the destination's
+        # units, so we let rasterio pick.
+        dst_resolution = _matched_resolution(src.transform, src_crs, CANONICAL_CRS)
+
         dst_transform, dst_width, dst_height = calculate_default_transform(
             src_crs, CANONICAL_CRS, src.width, src.height, *src.bounds,
+            resolution=dst_resolution,
         )
 
         profile = {

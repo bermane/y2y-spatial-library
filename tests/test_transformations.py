@@ -215,6 +215,43 @@ def test_raster_reprojects_to_canonical(tmp_path: Path) -> None:
         assert ds.crs.to_authority() == ("ESRI", "102008")
 
 
+def test_raster_preserves_source_pixel_size_on_reprojection(tmp_path: Path) -> None:
+    """A 30m source must produce a clean 30.0m destination, not 30.06938…m.
+
+    Without an explicit ``dst_resolution`` argument, rasterio's
+    ``calculate_default_transform`` fits the destination grid to the
+    projected bounds and produces a pixel size that depends on how the
+    bounds project — typically off by a fraction of a metre. The
+    pipeline forces ``dst_resolution=(src.transform.a, |src.transform.e|)``
+    so the round-number resolution survives reprojection. This is the
+    regression for the GB-habitat (EPSG:26911 → ESRI:102008) case where
+    the warp produced 30.06938…m pixels.
+    """
+    src = tmp_path / "utm.tif"
+    profile = {
+        "driver": "GTiff", "dtype": "uint8", "count": 1,
+        "width": 1024, "height": 1024, "crs": "EPSG:26911",  # UTM 11N, metres
+        # Origin in UTM 11N metres; 30 m pixels (north-up: y-spacing negative).
+        "transform": rasterio.transform.from_origin(500_000.0, 5_500_000.0, 30.0, 30.0),
+        "tiled": True, "blockxsize": 512, "blockysize": 512,
+        "compress": "zstd", "predictor": 2, "zstd_level": 9,
+        "nodata": 255, "BIGTIFF": "IF_NEEDED",
+    }
+    with rasterio.open(src, "w", **profile) as dst:
+        dst.write(np.zeros((1024, 1024), dtype="uint8"), 1)
+        dst.build_overviews([2], Resampling.nearest)
+
+    target = tmp_path / "out.tif"
+    transformations.raster_to_canonical(src, target, "categorical")
+
+    with rasterio.open(target) as ds:
+        assert ds.crs.to_authority() == ("ESRI", "102008")
+        # transform.a is x-spacing, transform.e is y-spacing (negative
+        # for north-up). Both must equal the source's 30 m exactly.
+        assert ds.transform.a == 30.0
+        assert ds.transform.e == -30.0
+
+
 def test_raster_rejects_unsupported_dtype(tmp_path: Path) -> None:
     src = tmp_path / "int32.tif"
     profile = {
