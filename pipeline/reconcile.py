@@ -75,11 +75,10 @@ class ReconcileResult(NamedTuple):
 
 def reconcile(
     library_root: Path,
-    inventory_path: Path,
+    db_path: Path,
     reports_dir: Path,
     *,
     actor: str,
-    changelog_path: Path | None = None,
     deep: bool = False,
     apply_drift: bool = True,
 ) -> ReconcileResult:
@@ -96,23 +95,18 @@ def reconcile(
        - **otherwise**: listed in ``drift`` (action item; the file is
          non-canonical or apply was disabled).
 
+    Post-migration: ``db_path`` points at ``inventory.db`` (catalogue
+    + changelog in one file). The xlsx-era ``changelog_path`` argument
+    has been removed.
+
     See DESIGN.md §2 for the broader read-mostly policy and the
     explicit auto-fix exceptions.
     """
-    if changelog_path is None:
-        changelog_path = inventory_path.parent / "changelog.md"
-
-    # Fail fast if Excel has the inventory open and we'd be auto-applying
-    # drift through it. Otherwise a long deep reconcile would do hours of
-    # work and crash on the first refresh attempt.
-    if apply_drift and inventory_path.exists():
-        inventory_manager.assert_not_locked(inventory_path)
-
     library_root.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     library_files = _walk_library(library_root)
-    inventory_rows = inventory_manager.load_inventory(inventory_path)
+    inventory_rows = inventory_manager.load_inventory(db_path)
 
     by_path: dict[str, dict[str, Any]] = {
         str(row["file_path"]): row for row in inventory_rows if row.get("file_path")
@@ -166,8 +160,7 @@ def reconcile(
 
                 try:
                     lifecycle.refresh(
-                        inventory_path,
-                        changelog_path,
+                        db_path,
                         library_root,
                         dataset_id=did,
                         actor=actor,
@@ -175,7 +168,7 @@ def reconcile(
                     auto_resolved.append(
                         Finding(did, fp, f"snapshot refreshed: {drift_reason}")
                     )
-                except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
+                except lifecycle.LifecycleError as exc:
                     drift.append(
                         Finding(did, fp, f"{drift_reason} (auto-refresh failed: {exc})")
                     )
@@ -195,7 +188,7 @@ def reconcile(
     report_path = _write_report(
         reports_dir=reports_dir,
         library_root=library_root,
-        inventory_path=inventory_path,
+        db_path=db_path,
         library_files=library_files,
         inventory_rows=inventory_rows,
         orphans=orphans,
@@ -304,7 +297,7 @@ def _write_report(
     *,
     reports_dir: Path,
     library_root: Path,
-    inventory_path: Path,
+    db_path: Path,
     library_files: set[str],
     inventory_rows: list[dict[str, Any]],
     orphans: list[Finding],
@@ -324,7 +317,7 @@ def _write_report(
         f"# Reconcile report — {timestamp_iso} (mode: {mode})",
         "",
         f"- Library root: `{library_root}`",
-        f"- Inventory:    `{inventory_path}`",
+        f"- Inventory:    `{db_path}`",
         "",
         "## Summary",
         "",

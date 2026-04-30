@@ -36,7 +36,10 @@ import shutil
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import fiona
+import rasterio
 import yaml
+from pyproj import Transformer
 
 from . import (
     inventory_manager, pending_sheet, source_formats, taxonomy,
@@ -76,11 +79,34 @@ _TARGET_EXT_BY_FORMAT: dict[str, str] = {
     "GeoTIFF": ".tif",
 }
 
-# Inventory ``format`` label by target extension.
+# Inventory ``format`` label by target extension. These display names
+# show up in pending.xlsx; they get lowercased to the schema's CHECK
+# values ('geopackage', 'geotiff') in :func:`_normalize_for_insert`.
 _FORMAT_LABEL_BY_TARGET: dict[str, str] = {
     ".gpkg": "GeoPackage",
     ".tif": "Cloud Optimized GeoTIFF",
 }
+
+# Pending → schema lowercase mappings. Keep them in sync with the
+# CHECK constraints in pipeline/schema.sql.
+_FORMAT_TO_SCHEMA: dict[str, str] = {
+    "GeoPackage": "geopackage",
+    "Cloud Optimized GeoTIFF": "geotiff",
+    "GeoTIFF": "geotiff",
+    # tolerate a steward who already typed the schema value
+    "geopackage": "geopackage",
+    "geotiff": "geotiff",
+}
+_SOURCE_FORMAT_TO_SCHEMA: dict[str, str] = {
+    "Shapefile": "shapefile",
+    "GeoPackage": "geopackage",
+    "GeoJSON": "geojson",
+    "KML": "kml",
+    "GeoTIFF": "geotiff",
+}
+
+# Canonical project CRS (matches schema.sql + lifecycle convention).
+_CANONICAL_CRS = "ESRI:102008"
 
 
 # === Phase 1: scan ====================================================
@@ -149,13 +175,16 @@ def scan(incoming_dir: Path, processing_dir: Path, rejected_dir: Path) -> ScanRe
 def approve(
     processing_dir: Path,
     library_root: Path,
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     *,
     actor: str,
     archived_dir: Path | None = None,
 ) -> ApproveResult:
-    """Phase 3: transform → validate → snapshot → promote → archive source."""
+    """Phase 3: transform → validate → snapshot → promote → archive source.
+
+    ``db_path`` points at ``inventory/inventory.db`` (the SQLite
+    catalogue). The inventory and changelog are both inside it.
+    """
     pending_path = processing_dir / pending_sheet.PENDING_FILENAME
     if archived_dir is None:
         archived_dir = processing_dir.parent / "archived"
@@ -164,11 +193,11 @@ def approve(
     if not pending_path.exists():
         return ApproveResult(pending_path, 0, 0, 0, False)
 
-    # Fail fast if Excel has either xlsx open — otherwise file moves
-    # could happen before the inventory write fails, producing orphans.
+    # Fail fast if Excel has the pending sheet open — otherwise file
+    # moves could happen before the catalogue write fails, producing
+    # orphans. The catalogue is SQLite and not subject to Excel locks,
+    # so no equivalent guard is needed there.
     inventory_manager.assert_not_locked(pending_path)
-    if inventory_path.exists():
-        inventory_manager.assert_not_locked(inventory_path)
 
     rows = pending_sheet.load_pending(pending_path)
     promoted = failed = skipped = 0
@@ -222,7 +251,7 @@ def approve(
             continue
 
         try:
-            _promote(row, target_path, library_root, inventory_path, changelog_path, actor=actor)
+            _promote(row, target_path, library_root, db_path, actor=actor)
             _archive_source(row, processing_dir, archived_dir)
             promoted += 1
         except Exception as exc:  # pragma: no cover — defensive
@@ -299,7 +328,7 @@ def _build_row(
     """Compose a fresh pending row at scan time. No intrinsic snapshot yet."""
     target_ext = _TARGET_EXT_BY_FORMAT[meta.source_format]
     target_filename = utils.slugify_title(primary_in_processing.stem) + target_ext
-    today = utils.utc_now_date()
+    today = utils.utc_now_iso()
 
     # Best-guess category from filename — steward can override.
     guess_text = primary_in_processing.stem
@@ -375,9 +404,13 @@ def _validate_declarations(row: dict[str, Any], processing_dir: Path) -> list[st
     """Validate steward-supplied fields *before* expensive transformation."""
     errors: list[str] = []
 
-    # dataset_id sanity (needed before path lookup)
+    # dataset_id sanity (needed before path lookup). The schema's only
+    # constraint is the ``ds_`` prefix; we additionally require enough
+    # suffix length to rule out a one-character typo. Both the legacy
+    # 12-hex (15 char total) and the post-001 26-char ULID (29 char
+    # total) are accepted.
     did = row.get("dataset_id")
-    if not (isinstance(did, str) and did.startswith("ds_") and len(did) == 15):
+    if not (isinstance(did, str) and did.startswith("ds_") and len(did) >= 15):
         return ["dataset_id is malformed (locked column was edited or row is corrupt)"]
 
     src_name = row.get("source_filename")
@@ -478,22 +511,117 @@ def _run_transformation(row: dict[str, Any], processing_dir: Path) -> Path:
 
 
 def _populate_snapshot(row: dict[str, Any], target_path: Path) -> None:
-    """Compute intrinsic-snapshot fields from the transformed file and merge into row."""
+    """Compute intrinsic-snapshot fields from the transformed file and merge into row.
+
+    Populates the always-present columns (checksum, size, mtime, crs,
+    bbox) plus the type-specific columns the SQLite schema added in
+    migration 001 (``footprint_wkt``, ``feature_count`` for vectors,
+    ``raster_*`` and ``pixel_size_*`` for rasters).
+    """
     size_bytes, mtime = utils.stat_signature(target_path)
     checksum = utils.sha256_file(target_path)
     if utils.is_vector(target_path):
         crs = utils.read_vector_crs(target_path)
         bbox = utils.read_vector_bbox(target_path)
+        with fiona.open(target_path) as src:
+            row["feature_count"] = len(src)
+        row["raster_width"] = None
+        row["raster_height"] = None
+        row["pixel_size_x"] = None
+        row["pixel_size_y"] = None
     else:
         crs = utils.read_raster_crs(target_path)
         bbox = utils.read_raster_bbox(target_path)
+        with rasterio.open(target_path) as ds:
+            row["raster_width"] = int(ds.width)
+            row["raster_height"] = int(ds.height)
+            row["pixel_size_x"] = float(ds.transform.a)
+            row["pixel_size_y"] = float(-ds.transform.e)
+        row["feature_count"] = None
 
     row["crs"] = utils.crs_to_authority_string(crs) if crs else None
     row["checksum_sha256"] = checksum
     row["size_bytes"] = size_bytes
     row["mtime"] = mtime
     row["geographic_extent_bbox"] = utils.bbox_to_string(bbox) if bbox else None
-    row["date_modified"] = utils.utc_now_date()
+    row["footprint_wkt"] = _bbox_to_footprint_wkt(
+        utils.bbox_to_string(bbox) if bbox else None
+    )
+    row["date_modified"] = utils.utc_now_iso()
+
+
+def _bbox_to_footprint_wkt(bbox_str: str | None) -> str | None:
+    """Reproject canonical-CRS bbox to EPSG:4326 as a 4-corner POLYGON WKT.
+
+    Mirrors the helper in ``migrations/001_xlsx_to_sqlite.py``; kept
+    inline here to avoid the digit-prefixed migration module not being
+    importable.
+    """
+    if not bbox_str:
+        return None
+    parts = [p.strip() for p in bbox_str.split(",")]
+    if len(parts) != 4:
+        return None
+    try:
+        minx, miny, maxx, maxy = (float(p) for p in parts)
+    except ValueError:
+        return None
+    tf = Transformer.from_crs(_CANONICAL_CRS, "EPSG:4326", always_xy=True)
+    lon_min, lat_min, lon_max, lat_max = tf.transform_bounds(
+        minx, miny, maxx, maxy, densify_pts=21
+    )
+    return (
+        "POLYGON(("
+        f"{lon_min:.6f} {lat_min:.6f}, "
+        f"{lon_max:.6f} {lat_min:.6f}, "
+        f"{lon_max:.6f} {lat_max:.6f}, "
+        f"{lon_min:.6f} {lat_max:.6f}, "
+        f"{lon_min:.6f} {lat_min:.6f}"
+        "))"
+    )
+
+
+def _normalize_for_insert(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a pending row onto the canonical ``datasets`` schema columns.
+
+    Specifically:
+
+    * Drop pending-only fields (``ready``, ``target_filename``,
+      ``_validation_error``).
+    * Rename ``notes`` → ``internal_notes``.
+    * Lowercase ``format`` and ``source_format`` to the schema's CHECK
+      values.
+    * Fill in schema fields the pending sheet doesn't carry:
+      ``dataset_type='spatial'``, ``sync_status='unpublished'``.
+    """
+    out: dict[str, Any] = dict(row)
+
+    for k in (pending_sheet.READY_COLUMN,
+              pending_sheet.TARGET_FILENAME_COLUMN,
+              pending_sheet.ERROR_COLUMN):
+        out.pop(k, None)
+
+    if "notes" in out and "internal_notes" not in out:
+        out["internal_notes"] = out.pop("notes")
+    else:
+        out.pop("notes", None)
+
+    fmt = out.get("format")
+    if isinstance(fmt, str):
+        if fmt not in _FORMAT_TO_SCHEMA:
+            raise ValueError(f"unknown format value {fmt!r}")
+        out["format"] = _FORMAT_TO_SCHEMA[fmt]
+
+    src_fmt = out.get("source_format")
+    if isinstance(src_fmt, str) and src_fmt:
+        if src_fmt not in _SOURCE_FORMAT_TO_SCHEMA:
+            raise ValueError(f"unknown source_format value {src_fmt!r}")
+        out["source_format"] = _SOURCE_FORMAT_TO_SCHEMA[src_fmt]
+
+    out.setdefault("dataset_type", "spatial")
+    out.setdefault("sync_status", "unpublished")
+
+    return out
 
 
 def _normalize_tags(value: Any) -> Any:
@@ -508,17 +636,21 @@ def _promote(
     row: dict[str, Any],
     target_path: Path,
     library_root: Path,
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     *,
     actor: str,
 ) -> Path:
-    """Move transformed file into library/, append inventory + changelog.
+    """Move transformed file into library/, INSERT into datasets + changelog.
 
     The inventory's ``category`` (and ``subcategory``) values are display
     names — full names from the typology — but on-disk folder names are
     the underscore abbreviations. We map display→folder for the
     filesystem path and keep the display value in the inventory row.
+
+    The pending row's column shape doesn't match ``datasets`` 1:1
+    (pending has ``ready``, ``target_filename``, ``_validation_error``,
+    legacy ``notes``); :func:`_normalize_for_insert` projects it onto
+    the canonical schema columns before insert.
     """
     category_display = str(row["category"])
     subcategory_display = row.get("subcategory")
@@ -541,12 +673,12 @@ def _promote(
 
     finalized = dict(row)
     finalized["file_path"] = str(rel_target)
-    # Normalize tags right before inventory write — silent fix per DESIGN §11.
     finalized["tags"] = _normalize_tags(finalized.get("tags"))
+    canonical_row = _normalize_for_insert(finalized)
 
-    inventory_manager.append_inventory(inventory_path, [finalized])
+    inventory_manager.insert_dataset(db_path, canonical_row)
     inventory_manager.append_changelog(
-        changelog_path,
+        db_path,
         timestamp=utils.utc_now_iso(),
         action="add",
         dataset_id=str(row["dataset_id"]),

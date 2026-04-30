@@ -5,9 +5,16 @@ Subcommands:
     y2y ingest --approve              Phase 2 approval — promote ready rows
     y2y update <id> --set k=v ...     Edit non-locked fields on an inventory row
     y2y rename <id> <new-path>        Move a file within library/ + update inventory
+    y2y refresh <id>                  Re-snapshot a library file after in-place edit
     y2y tombstone <id> [--reason …]   Mark removed (soft delete) and erase the file
     y2y reconcile [--deep]            Drift report
     y2y reconcile --fix-renames       Interactively confirm rename pairs
+    y2y export-xlsx [--out PATH]      Render inventory.db → inventory.xlsx (read-only)
+
+Post-migration to SQLite (2026-04-29): the catalogue lives in
+``inventory/inventory.db``. Lifecycle and reconcile commands take the
+db path; ``export-xlsx`` is the only command that still produces an
+xlsx, and it does so as a generated artifact.
 """
 
 from __future__ import annotations
@@ -35,6 +42,22 @@ def _parse_set_pairs(set_pairs: tuple[str, ...]) -> dict[str, object]:
         key, _, value = raw.partition("=")
         out[key.strip()] = value
     return out
+
+
+def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
+    """Return (db_path, library_root, xlsx_path).
+
+    Post-migration 002 (library restructure): the spatial-data root is
+    ``<root>/library/spatial`` rather than ``<root>/library``. file_path
+    values in the catalogue are relative to this typed root, matching
+    the schema's design intent that future dataset_types
+    (``tabular``, ``imagery``, …) get sibling subtrees under ``library/``.
+    """
+    return (
+        root / "inventory" / "inventory.db",
+        root / "library" / "spatial",
+        root / "inventory" / "inventory.xlsx",
+    )
 
 
 @click.group()
@@ -70,23 +93,21 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
     """Phase 1 (default): scan queue/incoming/ → queue/processing/pending.xlsx.
 
     Phase 2 (--approve): validate ready rows in pending.xlsx and promote
-    into library/ + inventory.xlsx.
+    into library/ + inventory.db.
     """
     from . import ingest as ingest_mod
+    from . import inventory_manager
 
     root: Path = ctx.obj["root"]
     incoming = root / "queue" / "incoming"
     processing = root / "queue" / "processing"
     rejected = root / "queue" / "rejected"
-    library = root / "library"
-    inventory = root / "inventory" / "inventory.xlsx"
-    changelog = root / "inventory" / "changelog.md"
+    db_path, library, _ = _resolve_paths(root)
 
     if approve_flag:
-        from . import inventory_manager
         try:
             result = ingest_mod.approve(
-                processing, library, inventory, changelog,
+                processing, library, db_path,
                 actor=actor or _default_actor(),
             )
         except inventory_manager.InventoryLockedError as exc:
@@ -98,8 +119,7 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             f"skipped: [bold]{result.skipped}[/bold] (ready=FALSE)"
         )
         if result.promoted:
-            console.print(f"  inventory:    [cyan]{inventory}[/cyan]")
-            console.print(f"  changelog:    [cyan]{changelog}[/cyan]")
+            console.print(f"  catalogue:    [cyan]{db_path}[/cyan]")
         if result.pending_deleted:
             console.print("  pending sheet drained and deleted")
         elif result.pending_path.exists():
@@ -119,16 +139,7 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
         console.print(f"  rejections:   [cyan]{rejected}[/cyan] (see .rejected.yaml sidecars)")
 
 
-# --- lifecycle: update / rename / tombstone ----------------------------
-
-def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
-    """Return (inventory_path, changelog_path, library_root)."""
-    return (
-        root / "inventory" / "inventory.xlsx",
-        root / "inventory" / "changelog.md",
-        root / "library",
-    )
-
+# --- lifecycle: update / rename / refresh / tombstone -----------------
 
 @cli.command()
 @click.argument("dataset_id")
@@ -145,21 +156,21 @@ def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
 @click.pass_context
 def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], actor: str | None) -> None:
     """Update non-locked fields on an inventory row."""
-    from . import inventory_manager, lifecycle
+    from . import lifecycle
 
     if not set_pairs:
         raise click.UsageError("Provide at least one --set key=value")
 
     fields = _parse_set_pairs(set_pairs)
-    inventory, changelog, _ = _resolve_paths(ctx.obj["root"])
+    db_path, _, _ = _resolve_paths(ctx.obj["root"])
 
     try:
         row = lifecycle.update(
-            inventory, changelog,
+            db_path,
             dataset_id=dataset_id, fields=fields,
             actor=actor or _default_actor(),
         )
-    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
+    except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -180,17 +191,17 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
 @click.pass_context
 def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None) -> None:
     """Rename/move a file within library/ and update its inventory row."""
-    from . import inventory_manager, lifecycle
+    from . import lifecycle
 
-    inventory, changelog, library = _resolve_paths(ctx.obj["root"])
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
 
     try:
         row = lifecycle.rename(
-            inventory, changelog, library,
+            db_path, library,
             dataset_id=dataset_id, new_path=new_path,
             actor=actor or _default_actor(),
         )
-    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
+    except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -208,22 +219,21 @@ def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None
 )
 @click.pass_context
 def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
-    """Re-stat a library file after an in-place edit and update the inventory snapshot.
+    """Re-stat a library file after an in-place edit and update the snapshot.
 
-    Use after editing a library file (e.g. adding a vector field). The
-    file must still pass canonical validators — refresh refuses to
+    The file must still pass canonical validators — refresh refuses to
     record bad state in the inventory.
     """
-    from . import inventory_manager, lifecycle
+    from . import lifecycle
 
-    inventory, changelog, library = _resolve_paths(ctx.obj["root"])
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
 
     try:
         row = lifecycle.refresh(
-            inventory, changelog, library,
+            db_path, library,
             dataset_id=dataset_id, actor=actor or _default_actor(),
         )
-    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
+    except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -250,16 +260,16 @@ def tombstone(
     actor: str | None,
 ) -> None:
     """Soft-delete a row (status=tombstoned) and erase its file from library/."""
-    from . import inventory_manager, lifecycle
+    from . import lifecycle
 
-    inventory, changelog, library = _resolve_paths(ctx.obj["root"])
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
 
     try:
         lifecycle.tombstone(
-            inventory, changelog, library,
+            db_path, library,
             dataset_id=dataset_id, actor=actor or _default_actor(), reason=reason,
         )
-    except (lifecycle.LifecycleError, inventory_manager.InventoryLockedError) as exc:
+    except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
 
     console.print(
@@ -289,13 +299,11 @@ def reconcile(
     fix_renames: bool,
     actor: str | None,
 ) -> None:
-    """Reconcile library/ against inventory.xlsx and write a timestamped report."""
-    from . import inventory_manager, lifecycle, reconcile as reconcile_mod
+    """Reconcile library/ against inventory.db and write a timestamped report."""
+    from . import lifecycle, reconcile as reconcile_mod
 
     root: Path = ctx.obj["root"]
-    library = root / "library"
-    inventory = root / "inventory" / "inventory.xlsx"
-    changelog = root / "inventory" / "changelog.md"
+    db_path, library, _ = _resolve_paths(root)
     reports = root / "reports"
 
     if fix_renames:
@@ -303,8 +311,8 @@ def reconcile(
 
     actor_name = actor or _default_actor()
     result = reconcile_mod.reconcile(
-        library, inventory, reports,
-        actor=actor_name, changelog_path=changelog, deep=deep,
+        library, db_path, reports,
+        actor=actor_name, deep=deep,
     )
 
     mode = "deep" if deep else "fast"
@@ -342,7 +350,6 @@ def reconcile(
     skipped = 0
 
     for finding in result.renames:
-        # finding.path is "old → new"; finding.dataset_id is the row id
         if "→" not in finding.path:
             continue
         old_str, new_str = (s.strip() for s in finding.path.split("→", 1))
@@ -353,7 +360,7 @@ def reconcile(
             continue
         try:
             lifecycle.rename(
-                inventory, changelog, library,
+                db_path, library,
                 dataset_id=finding.dataset_id or "",
                 new_path=new_str, actor=actor_name,
             )
@@ -365,6 +372,51 @@ def reconcile(
     console.print(
         f"[green]fix-renames done[/green] — applied: [bold]{applied}[/bold], "
         f"skipped: [bold]{skipped}[/bold]"
+    )
+
+
+# --- export-xlsx -------------------------------------------------------
+
+@cli.command("export-xlsx")
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Output xlsx path. Defaults to inventory/inventory.xlsx under --root.",
+)
+@click.pass_context
+def export_xlsx_cmd(ctx: click.Context, out_path: Path | None) -> None:
+    """Render the SQLite catalogue as a read-only inventory.xlsx.
+
+    The xlsx is a steward-friendly view; it is **not** a source of
+    truth. Editing it changes nothing in the catalogue. Re-export
+    overwrites it.
+    """
+    from . import export_xlsx, inventory_manager
+
+    db_path, _, default_xlsx = _resolve_paths(ctx.obj["root"])
+    target = out_path or default_xlsx
+
+    if not db_path.exists():
+        raise click.ClickException(
+            f"catalogue not found at {db_path}. "
+            f"Run pipeline/migrations/001_xlsx_to_sqlite.py first."
+        )
+
+    try:
+        n_rows, n_log = export_xlsx.export(db_path, target)
+    except inventory_manager.InventoryLockedError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print(
+        f"[green]export-xlsx complete[/green] — "
+        f"datasets: [bold]{n_rows}[/bold], "
+        f"changelog: [bold]{n_log}[/bold]"
+    )
+    console.print(f"  wrote: [cyan]{target}[/cyan]")
+    console.print(
+        "  [dim]This file is regenerated; it is not the source of truth.[/dim]"
     )
 
 

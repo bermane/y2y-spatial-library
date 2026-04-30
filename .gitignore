@@ -3,6 +3,7 @@ library/**
 !library/
 !library/**/
 !library/**/.gitkeep
+!library/README.md
 
 # --- Queue working directories ---
 queue/incoming/**
@@ -19,8 +20,17 @@ queue/archived/**
 !queue/archived/.gitkeep
 
 # --- Generated artifacts ---
+# inventory.xlsx is a regenerated read-only view of inventory.db
+# (post-migration 001); never the source of truth.
 inventory/inventory.xlsx
-# Excel temp lock files (created when inventory.xlsx is open)
+# SQLite catalogue + WAL/SHM siblings — source of truth, not in git.
+inventory/inventory.db
+inventory/inventory.db-wal
+inventory/inventory.db-shm
+# Pre-migration xlsx backup — local-only audit; v0.1-xlsx git tag is
+# the canonical pre-migration snapshot.
+inventory/inventory.xlsx.pre-migration-backup
+# Excel temp lock files (created when an .xlsx is open)
 **/~$*.xlsx
 reports/**
 !reports/

@@ -29,7 +29,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from .inventory_manager import INVENTORY_COLUMNS, assert_not_locked
+from .inventory_manager import assert_not_locked
 
 PENDING_FILENAME = "pending.xlsx"
 PENDING_SHEET_NAME = "pending"

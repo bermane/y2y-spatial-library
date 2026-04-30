@@ -15,8 +15,8 @@ the other where the other is authoritative.
 
 | Question                                   | Canonical source        |
 | ------------------------------------------ | ----------------------- |
-| *Does this dataset exist? Where is it?*    | The filesystem (`library/`) |
-| *What is its title, CRS, license, version, steward, AGOL linkage, history?* | The inventory (`inventory/inventory.xlsx`) |
+| *Does this dataset exist? Where is it?*    | The filesystem (`library/spatial/`) |
+| *What is its title, CRS, license, version, steward, AGOL linkage, history?* | The catalogue (`inventory/inventory.db` — SQLite) |
 
 **Why:** Spatial datasets are first-class filesystem objects — GIS tools
 open them from disk, they get copied, renamed, moved. A database as the sole
@@ -27,6 +27,17 @@ good at.
 
 **Consequence:** Drift between the two is *expected* (the steward edits
 files in the normal course of work) and must be *detectable* (see §2).
+
+> **Post-migration to SQLite (2026-04-29).** The catalogue used to be
+> `inventory/inventory.xlsx` — a single workbook the steward edited
+> directly. As of migration 001 it is `inventory/inventory.db`, a
+> SQLite database with foreign keys, CHECK constraints, and STRICT
+> mode. The xlsx still exists, but only as a **regenerated read-only
+> view** produced by `y2y export-xlsx`. Editing the xlsx changes
+> nothing in the catalogue. See §12 for the full migration narrative,
+> §13 for the PostGIS portability decisions baked into the schema,
+> and §14 for the type-extensibility shape (`library/spatial/` vs
+> future `library/tabular/`).
 
 ---
 
@@ -113,15 +124,31 @@ path field while the changelog records a `rename` event.
 
 ## 5. Changelog is append-only
 
-`inventory/changelog.md` is written only by
-`pipeline.inventory_manager.append_changelog()`. It is never regenerated,
-never edited, never sorted. Past entries are immutable.
+The `changelog` table in `inventory/inventory.db` is written only by
+`pipeline.inventory_manager.append_changelog()`. It is never edited,
+never re-sorted, never regenerated. Past rows are immutable.
+
+The schema enforces this: every changelog row has an opaque
+`cl_<ULID>` primary key and a foreign key on `dataset_id` with
+`ON DELETE RESTRICT`, so accidental row removal can't orphan history.
+Each row carries `timestamp`, `action`, `actor`, a free-text `note`,
+and optional structured-diff columns
+(`field_changed` / `old_value` / `new_value`) for callers that want to
+record per-field deltas explicitly. Permitted action values are
+constrained by a CHECK in `pipeline/schema.sql`.
 
 **Why:** It's the audit trail. A changelog that can be rewritten is not an
 audit trail — it's a note file. Preserving append-only semantics means that
 six months from now, the steward (or an auditor, or a funder) can
 reconstruct exactly what happened and when. Corrections are themselves
 logged, not applied in-place.
+
+> **Pre-migration history.** The legacy `inventory/changelog.md` file
+> contains the human-readable changelog as it existed before migration
+> 001. The pipeline no longer writes to it; it is left on disk as
+> historical reference. The exported `inventory.xlsx` includes a
+> `changelog` sheet rendering the SQLite table for steward
+> readability.
 
 ---
 
@@ -150,7 +177,12 @@ compromise.
 
 ## 7. Inventory schema
 
-One row per dataset in `inventory/inventory.xlsx`.
+One row per dataset in the `datasets` table of
+`inventory/inventory.db`. The authoritative schema is
+`pipeline/schema.sql`; this section is the prose explanation of *why*
+the columns are shaped the way they are. Mismatches between this
+section and `schema.sql` should be resolved in favour of `schema.sql`
+(it's executable; this isn't).
 
 ### Guiding principle: intrinsic vs. extrinsic metadata
 
@@ -177,21 +209,23 @@ derived on read.
 ### Columns
 
 The groupings below describe the **conceptual roles** of each column.
-The on-disk **column order** in `inventory.xlsx` does not match these
-groupings — it's tuned for the steward's eye-flow when reading the
-sheet (identity → AGOL content → state → location → snapshot →
-freeform → source provenance at the back). The authoritative on-disk
-order is in `pipeline/inventory_manager.py:INVENTORY_COLUMNS`.
+The schema-level column order is in `pipeline/schema.sql` and (mirrored)
+`pipeline/inventory_manager.py:DATASETS_COLUMNS`. The exported
+`inventory.xlsx` uses a steward-tuned ordering tuned for eye-flow
+(identity → AGOL content → state → location → snapshot → spatial
+properties → AGOL linkage → source provenance at the back); the
+exporter's layout is in `pipeline/export_xlsx.py`.
 
 #### Identity & location (required)
 
 | Field         | Type              | Notes                                                                 |
 | ------------- | ----------------- | --------------------------------------------------------------------- |
-| `dataset_id`  | string (opaque)   | Stable across renames/moves. Primary key. Assigned at scan.           |
-| `category`    | enum              | One of the 9 taxonomy categories — stored as the **display name** (full name from the typology file, e.g. `Administrative & Jurisdictional Boundaries`). The on-disk folder uses the underscored abbreviation (`Admin_Juris_Boundaries`); the pipeline maps display↔folder. |
+| `dataset_id`  | string (opaque)   | Stable across renames/moves. Primary key. Format `ds_<26-char ULID>`; the schema CHECK enforces the `ds_` prefix. Assigned at scan. |
+| `dataset_type` | enum             | `'spatial'` (only value today). Reserved for future expansion to other library types — see §14. |
+| `category`    | enum              | One of the 9 taxonomy categories — stored as the **display name** (full name from the typology file, e.g. `Administrative & Jurisdictional Boundaries`). Schema CHECK enforces the 9-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Admin_Juris_Boundaries`); the pipeline maps display↔folder. |
 | `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`); folder is `Grizzly_Bear`. Only `Species & Species at Risk` has subcategories in Phase A. |
-| `file_path`   | string (relative) | Path of the **canonical** file relative to `library/`, using folder names. Set at approve. |
-| `format`      | enum              | Hard enum: `GeoPackage` or `Cloud Optimized GeoTIFF`. The output of transformation; admitting another canonical format would be a deliberate schema change. |
+| `file_path`   | string (relative) | Path of the **canonical** file relative to `library/spatial/`, using folder names. Set at approve. (Pre-migration-002 the path was relative to `library/`; the relative segments did not change.) |
+| `format`      | enum              | Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
 
 `title` is **not** a file-identity field — it's an AGOL display string
 authored by the steward — so it lives in the Dublin Core+ group below
@@ -206,7 +240,7 @@ file remain recoverable.
 
 | Field             | Type              | Notes                                                                       |
 | ----------------- | ----------------- | --------------------------------------------------------------------------- |
-| `source_format`   | enum              | `Shapefile`, `GeoPackage`, `GeoJSON`, `KML`, or `GeoTIFF` (Phase A allow-list). |
+| `source_format`   | enum              | `'shapefile'`, `'geopackage'`, `'geojson'`, `'kml'`, or `'geotiff'` (Phase A allow-list, lowercase per schema CHECK). |
 | `source_filename` | string            | Original filename in `queue/incoming/`.                                     |
 | `source_crs`      | string (auth:code or projection name) | CRS as read from the source file. **Never null** — sources without a valid CRS are rejected at scan with a "set the CRS in the source file" message. For custom CRSs without an authority code, the projection name is captured (e.g. `WGS_1984_Albers`); for those, the original WKT is recoverable from the archived `.prj`. |
 | `source_layer`    | string (nullable) | Layer name within multi-layer sources. Always null in Phase A (single-layer only). |
@@ -222,8 +256,9 @@ land in inventory only after a successful approve.
 | `crs`                    | string (authority:code) | Canonical CRS. Always `ESRI:102008` for an admitted dataset (transformation reprojects). |
 | `checksum_sha256`        | string (64 hex)   | SHA-256 of the canonical file.                                         |
 | `size_bytes`             | integer           | File size in bytes at last known-good state.                           |
-| `mtime`                  | ISO-8601 datetime | Modification time at last known-good state.                            |
+| `mtime`                  | ISO-8601 datetime, UTC, `Z`-suffixed | Modification time at last known-good state. |
 | `geographic_extent_bbox` | string            | `minx,miny,maxx,maxy` in the canonical CRS. Snapshot only.             |
+| `footprint_wkt`          | string (WKT, EPSG:4326) | Bounding-box footprint reprojected to lon/lat. Computed from `geographic_extent_bbox` at promote/refresh; intended to feed AGOL spatial-search and external preview tools without forcing them to reason about ESRI:102008. |
 
 #### Classification (raster-only, overridable)
 
@@ -235,9 +270,9 @@ land in inventory only after a successful approve.
 
 | Field           | Type              | Notes                                                                 |
 | --------------- | ----------------- | --------------------------------------------------------------------- |
-| `status`        | enum              | `active`, `deprecated`, or `tombstoned`. Defaults to `active` at ingestion. See below for semantics. |
-| `date_added`    | ISO-8601 date     | Ingestion date.                                                       |
-| `date_modified` | ISO-8601 date     | Last in-place modification recorded by the pipeline.                  |
+| `status`        | enum              | `active`, `deprecated`, or `tombstoned` (schema CHECK). Defaults to `active` at ingestion. See below for semantics. |
+| `date_added`    | ISO-8601 datetime, UTC, `Z`-suffixed | Ingestion timestamp.                       |
+| `date_modified` | ISO-8601 datetime, UTC, `Z`-suffixed | Last in-place modification recorded by the pipeline. |
 | `data_steward`  | string            | Person accountable for this dataset.                                  |
 
 > **Why no `version`/`source`/`license` columns.** The library deliberately
@@ -287,10 +322,35 @@ placeholder metadata would erode that invariant over time.
 
 #### AGOL linkage & freeform
 
-| Field          | Type              | Required | Notes                                                                |
-| -------------- | ----------------- | -------- | -------------------------------------------------------------------- |
-| `agol_item_id` | string            | no       | AGOL item ID once published. Null between ingestion and publication. |
-| `notes`        | string            | no       | Free-form. Don't encode structured data here — add a column instead. |
+| Field                | Type              | Required | Notes                                                                |
+| -------------------- | ----------------- | -------- | -------------------------------------------------------------------- |
+| `agol_item_id`       | string            | no       | AGOL item ID once published. Null between ingestion and publication. Schema enforces uniqueness-when-not-null via a sparse `UNIQUE` index, so many unpublished rows can coexist with NULL. |
+| `agol_published_at`  | ISO-8601 datetime | no       | Reserved for AGOL integration (§15). When set, the timestamp the dataset was first published to AGOL. |
+| `last_synced_at`     | ISO-8601 datetime | no       | Reserved for AGOL integration (§15). Last successful catalogue↔AGOL reconciliation. |
+| `sync_status`        | enum              | yes      | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished` (schema CHECK). Defaults to `unpublished`. Reserved for AGOL integration (§15). |
+| `internal_notes`     | string            | no       | Free-form. Renamed from the pre-migration `notes` column to make its private-audience nature explicit (the steward writes here; AGOL never sees it). Don't encode structured data; add a column instead. |
+
+#### Spatial properties (computed at promote / refresh)
+
+Type-aware columns the schema added at migration 001. They are
+populated from the canonical file and are part of the intrinsic
+snapshot — not a free-text steward field.
+
+| Field            | Type    | Applies to | Notes                                                                              |
+| ---------------- | ------- | ---------- | ---------------------------------------------------------------------------------- |
+| `feature_count`  | integer | vectors    | Row count via fiona. Null for rasters.                                             |
+| `raster_width`   | integer | rasters    | Pixel width. Null for vectors.                                                     |
+| `raster_height`  | integer | rasters    | Pixel height. Null for vectors.                                                    |
+| `pixel_size_x`   | real    | rasters    | Pixel size in CRS units (positive). Null for vectors.                              |
+| `pixel_size_y`   | real    | rasters    | Pixel size in CRS units (positive; sign-flipped from the rasterio affine for north-up rasters). Null for vectors. |
+| `temporal_start` | ISO-8601 datetime | both | Reserved. Datasets with explicit time coverage will populate this; null otherwise. |
+| `temporal_end`   | ISO-8601 datetime | both | Reserved. As above.                                                            |
+
+These were "intrinsic" all along — the file already knew them — but the
+xlsx-era inventory didn't capture them. The SQLite schema does so they
+can drive AGOL spatial search, basic catalogue browsing
+(`feature_count` / pixel-size summaries), and richer reconcile reports
+without the pipeline having to reopen every file on every read.
 
 ### Open questions
 
@@ -298,7 +358,8 @@ None currently open — prior items resolved: `status` column added
 (soft-delete via `tombstoned`), checksums cover the whole bundle for
 multi-file formats, extrinsic metadata is required for every dataset,
 descriptions are plain text, `terms_of_use` and `acknowledgements` stay
-separate with duplication accepted.
+separate with duplication accepted, type-aware spatial columns and
+AGOL-reserved fields landed at migration 001.
 
 ---
 
@@ -397,11 +458,15 @@ For each row where `ready` is `TRUE`:
    `checksum_sha256`, `size_bytes`, `mtime`, `crs` (`ESRI:102008`),
    `geographic_extent_bbox`. Update `date_modified`.
 5. **Promote.** Move the transformed file from processing to
-   `library/<Category>/[<Subcategory>/]<target_filename>`. Append the
-   finalised row to `inventory.xlsx` (with `ready`,
-   `target_filename`, `_validation_error`
-   stripped). Append an `add` entry to `changelog.md` that records
-   both the source format and target path.
+   `library/spatial/<Category>/[<Subcategory>/]<target_filename>`.
+   `INSERT` the finalised row into the `datasets` table of
+   `inventory.db` (the pending-only fields `ready`, `target_filename`,
+   `_validation_error` are stripped; `notes`→`internal_notes` is
+   renamed; `format` and `source_format` are lowercased to the schema
+   CHECK values; `dataset_type='spatial'`, `sync_status='unpublished'`
+   are filled in). `INSERT` a corresponding `add` row into the
+   `changelog` table that records both the source format and the
+   target path.
 6. **Archive the source.** Move `processing/<dataset_id>/` (minus the
    transient `_canonical/` output dir) to
    `queue/archived/<dataset_id>/`. The original bytes are preserved
@@ -507,8 +572,8 @@ who receives library data.
 
 ## 10. Post-ingest lifecycle operations
 
-Four operations on rows that are already in `inventory.xlsx`. Each
-appends a corresponding action to the changelog.
+Four operations on rows that are already in `inventory.db`. Each
+appends a corresponding action to the changelog table.
 
 | Command         | What it changes                                                       | Changelog action |
 | --------------- | --------------------------------------------------------------------- | ---------------- |
@@ -525,8 +590,8 @@ The admitted fields are deliberately narrow:
 
 - **Allowed:** `title`, `data_steward`, `summary`, `description`,
   `tags`, `terms_of_use`, `acknowledgements`, `agol_item_id`,
-  `notes`, `classification`, plus `status` transitions between
-  `active` and `deprecated`.
+  `internal_notes`, `classification`, plus `status` transitions
+  between `active` and `deprecated`.
 - **Rejected as locked** (filesystem-derived snapshot fields, §3):
   `dataset_id`, `checksum_sha256`, `size_bytes`, `mtime`, `crs`,
   `geographic_extent_bbox`, `date_added`. Editing these in the
@@ -755,13 +820,412 @@ archive stays — that's part of the audit trail.
 
 ---
 
-## 12. Scope boundaries (for this and future sessions)
+## 12. SQLite catalogue: source of truth
+
+The catalogue lives in `inventory/inventory.db`, a single SQLite file.
+This section explains why we chose SQLite over the previous
+xlsx-as-source-of-truth design, what guarantees the schema gives, and
+how the legacy xlsx fits into the post-migration world.
+
+### Why SQLite, not xlsx
+
+The xlsx era was simple and worked fine for a 20-row catalogue
+maintained by one steward. It scaled poorly along three axes:
+
+1. **No type or referential enforcement.** A typo in `format`
+   ("GeoPackge"), a numeric column accidentally stored as text, a
+   changelog entry referencing a non-existent `dataset_id` — all of
+   these slipped past Excel and surfaced later as inconsistent
+   reconcile reports or AGOL-publication failures.
+2. **No transactional guarantees.** A pipeline run that crashed
+   between writing the inventory sheet and the changelog left the two
+   permanently out of sync. Excel's lock-file race made this worse:
+   the steward could open the workbook between the pipeline's read
+   and write, then save over the pipeline's pending changes.
+3. **Single-writer.** The xlsx is a binary format that's effectively
+   single-writer; concurrent edits aren't a thing. SQLite's WAL mode
+   lets a long-running reader (the steward scrolling the export)
+   coexist with pipeline writers.
+
+SQLite addresses all three:
+
+- **Type enforcement.** Every table is declared `STRICT` (SQLite ≥
+  3.37). Inserting `'GeoPackge'` into a column with a CHECK on
+  `('geopackage', 'geotiff')` is a hard error at the SQL boundary, not
+  a future debugging session. Foreign keys prevent dangling
+  changelog entries.
+- **Transactions.** Every catalogue mutation in `pipeline/` is wrapped
+  in a single `with conn:` block; partial failures roll back. The
+  ingest's "transformed file moved + datasets row inserted +
+  changelog row inserted" trio either all happen or none do.
+- **Steward UX preserved.** The exported `inventory.xlsx` (`y2y
+  export-xlsx`) is a faithful read-only render of the catalogue; the
+  steward keeps their familiar grid view. They just can't edit it
+  back into the system, which is the entire point — edits go through
+  CLI commands that write proper changelog rows.
+
+### What lives in the database
+
+Three tables:
+
+| Table              | Purpose                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------ |
+| `datasets`         | One row per dataset. The catalogue. Schema in §7.                                    |
+| `changelog`        | Append-only audit log (§5). FK on `dataset_id` with `ON DELETE RESTRICT`.            |
+| `schema_migrations`| Tracks which numbered migrations have been applied. One row per applied migration.   |
+
+Migrations are numbered scripts under `pipeline/migrations/`. They are
+**append-only** — once a migration has been applied to a real
+database, the script must not be edited (a corrected migration is a
+new file, not an amendment to the old one). Each migration records
+its version in `schema_migrations` on success.
+
+Two migrations exist today:
+
+- **001** — bootstrap: convert the legacy `inventory.xlsx` into
+  `inventory.db`, re-key every dataset from `ds_<12hex>` to
+  `ds_<26-char ULID>`, backfill spatial-properties columns, write a
+  per-dataset `migrated_from_xlsx` + `id_format_migration` pair into
+  the changelog, rename the xlsx to
+  `inventory.xlsx.pre-migration-backup`.
+- **002** — library restructure: move `library/<Category>/...` →
+  `library/spatial/<Category>/...` so future dataset types can occupy
+  sibling subtrees (§14). No `file_path` updates needed; the schema's
+  comment specifies the path is relative to `library/spatial/` so
+  pre-existing values were already correct relative to the new typed
+  root.
+
+### Connection conventions
+
+`pipeline/db.py:get_connection()` is the only sanctioned way to open
+the catalogue. It applies, on every connection:
+
+- `PRAGMA foreign_keys = ON` — the schema's FKs are advisory at
+  runtime without this. Easy to forget, expensive when you do.
+- `PRAGMA journal_mode = WAL` — readers don't block writers and vice
+  versa. Set once on disk; subsequent connections inherit.
+- `row_factory = sqlite3.Row` — rows behave like dicts so call sites
+  can use `row["dataset_id"]` instead of positional indexing.
+
+### The xlsx is a regenerated view
+
+`y2y export-xlsx` produces a 2-sheet workbook:
+
+- **`inventory`** sheet — every column from `datasets`, in a layout
+  tuned for steward eye-flow (`pipeline/export_xlsx.py`).
+- **`changelog`** sheet — every row from the changelog table, oldest
+  first.
+
+Re-export overwrites the file. The exporter refuses to write when
+Excel has the xlsx open (the same `~$inventory.xlsx` lock-file check
+the pre-migration code used). The xlsx is **not** the source of
+truth and should be regarded as a derived artifact like a build
+output: regenerate freely, never edit.
+
+The legacy `inventory/changelog.md` is left on disk as historical
+reference but no longer written to. The pre-migration xlsx is kept
+locally as `inventory.xlsx.pre-migration-backup` (gitignored; the
+canonical pre-migration snapshot is the `v0.1-xlsx` git tag).
+
+---
+
+## 13. PostGIS portability
+
+The schema is designed so that promoting from SQLite to PostGIS in a
+later session is a deliberate, scoped change — not a rewrite. The
+constraints that make this possible are baked into `schema.sql` from
+day one.
+
+### Identifier conventions
+
+- **Lowercase, underscore-separated identifiers.** No quoted
+  identifiers, no mixed-case columns. Case-insensitive in SQLite,
+  case-sensitive when quoted in Postgres; sticking to lowercase means
+  identifiers behave the same way under both engines without
+  per-engine quoting.
+- **No reserved words.** `dataset_type`, `internal_notes`, etc. — not
+  `type`, not `notes`, not `description` adjacent to anything reserved.
+
+### Type discipline
+
+- **`TEXT` for all strings.** No `VARCHAR(n)`. Postgres's `TEXT` and
+  `VARCHAR(n)` are functionally equivalent except for the (rarely
+  desirable) length cap; SQLite ignores `VARCHAR` length entirely. A
+  `TEXT`-only schema is identical-shape under both.
+- **`INTEGER` for booleans.** SQLite has no native `BOOLEAN`; Postgres
+  does, and exposes it as a separate type. We store 0/1 in `INTEGER`
+  columns (`agol_item_id IS NOT NULL` is the closest current example
+  of a derived boolean) — promotable to `BOOLEAN` in the Postgres
+  port with a one-line cast.
+- **`REAL` for floats** — pragmatic alias for `DOUBLE PRECISION` under
+  Postgres.
+- **No SQLite-specific types.** No `BLOB` (we don't store binary
+  payloads), no SQLite affinity-only types (`NUMERIC`).
+
+### `STRICT` mode
+
+Every table is declared `... STRICT;` so SQLite enforces the column
+types as declared. Pre-3.37 SQLite was famously promiscuous about
+types; STRICT brings type-checking up to Postgres parity for the
+columns the schema cares about. Without STRICT, an `INTEGER NOT NULL`
+column would silently accept the string `"1186475843"` from an
+xlsx-importing path.
+
+### Timestamps
+
+ISO-8601 UTC strings with explicit `Z` suffix
+(`2026-04-29T21:31:33Z`), stored in `TEXT` columns. **Why strings,
+not native timestamp types:**
+
+- SQLite has no native datetime type — its `DATETIME` is just `TEXT`
+  with parsing functions on top.
+- Postgres has `TIMESTAMPTZ`, but a string column with a
+  parseable-by-everything format ports cleanly: `ALTER TABLE ...
+  ALTER COLUMN ... TYPE TIMESTAMPTZ USING ...::TIMESTAMPTZ` does the
+  conversion in one step.
+- Lots of consumers (AGOL, Excel, jq scripts) prefer ISO strings to
+  whatever each engine's native format is.
+
+The explicit `Z` is non-negotiable: a bare `2026-04-29T21:31:33` is
+ambiguous about timezone, and "we always mean UTC" is not enforceable
+without the suffix. Migration 001 upgraded the xlsx-era bare-date
+values (`2026-04-27`) to `2026-04-27T00:00:00Z` for this reason.
+
+### Spatial columns: WKT, not native geometry
+
+`footprint_wkt` is stored as a `TEXT` Well-Known-Text string in
+EPSG:4326, not as a SQLite-spatialite or Postgres `geometry` type.
+
+- Keeps SQLite portable without forcing a Spatialite extension on
+  every install.
+- The Postgres port can read the column as `TEXT` and either keep it
+  that way or cast to `geometry(Polygon, 4326)` via
+  `ST_GeomFromText`. The choice is local to the Postgres deployment,
+  not constrained by the schema.
+
+`geographic_extent_bbox` is a `'minx,miny,maxx,maxy'`-as-string field
+in the canonical CRS (`ESRI:102008`), kept for drift detection
+(reconcile compares string-equal). `footprint_wkt` is the EPSG:4326
+analogue intended for AGOL/external consumers that don't speak
+ESRI:102008.
+
+### Foreign keys + RESTRICT
+
+`changelog.dataset_id` references `datasets.dataset_id` with `ON
+DELETE RESTRICT`, so accidental dataset removal can't orphan audit
+history. Postgres enforces FKs by default; SQLite needs `PRAGMA
+foreign_keys = ON` per connection (handled in `pipeline/db.py`).
+
+### Sparse `UNIQUE` indexes
+
+`agol_item_id` is `UNIQUE`-when-not-null via a partial index:
+
+```sql
+CREATE UNIQUE INDEX idx_datasets_agol_item_id_unique
+    ON datasets(agol_item_id) WHERE agol_item_id IS NOT NULL;
+```
+
+So many unpublished rows (NULL `agol_item_id`) coexist while every
+*published* row's item ID is unique. Postgres has identical syntax
+for partial indexes, so the port is mechanical.
+
+### What's *not* PostGIS-portable yet
+
+- **`PRIMARY KEY` is opaque text.** Both engines support that
+  natively; no concern.
+- **`AUTOINCREMENT` is not used anywhere.** Every PK is a ULID-bearing
+  text column generated by the application. No SQLite-specific
+  auto-id semantics to port.
+- **No `WITHOUT ROWID` tables.** They're SQLite-only and we don't
+  need them.
+
+The above is sufficient that a Postgres port is a well-defined task
+("translate `STRICT` to native typing, add a Spatialite/PostGIS
+preference for `footprint_wkt` if desired, replicate the partial
+index"), not an architectural rewrite.
+
+---
+
+## 14. Type extensibility
+
+The catalogue is shaped to grow beyond spatial data. Today
+`datasets.dataset_type` is constrained to `'spatial'`; tomorrow it
+might admit `'tabular'`, `'imagery'`, or document-class types. The
+schema is structured so that growth doesn't require a teardown.
+
+### Two-tier shape
+
+The current layout is a deliberate **single-table-with-sentinel**
+pattern:
+
+```
+datasets
+├── [type-agnostic columns]   # identity, taxonomy, extrinsic metadata,
+│                               lifecycle, AGOL linkage
+└── [spatial-specific columns] # CRS, bbox, footprint_wkt, raster_*,
+                                 feature_count, source_format, …
+```
+
+The schema's source comments mark each column group with
+`[type-agnostic]` or `[spatial-specific]` so the boundary is
+explicit. This is not the long-term shape — it's the **pragmatic
+shape for one type**.
+
+When a second type appears, the spatial-specific columns move to a
+per-type extension table:
+
+```
+datasets                       # unchanged: type-agnostic only
+├── dataset_id (PK)
+├── dataset_type
+├── title, category, …
+
+spatial_datasets               # new: spatial-specific columns
+├── dataset_id (PK + FK)
+├── crs, geographic_extent_bbox, footprint_wkt, …
+
+tabular_datasets               # new
+├── dataset_id (PK + FK)
+├── row_count, column_schema_json, …
+```
+
+The migration is a numbered script (`003_split_spatial_extension.py`
+or similar) that:
+
+1. Creates the extension tables.
+2. Copies spatial-specific columns from `datasets` into
+   `spatial_datasets`.
+3. Drops those columns from `datasets`.
+4. Adjusts the application's read path to JOIN by `dataset_type`.
+
+Until that migration runs, the spatial-specific columns sit on
+`datasets` and nothing breaks. The single-table pattern is fine for
+one type; the extension-table pattern is right when there are two or
+more.
+
+### Filesystem layout matches
+
+`library/` mirrors the same shape:
+
+```
+library/
+├── spatial/                 # dataset_type = 'spatial'
+│   └── <Category>/...
+├── tabular/                 # future: dataset_type = 'tabular'
+└── imagery/                 # future: dataset_type = 'imagery'
+```
+
+`file_path` in the catalogue is **relative to its type's subtree**.
+Resolution is `library / dataset_type / file_path`. The CLI's
+`_resolve_paths` returns `library/spatial/` as the spatial library
+root; a future tabular CLI would resolve to `library/tabular/` for
+that type's commands. There is no top-level "library root" the
+pipeline operates against in an undifferentiated way; type is always
+selected first.
+
+### What stays type-agnostic
+
+Type expansion does not change:
+
+- Reconciliation philosophy (§2). A tabular orphan is still an
+  orphan; a tabular ghost is still a ghost. Reconcile becomes
+  type-aware (it walks the right subtree per type) but its findings
+  taxonomy is unchanged.
+- Stable IDs (§4). `ds_<ULID>` is type-agnostic; reading a
+  `dataset_type='tabular'` row gives you the table to JOIN to (or the
+  columns to read directly while still single-table).
+- Append-only changelog (§5). One changelog table, all dataset types.
+  An `add` of a tabular dataset and an `add` of a spatial dataset
+  look structurally identical in the audit log.
+- Three-phase ingestion (§8). Each type has its own scan validators
+  and transformer (vector / raster / tabular / …) but the queue →
+  pending.xlsx → approve flow is uniform.
+
+### Why not "just use AGOL's classification"
+
+AGOL distinguishes feature services, tile services, hosted feature
+layers, etc. — those are *publication* shapes, not *data type*
+shapes. A spatial-data row in our catalogue might publish as any of
+several AGOL item types depending on size and use case. The
+catalogue's `dataset_type` is about what the data **is**;
+publication shape is downstream and lives in `agol_item_id` linkage.
+
+---
+
+## 15. AGOL integration (placeholder)
+
+The schema reserves four columns for AGOL synchronisation; this
+section sketches the eventual flow so they're not vestigial.
+**Implementation is deferred** — none of these are populated by code
+in this branch. The columns exist so the integration when it arrives
+doesn't require a schema change.
+
+### Reserved columns
+
+| Column                | Default        | Meaning                                                                            |
+| --------------------- | -------------- | ---------------------------------------------------------------------------------- |
+| `agol_item_id`        | NULL           | The AGOL item ID once published. Sparse UNIQUE — one published item per row.       |
+| `agol_published_at`   | NULL           | Timestamp the dataset was first published to AGOL. Set once, then immutable.       |
+| `last_synced_at`      | NULL           | Timestamp of the last successful catalogue ↔ AGOL reconciliation.                  |
+| `sync_status`         | `unpublished`  | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished`. Schema CHECK. |
+
+### `sync_status` state machine
+
+```
+unpublished ──(publish)──> clean
+clean ──(catalogue edit)──> pending_push
+clean ──(AGOL edit detected)──> pending_pull
+pending_push ──(push succeeds)──> clean
+pending_push ──(push fails)──> error
+pending_pull ──(pull succeeds)──> clean
+pending_pull ──(steward rejects pull)──> conflict
+conflict ──(steward resolves)──> pending_push | clean
+```
+
+The state machine lives in application code, not in the schema —
+SQLite CHECK constraints can enforce the **value** of `sync_status`
+but not the legal transitions. A future `pipeline/agol_sync.py` will
+enforce transitions explicitly with the changelog action `metadata`
+(or a new dedicated action added by a numbered migration).
+
+### Two-way drift detection
+
+The same philosophy that drives `y2y reconcile` (§2) extends to AGOL:
+
+- **Don't auto-fix divergences.** If the catalogue says
+  `tags='caribou;telemetry'` and AGOL says `tags='caribou'`, surface
+  the conflict; the steward decides which side wins.
+- **Detect cheaply where possible.** AGOL exposes per-item modified
+  timestamps and content hashes for some types; use those for
+  fast-mode parity with `y2y reconcile --fast`. Deep mode would pull
+  full item descriptors and diff field-by-field.
+- **Log every sync event.** Every push, pull, conflict, and resolution
+  goes through `append_changelog`. The audit trail is one trail —
+  catalogue mutations and AGOL syncs interleave by `timestamp`.
+
+### Why AGOL is downstream, not embedded
+
+AGOL is a publication target, not a storage substrate. Embedding AGOL
+calls into ingest or lifecycle would mean every catalogue mutation
+blocks on a remote API, and every steward without AGOL credentials
+can't run the pipeline. Keeping AGOL out-of-band — invoked by an
+explicit `y2y agol-sync` command in some future session — preserves
+local-first operation and makes the publication step inspectable on
+its own.
+
+The placeholder columns are sufficient state for the eventual sync
+loop. Nothing else in the schema needs to change to support AGOL.
+
+---
+
+## 16. Scope boundaries (for this and future sessions)
 
 - The pipeline never edits files *inside* a dataset — only moves, ingests,
   and records metadata about them.
 - Work-in-progress data does not live in `library/`. It lives elsewhere
   (e.g., working directories outside this repo) and only enters via the
   ingest queue.
-- AGOL publishing is *not* handled by this library. The inventory records
-  the AGOL `item_id` when known, but pushing or syncing to AGOL is a
-  separate concern.
+- AGOL publishing is *not* handled by this library yet. The catalogue
+  records the AGOL `item_id` when known, but pushing or syncing to AGOL
+  is a separate concern (placeholder design in §15; implementation
+  deferred).

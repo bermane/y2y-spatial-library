@@ -15,7 +15,14 @@ crs, bbox); ``refresh`` is the *only* operation that updates them, and
 only by recomputing them from the current file on disk — never from
 arbitrary steward input.
 
-See DESIGN.md §7 (column roles) and the changelog header (valid actions).
+Post-migration to SQLite (2026-04-29): all operations take a single
+``db_path`` (the path to ``inventory.db``) instead of separate
+``inventory_path`` and ``changelog_path``. Both tables are in the same
+database. Lifecycle ops use row-level UPDATEs via
+:func:`inventory_manager.update_dataset` rather than the old
+load-mutate-save-all pattern.
+
+See DESIGN.md §7 (column roles) and ``schema.sql`` (valid actions).
 """
 
 from __future__ import annotations
@@ -30,13 +37,14 @@ from .validators.naming import validate_naming
 
 # Fields permitted to change via update(). Anything outside this set
 # either lives in the filesystem (locked) or requires a file move
-# (which goes through rename()).
+# (which goes through rename()). Note ``notes`` was renamed to
+# ``internal_notes`` in the SQLite schema.
 UPDATABLE_FIELDS: frozenset[str] = frozenset({
     "title", "status",
     "classification",  # raster only; see DESIGN.md §11
     "data_steward",
     "summary", "description", "tags", "terms_of_use", "acknowledgements",
-    "agol_item_id", "notes",
+    "agol_item_id", "internal_notes",
 })
 
 # Status values reachable via update(). Tombstoning is its own command
@@ -50,18 +58,17 @@ class LifecycleError(Exception):
 
 # --- helpers ------------------------------------------------------------
 
-def _find_row(rows: list[dict[str, Any]], dataset_id: str) -> dict[str, Any]:
-    for r in rows:
-        if r.get("dataset_id") == dataset_id:
-            return r
-    raise LifecycleError(f"dataset_id '{dataset_id}' not found in inventory")
+def _require_row(db_path: Path, dataset_id: str) -> dict[str, Any]:
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise LifecycleError(f"dataset_id {dataset_id!r} not found in inventory")
+    return row
 
 
 # --- update -------------------------------------------------------------
 
 def update(
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     *,
     dataset_id: str,
     fields: dict[str, Any],
@@ -73,12 +80,10 @@ def update(
     columns (checksum, size, mtime, etc.) and movement-bound columns
     (file_path, category, subcategory) are rejected with a clear error.
 
-    Returns the updated row dict (in-memory snapshot after the change).
+    Returns the updated row dict (re-read after the change).
     """
     if not fields:
         raise LifecycleError("no fields supplied to update")
-
-    inventory_manager.assert_not_locked(inventory_path)
 
     bad = set(fields) - UPDATABLE_FIELDS
     if bad:
@@ -95,42 +100,43 @@ def update(
             f"(allowed: {sorted(_UPDATE_STATUSES)}). Use 'tombstone' to soft-delete."
         )
 
-    rows = inventory_manager.load_inventory(inventory_path)
-    target = _find_row(rows, dataset_id)
-
+    target = _require_row(db_path, dataset_id)
     if target.get("status") == "tombstoned":
-        raise LifecycleError(f"dataset_id '{dataset_id}' is tombstoned; updates not allowed")
+        raise LifecycleError(f"dataset_id {dataset_id!r} is tombstoned; updates not allowed")
 
-    changes: list[str] = []
+    # Compute the diff so we can produce a useful changelog entry and
+    # silently no-op when nothing actually changed.
+    changes: list[tuple[str, Any, Any]] = []
+    actual_updates: dict[str, Any] = {}
     for k, v in fields.items():
         old = target.get(k)
         if old != v:
-            target[k] = v
-            changes.append(f"{k}: {old!r} → {v!r}")
+            changes.append((k, old, v))
+            actual_updates[k] = v
 
     if not changes:
-        return target  # no-op; nothing to log or save
+        return target  # no-op; nothing to log or write
 
-    target["date_modified"] = utils.utc_now_date()
-    inventory_manager.save_inventory(inventory_path, rows)
+    actual_updates["date_modified"] = utils.utc_now_iso()
+    inventory_manager.update_dataset(db_path, dataset_id, actual_updates)
 
+    detail = " | ".join(f"{k}: {old!r} → {new!r}" for k, old, new in changes)
     inventory_manager.append_changelog(
-        changelog_path,
+        db_path,
         timestamp=utils.utc_now_iso(),
         action="update",
         dataset_id=dataset_id,
         actor=actor,
         path=str(target.get("file_path") or "—"),
-        detail=" | ".join(changes),
+        detail=detail,
     )
-    return target
+    return _require_row(db_path, dataset_id)
 
 
 # --- rename -------------------------------------------------------------
 
 def rename(
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     library_root: Path,
     *,
     dataset_id: str,
@@ -153,18 +159,16 @@ def rename(
       This is the normal mode for ``y2y reconcile --fix-renames``.
     - file at both, or at neither: raise — operator must resolve.
     """
-    inventory_manager.assert_not_locked(inventory_path)
-
     new_path_obj = Path(new_path)
 
     ok, reason = validate_naming(new_path_obj)
     if not ok:
-        raise LifecycleError(f"new path '{new_path}' fails naming convention: {reason}")
+        raise LifecycleError(f"new path {new_path!r} fails naming convention: {reason}")
 
     parts = new_path_obj.parts
     if len(parts) < 2:
         raise LifecycleError(
-            f"new path '{new_path}' must include a category folder, "
+            f"new path {new_path!r} must include a category folder, "
             f"e.g. 'Water/streams_v2.gpkg'."
         )
     new_category_folder = parts[0]
@@ -172,7 +176,7 @@ def rename(
 
     if new_category_folder not in taxonomy.FOLDER_TO_CATEGORY:
         raise LifecycleError(
-            f"category folder '{new_category_folder}' (from new path) is not "
+            f"category folder {new_category_folder!r} (from new path) is not "
             f"one of the {len(taxonomy.CATEGORIES)} canonical category folders."
         )
     new_category_display = taxonomy.FOLDER_TO_CATEGORY[new_category_folder]
@@ -184,24 +188,22 @@ def rename(
             allowed = taxonomy.SUBCATEGORY_FOLDERS.get(new_category_display)
             if allowed:
                 raise LifecycleError(
-                    f"subcategory folder '{new_subcategory_folder}' is not valid "
-                    f"for category '{new_category_display}'; allowed: "
+                    f"subcategory folder {new_subcategory_folder!r} is not valid "
+                    f"for category {new_category_display!r}; allowed: "
                     f"{sorted(allowed.values())}."
                 )
             raise LifecycleError(
-                f"category '{new_category_display}' admits no subcategory."
+                f"category {new_category_display!r} admits no subcategory."
             )
         new_subcategory_display = sub_map[new_subcategory_folder]
 
-    rows = inventory_manager.load_inventory(inventory_path)
-    target = _find_row(rows, dataset_id)
-
+    target = _require_row(db_path, dataset_id)
     if target.get("status") == "tombstoned":
-        raise LifecycleError(f"dataset_id '{dataset_id}' is tombstoned; renames not allowed")
+        raise LifecycleError(f"dataset_id {dataset_id!r} is tombstoned; renames not allowed")
 
     old_path = str(target.get("file_path") or "")
     if old_path == new_path:
-        raise LifecycleError(f"new path is identical to current path: '{new_path}'")
+        raise LifecycleError(f"new path is identical to current path: {new_path!r}")
 
     old_full = library_root / old_path
     new_full = library_root / new_path
@@ -210,47 +212,51 @@ def rename(
 
     if old_exists and new_exists:
         raise LifecycleError(
-            f"both old ('{old_path}') and new ('{new_path}') exist on disk; "
+            f"both old ({old_path!r}) and new ({new_path!r}) exist on disk; "
             f"resolve manually before running rename."
         )
     if not old_exists and not new_exists:
         raise LifecycleError(
-            f"neither old ('{old_path}') nor new ('{new_path}') exists on disk."
+            f"neither old ({old_path!r}) nor new ({new_path!r}) exists on disk."
         )
 
     if old_exists:
-        # Active move: do it now.
         new_full.parent.mkdir(parents=True, exist_ok=True)
         old_full.rename(new_full)
         action_note = "moved file"
     else:
-        # File already at new location (e.g., steward moved it manually).
         action_note = "file already at new path; recording inventory only"
 
-    target["file_path"] = new_path
-    target["category"] = new_category_display
-    target["subcategory"] = new_subcategory_display
-    target["date_modified"] = utils.utc_now_date()
-
-    inventory_manager.save_inventory(inventory_path, rows)
+    inventory_manager.update_dataset(
+        db_path,
+        dataset_id,
+        {
+            "file_path": new_path,
+            "category": new_category_display,
+            "subcategory": new_subcategory_display,
+            "date_modified": utils.utc_now_iso(),
+        },
+    )
 
     inventory_manager.append_changelog(
-        changelog_path,
+        db_path,
         timestamp=utils.utc_now_iso(),
         action="rename",
         dataset_id=dataset_id,
         actor=actor,
         path=new_path,
-        detail=f"{action_note}: '{old_path}' → '{new_path}'",
+        detail=f"{action_note}: {old_path!r} → {new_path!r}",
+        field_changed="file_path",
+        old_value=old_path,
+        new_value=new_path,
     )
-    return target
+    return _require_row(db_path, dataset_id)
 
 
 # --- tombstone ----------------------------------------------------------
 
 def tombstone(
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     library_root: Path,
     *,
     dataset_id: str,
@@ -266,13 +272,9 @@ def tombstone(
     If the file is already absent (manual deletion), the operation
     proceeds and notes that fact in the changelog.
     """
-    inventory_manager.assert_not_locked(inventory_path)
-
-    rows = inventory_manager.load_inventory(inventory_path)
-    target = _find_row(rows, dataset_id)
-
+    target = _require_row(db_path, dataset_id)
     if target.get("status") == "tombstoned":
-        raise LifecycleError(f"dataset_id '{dataset_id}' is already tombstoned")
+        raise LifecycleError(f"dataset_id {dataset_id!r} is already tombstoned")
 
     file_path = str(target.get("file_path") or "")
     full_path = (library_root / file_path) if file_path else None
@@ -283,24 +285,29 @@ def tombstone(
     else:
         action_note = "file already absent from library/"
 
-    target["status"] = "tombstoned"
-    target["date_modified"] = utils.utc_now_date()
-    inventory_manager.save_inventory(inventory_path, rows)
+    inventory_manager.update_dataset(
+        db_path,
+        dataset_id,
+        {"status": "tombstoned", "date_modified": utils.utc_now_iso()},
+    )
 
     detail = f"{action_note}; dataset_id retained for audit"
     if reason:
         detail = f"{detail}. reason: {reason}"
 
     inventory_manager.append_changelog(
-        changelog_path,
+        db_path,
         timestamp=utils.utc_now_iso(),
         action="remove",
         dataset_id=dataset_id,
         actor=actor,
         path=file_path or "—",
         detail=detail,
+        field_changed="status",
+        old_value=str(target.get("status") or ""),
+        new_value="tombstoned",
     )
-    return target
+    return _require_row(db_path, dataset_id)
 
 
 # --- refresh ------------------------------------------------------------
@@ -313,8 +320,7 @@ _REFRESH_SNAPSHOT_FIELDS: tuple[str, ...] = (
 
 
 def refresh(
-    inventory_path: Path,
-    changelog_path: Path,
+    db_path: Path,
     library_root: Path,
     *,
     dataset_id: str,
@@ -328,47 +334,36 @@ def refresh(
     on disk. Logs a ``refresh`` entry with the per-field diff.
 
     The file must still pass canonical validators: ``refresh`` will not
-    accept drift that breaks format/CRS/naming compliance. If the
-    in-place edit produced a non-canonical file, fix the file first
-    (the inventory snapshot stays old in the meantime; reconcile will
-    keep flagging the drift until refresh succeeds or the steward
-    rolls back).
+    accept drift that breaks format/CRS/naming compliance.
 
     No-op when nothing has changed.
     """
-    inventory_manager.assert_not_locked(inventory_path)
-
-    rows = inventory_manager.load_inventory(inventory_path)
-    target = _find_row(rows, dataset_id)
-
+    target = _require_row(db_path, dataset_id)
     if target.get("status") == "tombstoned":
         raise LifecycleError(
-            f"dataset_id '{dataset_id}' is tombstoned; refresh not allowed"
+            f"dataset_id {dataset_id!r} is tombstoned; refresh not allowed"
         )
 
     file_path = str(target.get("file_path") or "")
     if not file_path:
-        raise LifecycleError(f"dataset_id '{dataset_id}' has no file_path")
+        raise LifecycleError(f"dataset_id {dataset_id!r} has no file_path")
 
     full_path = library_root / file_path
     if not full_path.exists():
         raise LifecycleError(
-            f"file '{file_path}' not found in library/ — run `y2y reconcile` "
+            f"file {file_path!r} not found in library/ — run `y2y reconcile` "
             f"to investigate the ghost before attempting refresh."
         )
 
-    # Canonical re-validation. Refusing drift that breaks compliance is
-    # the whole point — refresh is "accept good drift," not "accept any drift."
     failures = validate_all(full_path)
     if failures:
         reasons = "; ".join(f"{check}: {reason}" for check, reason in failures)
         raise LifecycleError(
-            f"file '{file_path}' fails canonical validators; refusing to "
+            f"file {file_path!r} fails canonical validators; refusing to "
             f"record bad state in the inventory. Fix the file first. "
             f"Failures: {reasons}"
         )
 
-    # Recompute the snapshot from disk.
     new_size, new_mtime = utils.stat_signature(full_path)
     new_checksum = utils.sha256_file(full_path)
     if utils.is_vector(full_path):
@@ -388,7 +383,6 @@ def refresh(
         "geographic_extent_bbox": new_bbox,
     }
 
-    # Diff against existing snapshot.
     diffs: list[tuple[str, Any, Any]] = []
     for field in _REFRESH_SNAPSHOT_FIELDS:
         old = target.get(field)
@@ -397,17 +391,15 @@ def refresh(
             diffs.append((field, old, new))
 
     if not diffs:
-        return target  # no-op: nothing to record
+        return target  # no-op
 
-    for field, _, new in diffs:
-        target[field] = new
-    target["date_modified"] = utils.utc_now_date()
-
-    inventory_manager.save_inventory(inventory_path, rows)
+    update_payload = {field: new for field, _, new in diffs}
+    update_payload["date_modified"] = utils.utc_now_iso()
+    inventory_manager.update_dataset(db_path, dataset_id, update_payload)
 
     detail = " | ".join(f"{f}: {old!r} → {new!r}" for f, old, new in diffs)
     inventory_manager.append_changelog(
-        changelog_path,
+        db_path,
         timestamp=utils.utc_now_iso(),
         action="refresh",
         dataset_id=dataset_id,
@@ -415,4 +407,4 @@ def refresh(
         path=file_path,
         detail=f"snapshot refreshed from disk: {detail}",
     )
-    return target
+    return _require_row(db_path, dataset_id)

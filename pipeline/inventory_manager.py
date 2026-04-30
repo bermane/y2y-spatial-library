@@ -1,46 +1,102 @@
-"""Inventory manager: read/write inventory.xlsx and append to changelog.md.
+"""Inventory manager: read/write the SQLite catalogue and append to changelog.
 
-The inventory is the canonical record of metadata and history for every
-dataset in ``library/``. The filesystem is canonical for *existence*
-and *location*; the inventory is canonical for everything else
-(provenance, license, checksum, version, stewardship, AGOL linkage).
+As of migration 001 (2026-04-29) the source of truth is
+``inventory/inventory.db``, not the legacy ``inventory.xlsx``. The xlsx
+is now a regenerated read-only artifact (see ``pipeline.export_xlsx``).
 
-Column order and groupings come from DESIGN.md §7. Changelog format
-comes from inventory/changelog.md and is append-only — never edit or
-regenerate past entries.
+This module is intentionally a thin façade over stdlib ``sqlite3`` —
+no ORM, no query builder, no hidden transactions. Callers pass a
+``db_path`` (Path to ``inventory.db``) and get back plain ``dict`` rows
+or commit plain ``dict`` rows. The schema is canonical (see
+``pipeline/schema.sql``); this module makes no attempt to validate
+field values beyond what SQLite + the STRICT/CHECK constraints already
+enforce at INSERT/UPDATE time.
+
+The public function names mirror the pre-migration API
+(:func:`load_inventory`, :func:`save_inventory`, :func:`append_inventory`,
+:func:`append_changelog`) so the upstream callers (lifecycle, ingest,
+reconcile) only need their argument types swapped from xlsx-path to
+db-path.
+
+Excel-lock detection (``assert_not_locked``) and ``InventoryLockedError``
+remain here because the xlsx export still has to fail-fast when Excel
+has the rendered xlsx open. They no longer guard catalogue mutations.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+import ulid
 
-INVENTORY_FILENAME = "inventory.xlsx"
-INVENTORY_SHEET_NAME = "inventory"
-CHANGELOG_FILENAME = "changelog.md"
+from . import db as _db
+
+# Public filenames (used by the CLI and a couple of helpers in callers).
+INVENTORY_FILENAME = "inventory.xlsx"        # legacy, now an export target
+DB_FILENAME = "inventory.db"                 # source of truth
+CHANGELOG_FILENAME = "changelog.md"          # legacy human-readable, not regenerated
+
+
+# ----------------------------------------------------------------------------
+# Schema-derived constants
+# ----------------------------------------------------------------------------
+# Order matches the column ordering in ``pipeline/schema.sql``. Used by
+# load/save/append and (re-exported for) ``pipeline.export_xlsx``.
+DATASETS_COLUMNS: tuple[str, ...] = (
+    # identity & taxonomy
+    "dataset_id", "dataset_type", "title", "category", "subcategory",
+    "file_path", "format",
+    # extrinsic metadata
+    "summary", "description", "tags", "terms_of_use",
+    "acknowledgements", "data_steward", "internal_notes",
+    # lifecycle state
+    "status", "date_added", "date_modified",
+    # AGOL linkage
+    "agol_item_id", "agol_published_at", "last_synced_at", "sync_status",
+    # intrinsic snapshot
+    "checksum_sha256", "size_bytes", "mtime", "crs",
+    "geographic_extent_bbox", "classification",
+    # spatial properties
+    "footprint_wkt", "temporal_start", "temporal_end",
+    "feature_count",
+    "raster_width", "raster_height", "pixel_size_x", "pixel_size_y",
+    # source provenance
+    "source_format", "source_filename", "source_crs", "source_layer",
+)
+
+# Backwards-compat alias used by tests + pending_sheet historically.
+INVENTORY_COLUMN_NAMES: list[str] = list(DATASETS_COLUMNS)
+
+CHANGELOG_COLUMNS: tuple[str, ...] = (
+    "id", "timestamp", "dataset_id", "action",
+    "field_changed", "old_value", "new_value", "note", "actor",
+)
+
+# Action values permitted by the schema CHECK on changelog.action.
+# Re-exported so callers can guard input without re-typing the list.
+CHANGELOG_ACTIONS: frozenset[str] = frozenset({
+    "add", "update", "rename", "remove", "refresh", "metadata",
+    "reconcile-note", "migrated_from_xlsx", "id_format_migration",
+})
 
 
 class InventoryLockedError(RuntimeError):
-    """Raised when an .xlsx pipeline-write target appears to be open in Excel.
+    """Raised when an .xlsx pipeline-write target appears open in Excel.
 
-    Excel writes a ``~$<filename>`` lock file in the same directory while
-    a workbook is open. If the pipeline writes to that file at the same
-    time, Excel's subsequent save will silently overwrite the pipeline's
-    changes when the user saves manually. Refusing to write when a lock
-    file is present prevents this race.
+    Pre-migration this guarded inventory.xlsx; post-migration it only
+    matters for the rendered export and for pending.xlsx (the in-flight
+    review sheet). The catalogue itself is SQLite and not subject to
+    Excel locks.
     """
 
 
 def assert_not_locked(path: Path) -> None:
-    """Raise :class:`InventoryLockedError` if ``path`` appears open in Excel.
+    """Raise :class:`InventoryLockedError` if ``path`` (an .xlsx) is open in Excel.
 
-    Detection: presence of a sibling ``~$<filename>`` lock file. Excel
-    creates these when a workbook opens and removes them when it closes
-    (or sometimes leaves them if it crashed). False positives are
-    cheap to fix — just delete the stray lock file.
+    Detection: presence of a sibling ``~$<filename>`` lock file.
+    Cheap to fix when wrong — just delete the stray lock file.
     """
     lock = path.parent / f"~${path.name}"
     if lock.exists():
@@ -53,133 +109,155 @@ def assert_not_locked(path: Path) -> None:
         )
 
 
-# Ordered (name, role) — matches DESIGN.md §7 groupings.
-# Roles: "locked" (auto-filled, never edited), "overridable" (auto-filled
-# but the steward may correct), "required" (steward must fill), "optional".
-# Column order is tuned for steward-UX readability when scanning
-# inventory.xlsx, not for canonical-grouping symmetry. The conceptual
-# groupings in DESIGN.md §7 are still the source-of-truth for
-# *what* each column means; this list controls *how* they're laid
-# out in the workbook.
-INVENTORY_COLUMNS: list[tuple[str, str]] = [
-    # Identity (lead): which dataset is this and where does it sit in the taxonomy?
-    ("dataset_id", "locked"),
-    ("category", "overridable"),
-    ("subcategory", "overridable"),
-    # AGOL-facing extrinsic content: what the steward authored, plus
-    # AGOL linkage and freeform notes (kept together so the whole AGOL
-    # block is contiguous).
-    ("title", "required"),
-    ("summary", "required"),
-    ("description", "required"),
-    ("tags", "required"),
-    ("terms_of_use", "required"),
-    ("acknowledgements", "required"),
-    ("data_steward", "required"),
-    ("agol_item_id", "optional"),
-    ("notes", "optional"),
-    # Type and lifecycle state.
-    ("classification", "overridable"),
-    ("status", "overridable"),
-    # Dates and on-disk location of the canonical file.
-    ("date_added", "locked"),
-    ("date_modified", "locked"),
-    ("file_path", "locked"),
-    ("format", "locked"),
-    # Intrinsic snapshot (drift-detection only).
-    ("crs", "locked"),
-    ("checksum_sha256", "locked"),
-    ("size_bytes", "locked"),
-    ("mtime", "locked"),
-    ("geographic_extent_bbox", "locked"),
-    # Source provenance — pushed to the back: forensic columns the
-    # steward reads occasionally, never edits.
-    ("source_format", "locked"),
-    ("source_filename", "locked"),
-    ("source_crs", "locked"),
-    ("source_layer", "locked"),
-]
+# ----------------------------------------------------------------------------
+# datasets — read API
+# ----------------------------------------------------------------------------
 
-INVENTORY_COLUMN_NAMES: list[str] = [name for name, _ in INVENTORY_COLUMNS]
+def load_inventory(db_path: Path) -> list[dict[str, Any]]:
+    """Return every dataset row as a list of dicts. Empty list if db missing.
 
-_FILLS: dict[str, PatternFill] = {
-    "locked": PatternFill("solid", start_color="D3D3D3"),       # grey
-    "overridable": PatternFill("solid", start_color="CFE2F3"),  # light blue
-    "required": PatternFill("solid", start_color="F4CCCC"),     # pink
-    "optional": PatternFill("solid", start_color="D9EAD3"),     # light green
-}
-
-_HEADER_FONT = Font(bold=True, color="000000")
-
-
-# --- inventory.xlsx I/O --------------------------------------------------
-
-def load_inventory(path: Path) -> list[dict[str, Any]]:
-    """Return inventory rows. Empty list if the file does not exist."""
-    if not path.exists():
+    The legacy xlsx-era version returned an empty list when the file
+    didn't exist; this preserves that semantics so callers (reconcile,
+    tests) still cope with a fresh checkout.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
         return []
-    wb = load_workbook(path)
-    ws = wb[INVENTORY_SHEET_NAME]
-    headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-    rows: list[dict[str, Any]] = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if all(v is None for v in row):
-            continue
-        rows.append(dict(zip(headers, row)))
-    return rows
+    with _db.connect(db_path) as conn:
+        cur = conn.execute(
+            f"SELECT {', '.join(DATASETS_COLUMNS)} FROM datasets ORDER BY dataset_id"
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
-def save_inventory(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write rows to ``path``, replacing any existing content.
+def get_dataset(db_path: Path, dataset_id: str) -> dict[str, Any] | None:
+    """Return one row by ``dataset_id``, or ``None`` if absent."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return None
+    with _db.connect(db_path) as conn:
+        cur = conn.execute(
+            f"SELECT {', '.join(DATASETS_COLUMNS)} FROM datasets "
+            f"WHERE dataset_id = ?",
+            (dataset_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
-    Refuses to write if Excel has the file open (race-prevention).
+
+# ----------------------------------------------------------------------------
+# datasets — write API
+# ----------------------------------------------------------------------------
+
+def _row_for_insert(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Pull the canonical column tuple out of a (possibly extra-keyed) dict.
+
+    Missing keys → NULL. Unknown keys are silently dropped — callers
+    sometimes hand us pending-sheet rows with extra columns.
     """
-    assert_not_locked(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = INVENTORY_SHEET_NAME
-
-    for col_idx, (name, role) in enumerate(INVENTORY_COLUMNS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=name)
-        cell.font = _HEADER_FONT
-        cell.fill = _FILLS[role]
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for row_idx, row in enumerate(rows, start=2):
-        for col_idx, name in enumerate(INVENTORY_COLUMN_NAMES, start=1):
-            ws.cell(row=row_idx, column=col_idx, value=row.get(name))
-
-    for col_idx, name in enumerate(INVENTORY_COLUMN_NAMES, start=1):
-        letter = ws.cell(row=1, column=col_idx).column_letter
-        ws.column_dimensions[letter].width = max(12, min(40, len(name) + 4))
-
-    ws.freeze_panes = "A2"
-    wb.save(path)
+    return tuple(row.get(c) for c in DATASETS_COLUMNS)
 
 
-def append_inventory(path: Path, new_rows: list[dict[str, Any]]) -> None:
-    """Append rows to inventory.xlsx (creating it if needed).
+def insert_dataset(db_path: Path, row: dict[str, Any]) -> None:
+    """INSERT a single new dataset row.
 
-    Rows whose ``dataset_id`` already exists in the inventory are
-    skipped. Use ``save_inventory`` directly for replacement semantics.
+    Caller is responsible for supplying every NOT NULL field. STRICT
+    mode + the schema's CHECK constraints will reject malformed rows.
     """
-    existing = load_inventory(path)
-    seen = {r.get("dataset_id") for r in existing if r.get("dataset_id")}
-    merged = list(existing)
-    for row in new_rows:
-        if row.get("dataset_id") in seen:
-            continue
-        # Preserve only canonical columns to keep inventory clean
-        clean = {k: row.get(k) for k in INVENTORY_COLUMN_NAMES}
-        merged.append(clean)
-    save_inventory(path, merged)
+    placeholders = ", ".join(["?"] * len(DATASETS_COLUMNS))
+    cols_sql = ", ".join(DATASETS_COLUMNS)
+    sql = f"INSERT INTO datasets ({cols_sql}) VALUES ({placeholders})"
+    with _db.connect(db_path) as conn, conn:
+        conn.execute(sql, _row_for_insert(row))
 
 
-# --- changelog.md (append-only) -----------------------------------------
+def update_dataset(
+    db_path: Path,
+    dataset_id: str,
+    fields: dict[str, Any],
+) -> None:
+    """UPDATE one or more columns on a single dataset row.
+
+    Raises :class:`KeyError` if ``dataset_id`` is absent (so callers
+    don't silently no-op on a typo). Unknown keys in ``fields`` are
+    rejected — better to fail than to silently misspell a column.
+    """
+    if not fields:
+        return  # tolerate the no-op caller
+
+    bad = set(fields) - set(DATASETS_COLUMNS)
+    if bad:
+        raise ValueError(
+            f"unknown columns in update: {sorted(bad)}. "
+            f"Schema columns: {DATASETS_COLUMNS}"
+        )
+
+    cols = list(fields.keys())
+    set_sql = ", ".join(f"{c} = ?" for c in cols)
+    sql = f"UPDATE datasets SET {set_sql} WHERE dataset_id = ?"
+
+    with _db.connect(db_path) as conn, conn:
+        cur = conn.execute(sql, (*[fields[c] for c in cols], dataset_id))
+        if cur.rowcount == 0:
+            raise KeyError(f"dataset_id {dataset_id!r} not found")
+
+
+def append_inventory(db_path: Path, new_rows: list[dict[str, Any]]) -> None:
+    """INSERT rows whose ``dataset_id`` doesn't already exist; skip dupes.
+
+    Mirrors the xlsx-era semantics: a re-scan of an already-promoted
+    bundle is harmlessly idempotent.
+    """
+    if not new_rows:
+        return
+    placeholders = ", ".join(["?"] * len(DATASETS_COLUMNS))
+    cols_sql = ", ".join(DATASETS_COLUMNS)
+    insert_sql = f"INSERT INTO datasets ({cols_sql}) VALUES ({placeholders})"
+    with _db.connect(db_path) as conn, conn:
+        existing = {
+            r[0] for r in conn.execute(
+                "SELECT dataset_id FROM datasets"
+            ).fetchall()
+        }
+        for row in new_rows:
+            did = row.get("dataset_id")
+            if not did or did in existing:
+                continue
+            conn.execute(insert_sql, _row_for_insert(row))
+            existing.add(did)
+
+
+def save_inventory(db_path: Path, rows: list[dict[str, Any]]) -> None:
+    """UPSERT every supplied row by ``dataset_id``.
+
+    Provided for the legacy ``load → mutate → save`` callers. Note this
+    does **not** delete rows that are absent from ``rows`` — a true
+    "replace all" would risk losing audit history (datasets are
+    foreign-keyed by changelog rows). Callers wanting to remove a row
+    should use :func:`update_dataset` to set status='tombstoned'.
+    """
+    if not rows:
+        return
+    placeholders = ", ".join(["?"] * len(DATASETS_COLUMNS))
+    cols_sql = ", ".join(DATASETS_COLUMNS)
+    update_set_sql = ", ".join(
+        f"{c} = excluded.{c}" for c in DATASETS_COLUMNS if c != "dataset_id"
+    )
+    sql = (
+        f"INSERT INTO datasets ({cols_sql}) VALUES ({placeholders}) "
+        f"ON CONFLICT(dataset_id) DO UPDATE SET {update_set_sql}"
+    )
+    with _db.connect(db_path) as conn, conn:
+        for row in rows:
+            conn.execute(sql, _row_for_insert(row))
+
+
+# ----------------------------------------------------------------------------
+# changelog
+# ----------------------------------------------------------------------------
 
 def append_changelog(
-    changelog_path: Path,
+    db_path: Path,
     *,
     timestamp: str,
     action: str,
@@ -187,31 +265,61 @@ def append_changelog(
     actor: str,
     path: str | None,
     detail: str,
+    field_changed: str | None = None,
+    old_value: str | None = None,
+    new_value: str | None = None,
 ) -> None:
-    """Append one entry to the changelog. Never edits prior entries.
+    """Insert one changelog row.
 
-    Block format (matches inventory/changelog.md spec):
+    The pre-migration API took ``path`` as a structural argument; the
+    SQLite changelog table has no path column (file_path lives on the
+    dataset row, joinable by dataset_id). For backwards compatibility
+    ``path`` is folded into ``note`` as a ``[path: …]`` prefix when
+    supplied.
 
-        ## YYYY-MM-DDTHH:MM:SSZ — <action> — <dataset_id>
-        actor:  <data_steward>
-        path:   <library-relative path, or "—">
-        detail: <one-line summary>
+    ``field_changed`` / ``old_value`` / ``new_value`` are new — they
+    let callers record structured per-field diffs. Existing call sites
+    pass diffs as free text in ``detail``; that still works.
     """
-    changelog_path.parent.mkdir(parents=True, exist_ok=True)
-    if not changelog_path.exists():
-        # Create with header so the file is self-describing if it ever
-        # gets written by approve() before the steward seeds it manually.
-        changelog_path.write_text(
-            "# Y2Y Spatial Library — Changelog\n\n"
-            "Append-only audit log. **Never edit past entries. "
-            "Never regenerate this file.**\n\n"
+    if action not in CHANGELOG_ACTIONS:
+        raise ValueError(
+            f"changelog action {action!r} not allowed. "
+            f"Permitted: {sorted(CHANGELOG_ACTIONS)}"
         )
 
-    block = (
-        f"## {timestamp} — {action} — {dataset_id}\n"
-        f"actor:  {actor}\n"
-        f"path:   {path or '—'}\n"
-        f"detail: {detail}\n\n"
+    note = detail
+    if path and path != "—":
+        note = f"[path: {path}] {detail}"
+
+    cl_id = f"cl_{ulid.ULID()}"
+    sql = (
+        "INSERT INTO changelog "
+        "(id, timestamp, dataset_id, action, field_changed, "
+        " old_value, new_value, note, actor) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    with changelog_path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    with _db.connect(db_path) as conn, conn:
+        try:
+            conn.execute(
+                sql,
+                (cl_id, timestamp, dataset_id, action,
+                 field_changed, old_value, new_value, note, actor),
+            )
+        except sqlite3.IntegrityError as exc:
+            # Most likely cause: dataset_id doesn't exist (FK RESTRICT).
+            raise ValueError(
+                f"failed to append changelog for dataset_id {dataset_id!r}: {exc}"
+            ) from exc
+
+
+def load_changelog(db_path: Path) -> list[dict[str, Any]]:
+    """Return every changelog row, oldest first. For audit / export."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+    with _db.connect(db_path) as conn:
+        cur = conn.execute(
+            f"SELECT {', '.join(CHANGELOG_COLUMNS)} FROM changelog "
+            f"ORDER BY timestamp, id"
+        )
+        return [dict(r) for r in cur.fetchall()]

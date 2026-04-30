@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import fiona
 import rasterio
+import ulid
 from pyproj import CRS
 
 
@@ -76,8 +76,15 @@ def utc_now_compact() -> str:
 # --- IDs ----------------------------------------------------------------
 
 def new_dataset_id() -> str:
-    """Opaque, stable dataset ID: ``ds_<12 hex chars>``."""
-    return f"ds_{uuid.uuid4().hex[:12]}"
+    """Opaque, stable dataset ID: ``ds_<26-char ULID>``.
+
+    Pre-migration-001 the format was ``ds_<12 hex>``; migration 001
+    re-keyed every existing row to ``ds_<ULID>`` and the schema's CHECK
+    enforces the ``ds_`` prefix without constraining the suffix shape.
+    All new IDs from this point forward are ULIDs (Crockford base32,
+    26 characters, lexicographically sortable, time-prefixed).
+    """
+    return f"ds_{ulid.ULID()}"
 
 
 # --- naming -------------------------------------------------------------
