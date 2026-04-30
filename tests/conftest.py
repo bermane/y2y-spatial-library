@@ -1,8 +1,20 @@
-"""Shared fixtures for ingestion tests.
+"""Shared fixtures for pipeline tests.
 
 Generates minimal valid Y2Y datasets (a single-feature GeoPackage in
 ESRI:102008, and a small Cloud Optimized GeoTIFF with the canonical
 profile) at runtime so we don't need binary fixtures committed.
+
+Post-migration to SQLite (see DESIGN.md §12):
+
+* ``project_tree["db"]`` points at the SQLite catalogue
+  (``inventory/inventory.db``). The legacy ``inventory`` /
+  ``changelog`` xlsx-paths are gone.
+* ``project_tree["library"]`` is the **typed** library root
+  (``library/spatial``), matching what
+  ``pipeline.__main__:_resolve_paths`` returns for the spatial CLI.
+  Tests that mention category folders work unchanged because file
+  layout under the typed root is identical to the pre-migration
+  layout under ``library/``.
 """
 
 from __future__ import annotations
@@ -114,19 +126,27 @@ def valid_cog_factory(tmp_path: Path):
 
 @pytest.fixture
 def project_tree(tmp_path: Path) -> dict[str, Path]:
-    """Create the standard Y2Y directory layout under tmp_path."""
+    """Create the standard Y2Y directory layout under tmp_path.
+
+    Keys:
+        root         project root (== tmp_path)
+        incoming     queue/incoming/
+        processing   queue/processing/
+        rejected     queue/rejected/
+        library      library/spatial/  (the typed root for spatial datasets)
+        db           inventory/inventory.db (created on first connect)
+    """
     paths = {
         "root": tmp_path,
         "incoming": tmp_path / "queue" / "incoming",
         "processing": tmp_path / "queue" / "processing",
         "rejected": tmp_path / "queue" / "rejected",
-        "library": tmp_path / "library",
-        "inventory": tmp_path / "inventory" / "inventory.xlsx",
-        "changelog": tmp_path / "inventory" / "changelog.md",
+        "library": tmp_path / "library" / "spatial",
+        "db": tmp_path / "inventory" / "inventory.db",
     }
     for key in ("incoming", "processing", "rejected", "library"):
         paths[key].mkdir(parents=True, exist_ok=True)
-    paths["inventory"].parent.mkdir(parents=True, exist_ok=True)
+    paths["db"].parent.mkdir(parents=True, exist_ok=True)
     return paths
 
 
@@ -149,7 +169,6 @@ def populate_dataset(project_tree, valid_gpkg_factory):
 
         pending_path = project_tree["processing"] / pending_sheet.PENDING_FILENAME
         rows = pending_sheet.load_pending(pending_path)
-        # Pick the row whose source_filename matches what we just dropped
         row = next(r for r in rows if r["source_filename"] == filename)
         row.update(
             ready=True,
@@ -163,7 +182,6 @@ def populate_dataset(project_tree, valid_gpkg_factory):
             terms_of_use="Test terms.",
             acknowledgements="Test ack.",
         )
-        # Replace just this row in the persisted sheet (preserve siblings).
         all_rows = pending_sheet.load_pending(pending_path)
         for i, r in enumerate(all_rows):
             if r.get("dataset_id") == row["dataset_id"]:
@@ -172,13 +190,10 @@ def populate_dataset(project_tree, valid_gpkg_factory):
 
         ingest.approve(
             project_tree["processing"], project_tree["library"],
-            project_tree["inventory"], project_tree["changelog"],
+            project_tree["db"],
             actor="tester",
         )
 
-        # target_filename auto-proposes from the source stem. The library
-        # path uses *folder* names; the inventory's category is the
-        # *display* name. Convert here for the returned filesystem rel.
         from pipeline import taxonomy
         target_filename = row["target_filename"]
         cat_folder = taxonomy.CATEGORY_FOLDERS.get(category, category)

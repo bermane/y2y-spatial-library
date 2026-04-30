@@ -42,7 +42,7 @@ def _scan_then_load_row(
 def _approve(project_tree):
     return ingest.approve(
         project_tree["processing"], project_tree["library"],
-        project_tree["inventory"], project_tree["changelog"],
+        project_tree["db"],
         actor="tester",
     )
 
@@ -71,18 +71,29 @@ def test_approve_promotes_a_complete_ready_row(project_tree, valid_gpkg_factory)
     # The transient _canonical/ output dir is not archived
     assert not (archived_root / "_canonical").exists()
 
-    inv_rows = inventory_manager.load_inventory(project_tree["inventory"])
+    inv_rows = inventory_manager.load_inventory(project_tree["db"])
     assert len(inv_rows) == 1
-    assert inv_rows[0]["file_path"] == "Water/streams_2024.gpkg"
-    assert inv_rows[0]["source_format"] == "GeoPackage"
-    assert inv_rows[0]["source_filename"] == "streams_2024.gpkg"
-    assert inv_rows[0]["crs"] == "ESRI:102008"
-    assert inv_rows[0]["checksum_sha256"]
-    assert "ready" not in inv_rows[0]
+    promoted = inv_rows[0]
+    assert promoted["file_path"] == "Water/streams_2024.gpkg"
+    # Schema CHECKs are lowercase enum values; the pending sheet's
+    # display-cased values get mapped at insert.
+    assert promoted["format"] == "geopackage"
+    assert promoted["source_format"] == "geopackage"
+    assert promoted["source_filename"] == "streams_2024.gpkg"
+    assert promoted["crs"] == "ESRI:102008"
+    assert promoted["checksum_sha256"]
+    assert promoted["dataset_type"] == "spatial"
+    assert promoted["sync_status"] == "unpublished"
+    # Spatial-properties columns backfilled from the canonical file.
+    assert promoted["feature_count"] == 1
+    assert promoted["footprint_wkt"] is not None
+    # Pending-only fields don't make it into datasets.
+    assert "ready" not in promoted
+    assert "target_filename" not in promoted
 
-    log = project_tree["changelog"].read_text()
-    assert "— add — " in log
-    assert row["dataset_id"] in log
+    log = inventory_manager.load_changelog(project_tree["db"])
+    add_entries = [r for r in log if r["action"] == "add" and r["dataset_id"] == row["dataset_id"]]
+    assert len(add_entries) == 1
 
 
 def test_approve_promotes_species_with_subcategory(project_tree, valid_gpkg_factory) -> None:
@@ -118,11 +129,11 @@ def test_approve_converts_shapefile_to_gpkg(project_tree) -> None:
         project_tree["library"] / "Connectivity_Wildlife_Movement" / "roads_2024.gpkg"
     )
     assert library_target.exists()
-    inv = inventory_manager.load_inventory(project_tree["inventory"])
-    assert inv[0]["source_format"] == "Shapefile"
+    inv = inventory_manager.load_inventory(project_tree["db"])
+    assert inv[0]["source_format"] == "shapefile"
     assert inv[0]["source_crs"] == "EPSG:4326"
     assert inv[0]["crs"] == "ESRI:102008"  # reprojected
-    assert inv[0]["format"] == "GeoPackage"
+    assert inv[0]["format"] == "geopackage"
     # Inventory carries the display name, not the folder name
     assert inv[0]["category"] == "Connectivity & Wildlife Movement"
 

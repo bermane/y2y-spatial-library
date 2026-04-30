@@ -1,8 +1,13 @@
 """End-to-end reconcile tests.
 
-The fixtures synthesize a fully-ingested baseline (one approved dataset
-in library/ + a row in inventory.xlsx + a changelog entry) and then
-each test perturbs that state and asserts what reconcile reports.
+Each test populates a fully-ingested baseline (one approved dataset
+in ``library/spatial/`` + a row in ``inventory.db`` + a changelog row)
+and then perturbs that state and asserts what reconcile reports.
+
+Post-migration to SQLite (DESIGN.md §12): reconcile takes ``db_path``
+instead of separate ``inventory_path`` / ``changelog_path``. The
+xlsx-lock guard is gone; the catalogue is SQLite and not subject to
+Excel locks.
 """
 
 from __future__ import annotations
@@ -33,9 +38,6 @@ def _populate_one_dataset(
         ready=True,
         category=category,
         subcategory=subcategory,
-        version="1.0",
-        source="Test Source",
-        license="CC-BY-4.0",
         data_steward="Tester",
         title="Test Title",
         summary="Test summary.",
@@ -48,7 +50,7 @@ def _populate_one_dataset(
 
     ingest.approve(
         project_tree["processing"], project_tree["library"],
-        project_tree["inventory"], project_tree["changelog"],
+        project_tree["db"],
         actor="tester",
     )
 
@@ -58,9 +60,8 @@ def _populate_one_dataset(
 
 def _reconcile(project_tree: dict[str, Path], **kwargs: Any) -> reconcile.ReconcileResult:
     kwargs.setdefault("actor", "tester")
-    kwargs.setdefault("changelog_path", project_tree["changelog"])
     return reconcile.reconcile(
-        project_tree["library"], project_tree["inventory"],
+        project_tree["library"], project_tree["db"],
         project_tree["root"] / "reports", **kwargs,
     )
 
@@ -127,13 +128,14 @@ def test_reconcile_auto_resolves_drift_when_file_still_canonical(
     assert "size_bytes" in result.auto_resolved[0].reason
 
     # Inventory snapshot updated to match the file
-    inv = inventory_manager.load_inventory(project_tree["inventory"])
-    assert int(inv[0]["size_bytes"]) == (project_tree["library"] / rel_path).stat().st_size
+    row = inventory_manager.get_dataset(project_tree["db"], dataset_id)
+    assert int(row["size_bytes"]) == (project_tree["library"] / rel_path).stat().st_size
 
     # Changelog records the auto-refresh
-    log = project_tree["changelog"].read_text()
-    assert "— refresh — " in log
-    assert dataset_id in log
+    log = inventory_manager.load_changelog(project_tree["db"])
+    assert any(
+        r["action"] == "refresh" and r["dataset_id"] == dataset_id for r in log
+    )
 
 
 def test_reconcile_does_not_auto_resolve_when_file_no_longer_canonical(
@@ -167,12 +169,12 @@ def test_reconcile_apply_drift_can_be_disabled(project_tree, valid_gpkg_factory)
 def test_reconcile_detects_tombstoned_but_present_as_violation(
     project_tree, valid_gpkg_factory,
 ) -> None:
-    _populate_one_dataset(project_tree, valid_gpkg_factory)
+    dataset_id, _ = _populate_one_dataset(project_tree, valid_gpkg_factory)
 
     # Mark the row tombstoned but leave the file on disk
-    rows = inventory_manager.load_inventory(project_tree["inventory"])
-    rows[0]["status"] = "tombstoned"
-    inventory_manager.save_inventory(project_tree["inventory"], rows)
+    inventory_manager.update_dataset(
+        project_tree["db"], dataset_id, {"status": "tombstoned"}
+    )
 
     result = _reconcile(project_tree)
 
@@ -182,10 +184,10 @@ def test_reconcile_detects_tombstoned_but_present_as_violation(
 
 
 def test_reconcile_tombstoned_and_absent_is_clean(project_tree, valid_gpkg_factory) -> None:
-    _, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
-    rows = inventory_manager.load_inventory(project_tree["inventory"])
-    rows[0]["status"] = "tombstoned"
-    inventory_manager.save_inventory(project_tree["inventory"], rows)
+    dataset_id, rel_path = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    inventory_manager.update_dataset(
+        project_tree["db"], dataset_id, {"status": "tombstoned"}
+    )
     (project_tree["library"] / rel_path).unlink()
 
     result = _reconcile(project_tree)

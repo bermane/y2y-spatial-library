@@ -36,17 +36,16 @@ def test_fix_renames_applies_when_confirmed(project_tree, populate_dataset) -> N
     assert "fix-renames done" in result.output
     assert "applied: " in result.output
 
-    inv = inventory_manager.load_inventory(project_tree["inventory"])
-    assert inv[0]["file_path"] == new_rel
-    assert inv[0]["dataset_id"] == dataset_id
+    row = inventory_manager.get_dataset(project_tree["db"], dataset_id)
+    assert row["file_path"] == new_rel
+    assert row["dataset_id"] == dataset_id
 
-    log = project_tree["changelog"].read_text()
-    assert "— rename — " in log
-    assert dataset_id in log
+    log = inventory_manager.load_changelog(project_tree["db"])
+    assert any(r["action"] == "rename" and r["dataset_id"] == dataset_id for r in log)
 
 
 def test_fix_renames_skips_when_declined(project_tree, populate_dataset) -> None:
-    _, old_rel = populate_dataset()
+    dataset_id, old_rel = populate_dataset()
     new_rel = "Water/streams_renamed.gpkg"
     _move_file_manually(project_tree, old_rel, new_rel)
 
@@ -61,8 +60,8 @@ def test_fix_renames_skips_when_declined(project_tree, populate_dataset) -> None
     assert "skipped: 1" in result.output
 
     # Inventory file_path unchanged (still points at the old location)
-    inv = inventory_manager.load_inventory(project_tree["inventory"])
-    assert inv[0]["file_path"] == old_rel
+    row = inventory_manager.get_dataset(project_tree["db"], dataset_id)
+    assert row["file_path"] == old_rel
 
 
 def test_fix_renames_with_no_candidates(project_tree, populate_dataset) -> None:

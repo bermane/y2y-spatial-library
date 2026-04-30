@@ -30,10 +30,15 @@ def test_stat_signature_reports_real_size(tmp_path: Path) -> None:
 
 
 def test_new_dataset_id_is_prefixed_and_unique() -> None:
+    """``ds_<26-char ULID>`` post-migration; legacy was ``ds_<12 hex>``."""
     ids = {utils.new_dataset_id() for _ in range(200)}
 
     assert len(ids) == 200
-    assert all(i.startswith("ds_") and len(i) == 15 for i in ids)
+    # 'ds_' prefix + 26 ULID chars = 29 total
+    assert all(i.startswith("ds_") and len(i) == 29 for i in ids)
+    # ULID body is Crockford base32 (digits + uppercase, excluding I/L/O/U)
+    valid = set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+    assert all(set(i[3:]) <= valid for i in ids)
 
 
 def test_slugify_title_handles_typical_cases() -> None:
