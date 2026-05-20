@@ -222,8 +222,8 @@ exporter's layout is in `pipeline/export_xlsx.py`.
 | ------------- | ----------------- | --------------------------------------------------------------------- |
 | `dataset_id`  | string (opaque)   | Stable across renames/moves. Primary key. Format `ds_<26-char ULID>`; the schema CHECK enforces the `ds_` prefix. Assigned at scan. |
 | `dataset_type` | enum             | `'spatial'` (only value today). Reserved for future expansion to other library types — see §14. |
-| `category`    | enum              | One of the 9 taxonomy categories — stored as the **display name** (full name from the typology file, e.g. `Administrative & Jurisdictional Boundaries`). Schema CHECK enforces the 9-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Admin_Juris_Boundaries`); the pipeline maps display↔folder. |
-| `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`); folder is `Grizzly_Bear`. Only `Species & Species at Risk` has subcategories in Phase A. |
+| `category`    | enum              | One of the 10 taxonomy categories — stored as the **display name** (full name from `Spatial_Data_Typology.xlsx`, e.g. `Jurisdictional & Political Boundaries`). Schema CHECK enforces the 10-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Juris_Political_Boundaries`); the pipeline maps display↔folder. Migration 006 carried the 9→10 transition adopted at the 2026 director workshop. |
+| `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`); folder is `Grizzly_Bear`. Only `Species` has subcategories in Phase A. |
 | `file_path`   | string (relative) | Path of the **canonical** file relative to `library/spatial/`, using folder names. Set at approve. (Pre-migration-002 the path was relative to `library/`; the relative segments did not change.) |
 | `format`      | enum              | Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
 

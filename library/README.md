@@ -11,12 +11,13 @@ it lives in `queue/` until it does.
 ```
 library/
 └── spatial/                       # dataset_type = 'spatial'
-    ├── Admin_Juris_Boundaries/
     ├── Biodiversity_Ecosystems/
     ├── Climate_Resilience/
     ├── Connectivity_Wildlife_Movement/
+    ├── Human_Dimensions/           # new in 2026 typology revision
+    ├── Juris_Political_Boundaries/
     ├── Land_Cover_Use_Disturbance/
-    ├── Prot_Areas_Cons_Lands/
+    ├── Land_Designations_Tenure/
     ├── Species/                    # only category with subcategory folders
     │   ├── Caribou/
     │   ├── Elk/
@@ -25,7 +26,7 @@ library/
     │   ├── Multi_Species/
     │   ├── Other/
     │   └── Wolverine/
-    ├── Threats_Human_Footprint_Infras/
+    ├── Threats_Infrastructure/
     └── Water/
 ```
 

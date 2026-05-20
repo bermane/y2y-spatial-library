@@ -100,7 +100,7 @@ def test_approve_promotes_species_with_subcategory(project_tree, valid_gpkg_fact
     pending_path, row = _scan_then_load_row(
         project_tree, valid_gpkg_factory, filename="grizzly_den_sites_2024.gpkg",
     )
-    _fill_required(row, category="Species & Species at Risk", subcategory="Grizzly Bear")
+    _fill_required(row, category="Species", subcategory="Grizzly Bear")
     pending_sheet.save_pending(pending_path, [row])
 
     assert _approve(project_tree).promoted == 1
@@ -180,7 +180,7 @@ def test_approve_fails_on_invalid_category(project_tree, valid_gpkg_factory) -> 
 
 def test_approve_fails_species_without_subcategory(project_tree, valid_gpkg_factory) -> None:
     pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
-    _fill_required(row, category="Species & Species at Risk", subcategory=None)
+    _fill_required(row, category="Species", subcategory=None)
     pending_sheet.save_pending(pending_path, [row])
 
     assert _approve(project_tree).failed == 1
