@@ -47,15 +47,19 @@ CREATE TABLE IF NOT EXISTS datasets (
     title                   TEXT NOT NULL,
     category                TEXT NOT NULL
                                 CHECK (category IN (
-                                    'Administrative & Jurisdictional Boundaries',
+                                    -- Order matches Spatial_Data_Typology.xlsx
+                                    -- (2026 director-workshop revision; see
+                                    -- migration 006 for the rename diff).
+                                    'Jurisdictional & Political Boundaries',
+                                    'Land Designations & Tenure',
                                     'Biodiversity & Ecosystems',
                                     'Climate Resilience',
                                     'Connectivity & Wildlife Movement',
-                                    'Species & Species at Risk',
+                                    'Species',
                                     'Water',
                                     'Land Cover, Land Use & Disturbance',
-                                    'Protected Areas & Conservation Lands',
-                                    'Threats, Human Footprint & Infrastructure'
+                                    'Human Dimensions',
+                                    'Threats & Infrastructure'
                                 )),
     subcategory             TEXT,                            -- nullable; only Species has subs (enforced in code, not schema)
     file_path               TEXT NOT NULL,                   -- relative to library/spatial/

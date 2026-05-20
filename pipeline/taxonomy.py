@@ -9,36 +9,40 @@ overrides without re-scanning the filesystem.
 from __future__ import annotations
 
 # Top-level categories — display names (what the steward sees in
-# pending.xlsx and inventory.xlsx). Display names match the typology
-# file (Spatial_Data_Typology.xlsx) verbatim, including ampersands and
-# spaces. The on-disk folder names are stored separately in
-# CATEGORY_FOLDERS below; the pipeline maps display↔folder when
-# building library paths and parsing paths back into display names.
+# pending.xlsx and the generated inventory.xlsx). Display names match
+# the typology file (Spatial_Data_Typology.xlsx) verbatim, including
+# ampersands and spaces. Order follows the typology document.
+#
+# Schema CHECK constraint (pipeline/schema.sql) hard-codes this same
+# list — keep the two in sync. Migration 006 carries the transition
+# from the legacy 9-category typology.
 CATEGORIES: tuple[str, ...] = (
-    "Administrative & Jurisdictional Boundaries",
+    "Jurisdictional & Political Boundaries",
+    "Land Designations & Tenure",
     "Biodiversity & Ecosystems",
     "Climate Resilience",
     "Connectivity & Wildlife Movement",
-    "Species & Species at Risk",
+    "Species",
     "Water",
     "Land Cover, Land Use & Disturbance",
-    "Protected Areas & Conservation Lands",
-    "Threats, Human Footprint & Infrastructure",
+    "Human Dimensions",
+    "Threats & Infrastructure",
 )
 
 # Display name → on-disk folder name. The folder names follow the
 # Title_Case_Underscores convention from DESIGN.md §6 and match the
-# subdirectories scaffolded under library/.
+# subdirectories scaffolded under library/spatial/.
 CATEGORY_FOLDERS: dict[str, str] = {
-    "Administrative & Jurisdictional Boundaries": "Admin_Juris_Boundaries",
+    "Jurisdictional & Political Boundaries": "Juris_Political_Boundaries",
+    "Land Designations & Tenure": "Land_Designations_Tenure",
     "Biodiversity & Ecosystems": "Biodiversity_Ecosystems",
     "Climate Resilience": "Climate_Resilience",
     "Connectivity & Wildlife Movement": "Connectivity_Wildlife_Movement",
-    "Species & Species at Risk": "Species",
+    "Species": "Species",
     "Water": "Water",
     "Land Cover, Land Use & Disturbance": "Land_Cover_Use_Disturbance",
-    "Protected Areas & Conservation Lands": "Prot_Areas_Cons_Lands",
-    "Threats, Human Footprint & Infrastructure": "Threats_Human_Footprint_Infras",
+    "Human Dimensions": "Human_Dimensions",
+    "Threats & Infrastructure": "Threats_Infrastructure",
 }
 
 # Reverse mapping for parsing library paths back to display names
@@ -49,7 +53,7 @@ FOLDER_TO_CATEGORY: dict[str, str] = {v: k for k, v in CATEGORY_FOLDERS.items()}
 # Sub-categories per (display-name) category. Display name → tuple of
 # display sub-names. A category absent from this map admits no sub.
 SUBCATEGORIES: dict[str, tuple[str, ...]] = {
-    "Species & Species at Risk": (
+    "Species": (
         "Caribou",
         "Elk",
         "Goat",
@@ -65,7 +69,7 @@ SUBCATEGORIES: dict[str, tuple[str, ...]] = {
 
 # Sub-category display name → on-disk folder name, per category.
 SUBCATEGORY_FOLDERS: dict[str, dict[str, str]] = {
-    "Species & Species at Risk": {
+    "Species": {
         "Caribou": "Caribou",
         "Elk": "Elk",
         "Goat": "Goat",
@@ -138,19 +142,36 @@ def is_valid_subcategory(category: str, subcategory: str | None) -> bool:
 KeywordEntry = str | tuple[str, int]
 
 CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
-    "Administrative & Jurisdictional Boundaries": (
+    "Jurisdictional & Political Boundaries": (
         "boundary", "boundaries", "border", "borders",
         "province", "provincial", "state", "states",
         "jurisdiction", "jurisdictional", "admin", "administrative",
         "region", "regional",
-        "first_nations", "treaty", "treaties", "indigenous",
-        "municipal", "municipality", "population", "census",
-        "international",
+        "municipal", "municipality",
+        "census", "constituency", "constituencies",
+        "international", "political",
+        # high-signal compound terms
+        ("population_center", 2), ("population_centers", 2),
+        ("management_unit", 2), ("management_units", 2),
+    ),
+    "Land Designations & Tenure": (
+        # Designations
+        "park", "parks", "wilderness",
+        ("wma", 2), ("ipca", 2), ("iucn", 2),
+        "conservation", "easement", "easements",
+        "protected",
+        "designation", "designations",
+        # Tenure / stewardship
+        "tenure", "tenures", "stewardship",
+        "first_nations", "treaty", "treaties",
     ),
     "Biodiversity & Ecosystems": (
         "ecoregion", "ecoregions", "ecosystem", "ecosystems",
         "biodiversity", "biophysical", "biome", "biomes",
-        "kba", "ecological",
+        "kba", "ecological", "benchmark", "benchmarks",
+        # Typology now lists DEM/LiDAR products under this category.
+        "elevation", "slope", "aspect", "hillshade",
+        "lidar", "dem",
     ),
     "Climate Resilience": (
         "climate", "refugia", "refugium",
@@ -163,12 +184,13 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "connectivity", "permeability", "resistance",
         "telemetry", "movement", "movements", "barrier", "barriers",
     ),
-    "Species & Species at Risk": (
+    "Species": (
         "species", "habitat", "wildlife",
         "caribou", "elk", "goat", "grizzly", "bear",
         "wolverine", "wolf",
         "salmon", "trout", "fish",
         "ungulate", "ungulates",
+        "distribution", "distributions",
     ),
     "Water": (
         "water", "watershed", "watersheds",
@@ -182,23 +204,32 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "burn_severity", "burn", "burns",
         "insect", "disease",
         "vegetation", "forest", "grassland",
+        "change_detection",
     ),
-    "Protected Areas & Conservation Lands": (
-        "park", "parks", "wilderness",
-        ("wma", 2), ("ipca", 2), ("iucn", 2),
-        "conservation", "easement", "easements",
-        "protected",
+    "Human Dimensions": (
+        "demographic", "demographics",
+        "socioeconomic", "socio_economic",
+        "governance",
+        "community", "communities",
+        "stakeholder", "stakeholders",
+        # "indigenous" lives here (per typology: "Indigenous-led
+        # research"); the related-but-distinct "first_nations" sits
+        # under Land Designations & Tenure (typology: "First Nations
+        # lands").
+        "indigenous",
+        "attitudes", "perception", "perceptions",
+        "survey", "surveys",
     ),
-    "Threats, Human Footprint & Infrastructure": (
+    "Threats & Infrastructure": (
         "road", "roads", "railway", "railways", "rail",
         "pipeline", "pipelines", "utility", "utilities",
         "extraction", "development",
         "footprint", "footprints", "infrastructure", "infras",
-        "demographic", "demographics",
+        "cumulative", "cumulative_effects",
     ),
 }
 
-# Subcategory keywords keyed by display sub-name (under "Species & Species at Risk").
+# Subcategory keywords keyed by display sub-name (under "Species").
 SPECIES_SUBCATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "Caribou": ("caribou",),
     "Elk": ("elk",),
@@ -245,7 +276,7 @@ def guess_category(text: str) -> str | None:
 
 def guess_subcategory(category: str | None, text: str) -> str | None:
     """Best-guess subcategory. Only Species has subcategories in Phase A."""
-    if category != "Species & Species at Risk":
+    if category != "Species":
         return None
     from . import utils
     slug = utils.slugify_title(text)
