@@ -84,8 +84,8 @@ CREATE TABLE IF NOT EXISTS datasets (
     date_added              TEXT NOT NULL,                   -- ISO-8601 UTC with explicit 'Z'
     date_modified           TEXT NOT NULL,                   -- ISO-8601 UTC with explicit 'Z'
 
-    -- [type-agnostic] AGOL linkage (reserved; not populated this session) -
-    -- See DESIGN.md "AGOL integration" placeholder section.
+    -- [type-agnostic] AGOL linkage (see DESIGN.md §15). The catalogue
+    -- ↔ AGOL state machine lives in pipeline/agol_sync.py.
     agol_item_id            TEXT,                            -- UNIQUE-when-not-null via partial index below
     agol_published_at       TEXT,                            -- ISO-8601 UTC
     last_synced_at          TEXT,                            -- ISO-8601 UTC
@@ -97,6 +97,21 @@ CREATE TABLE IF NOT EXISTS datasets (
                                     'conflict',
                                     'error',
                                     'unpublished'
+                                )),
+    -- Steward-declared publish target. Drives which publish path
+    -- agol_sync.push() takes:
+    --   feature-layer       → arcgis SDK Item.publish() on uploaded GPKG
+    --   vector-tile-layer   → local arcpy-built VTPK upload + publish
+    --                         (no intermediate hosted feature layer)
+    --   imagery-layer       → arcgis SDK hosted imagery publish
+    -- Pre-filled by ingest._build_row() from format; editable later
+    -- via `y2y update <id> --set agol_target=...`. Added by
+    -- migration 007.
+    agol_target             TEXT
+                                CHECK (agol_target IS NULL OR agol_target IN (
+                                    'feature-layer',
+                                    'vector-tile-layer',
+                                    'imagery-layer'
                                 )),
 
     -- [spatial-specific] Intrinsic snapshot (drift detection) ------------

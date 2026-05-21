@@ -22,6 +22,14 @@ dependencies = [
     "click>=8.1",
     "rich>=13.7",
     "python-ulid>=2.0",
+    # AGOL integration (see DESIGN.md §15). arcgis pulls in the Esri
+    # Python SDK for authentication + item management + publish flows.
+    # matplotlib backs pipeline/agol_thumbnails.py.
+    # NOTE: `arcpy` is *not* listed here — it ships with ArcGIS Pro
+    # and is detected at runtime by pipeline/agol_vtpk.py when
+    # publishing a row whose agol_target='vector-tile-layer'.
+    "arcgis>=2.3",
+    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
