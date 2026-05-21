@@ -336,6 +336,44 @@ def test_ensure_org_categories_is_noop_when_canonical_already_present() -> None:
 
 
 # -----------------------------------------------------------------------------
+# Reconciliation scope contract — catalogue-tracked items only.
+#
+# The integration must NOT scan the AGOL org's full content tree. Every
+# sync/status/push/pull/reconcile operation iterates `datasets` rows; AGOL
+# items not in the catalogue (maps, webapps, dashboards, the steward's
+# personal items) are explicitly ignored. This contract is enforced by
+# code structure — none of agol_sync.py's read paths call
+# `gis.content.search()` over the whole org. The grep below documents
+# that and serves as a regression-pin if a future change accidentally
+# introduces org-wide content enumeration. See plan §"Reconciliation
+# scope".
+# -----------------------------------------------------------------------------
+
+def test_agol_sync_module_does_not_enumerate_full_org_content() -> None:
+    """agol_sync.py must never call `gis.content.search` without a
+    catalogue-anchored item id query, since reconciliation is
+    catalogue-centric. The token grep is the cheap regression pin.
+
+    Allowed: `gis.content.get(item_id)`, `gis.groups.search(...)` for
+    the Conservation Atlas group lookup. Not allowed: `gis.content.search()`
+    over the whole org with no item-id constraint.
+    """
+    import inspect
+    source = inspect.getsource(agol_sync)
+    # No bare content.search calls. Phase A doesn't have any. If a
+    # later phase adds one (e.g., a v2 audit command), it should be
+    # gated by an explicit user-invoked CLI command, not auto-fired
+    # by reconcile/status — and this test will need updating to
+    # exclude that path.
+    assert "gis.content.search" not in source, (
+        "agol_sync.py grew a `gis.content.search()` call — confirm "
+        "this isn't being invoked from a catalogue-iterating path "
+        "(reconcile / status / push / pull). See plan §Reconciliation "
+        "scope."
+    )
+
+
+# -----------------------------------------------------------------------------
 # agol_config.load_config — env vars + YAML + defaults
 # -----------------------------------------------------------------------------
 
