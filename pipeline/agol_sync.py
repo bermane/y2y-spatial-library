@@ -190,8 +190,18 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
         "licenseInfo": row.get("terms_of_use"),
         "typeKeywords": type_keywords,
     }
+
+    # AGOL categories: parent + (optional) subcategory. The subcategory
+    # is identity-mapped to its AGOL counterpart since the schema we
+    # write to the org mirrors the catalogue subcategory display names
+    # exactly. Both go in `categories` as a flat list — AGOL's tree
+    # resolves them by title.
     if category:
-        properties["categories"] = [compute_agol_category(category)]
+        cats = [compute_agol_category(category)]
+        sub = row.get("subcategory")
+        if sub:
+            cats.append(sub)
+        properties["categories"] = cats
 
     return properties
 
@@ -322,29 +332,63 @@ def resolve_group_id(gis, config: AgolConfig) -> str:
     return group_id
 
 
-def ensure_org_categories(gis, config: AgolConfig) -> list[str]:
-    """Ensure every catalogue category exists as an AGOL Content Category.
+class CategorySchemaDiff(NamedTuple):
+    """Report from :func:`ensure_org_categories`."""
 
-    AGOL's "Content Categories" are an org-level facet that catalogue
-    items can be tagged with. We mirror the spatial typology (10
-    full-display-name categories from ``pipeline.taxonomy``) into the
-    org's category schema so item ``categories`` payloads resolve at
-    push time.
+    will_add: list[str]
+    will_orphan: list[str]
+    unchanged: list[str]
+    applied: bool
 
-    Returns the list of category names this call created (empty if
-    everything already existed).
 
-    Requires the calling user to have org-admin privileges
-    (creating categories is admin-only). Surfaces a clear error
-    otherwise.
+def build_canonical_schema() -> list[dict[str, Any]]:
+    """Construct the canonical AGOL category schema from the catalogue typology.
+
+    Single source of truth: ``pipeline.taxonomy.CATEGORIES`` (ordered)
+    + ``SUBCATEGORIES`` (Species → 7 subs). Top-level categories in
+    typology document order. Species gets its 7 subcategories nested
+    using the catalogue's display-name casing (``Multi-Species``,
+    not ``Multi-species``).
+
+    Returns the AGOL-expected ``[{"title": "Categories", "categories":
+    [...]}]`` shape.
     """
-    expected = list(taxonomy.CATEGORIES)
+    children: list[dict[str, Any]] = []
+    for cat in taxonomy.CATEGORIES:
+        subs = taxonomy.SUBCATEGORIES.get(cat, ())
+        children.append({
+            "title": cat,
+            "categories": [{"title": s, "categories": []} for s in subs],
+        })
+    return [{"title": "Categories", "categories": children}]
 
-    # arcgis SDK exposes the category schema via the
-    # ContentCategorySchemaManager on the org's Content. Older
-    # SDK versions used a slightly different path; the import is
-    # kept lazy to tolerate version drift without breaking the
-    # rest of the module.
+
+def ensure_org_categories(
+    gis,
+    config: AgolConfig,
+    *,
+    apply: bool = True,
+) -> CategorySchemaDiff:
+    """Bring the AGOL org's category schema into line with the catalogue typology.
+
+    Reads the current AGOL Content Category schema, computes the diff
+    against ``build_canonical_schema()``, and (if ``apply=True``)
+    writes the canonical schema, replacing whatever was there.
+
+    **This is a destructive write.** Any category in the org's schema
+    that isn't in the catalogue typology is orphaned — items tagged
+    with those categories lose their tags. The 2026 typology revision
+    (see DESIGN.md §7 + migration 006) made this kind of rewrite
+    inevitable; the steward consented in the AGOL-integration plan
+    (.claude/plans/parallel-toasting-storm.md) to bringing AGOL into
+    alignment.
+
+    With ``apply=False``, returns the diff without writing — useful
+    for a dry-run preview.
+
+    Requires org-admin privileges on AGOL. Raises ``AgolError`` if
+    the calling user can't write the schema.
+    """
     try:
         schema_manager = gis.content.categories
     except AttributeError as exc:
@@ -354,60 +398,158 @@ def ensure_org_categories(gis, config: AgolConfig) -> list[str]:
         ) from exc
 
     try:
-        existing_schema = schema_manager.schema or {}
+        existing_schema = schema_manager.schema or []
     except Exception as exc:
         raise AgolError(
             f"Failed to fetch existing AGOL category schema: {exc}"
         ) from exc
 
-    existing_names = _walk_category_names(existing_schema)
-    missing = [c for c in expected if c not in existing_names]
-    if not missing:
-        return []
+    canonical_schema = build_canonical_schema()
 
-    # Build a flat top-level category list under the org root.
-    # The SDK accepts the schema in a nested-dict shape; we
-    # preserve any pre-existing categories the steward set up
-    # outside our 10 (don't be destructive about other org
-    # categories).
-    new_schema = _merge_category_schema(existing_schema, expected)
+    existing_top = _top_level_titles(existing_schema)
+    canonical_top = _top_level_titles(canonical_schema)
+
+    will_add = sorted(canonical_top - existing_top)
+    will_orphan = sorted(existing_top - canonical_top)
+    unchanged = sorted(canonical_top & existing_top)
+
+    if not apply:
+        return CategorySchemaDiff(
+            will_add=will_add,
+            will_orphan=will_orphan,
+            unchanged=unchanged,
+            applied=False,
+        )
+
+    # No-op if everything matches at both the top level and the full
+    # nested tree (catches the case where someone re-runs after a
+    # successful apply).
+    if (
+        not will_add
+        and not will_orphan
+        and _walk_category_names(existing_schema)
+        == _walk_category_names(canonical_schema)
+    ):
+        return CategorySchemaDiff(
+            will_add=[],
+            will_orphan=[],
+            unchanged=sorted(canonical_top),
+            applied=False,
+        )
+
     try:
-        schema_manager.assign_to_items  # smoke-check attribute exists
-        schema_manager.schema = new_schema
+        schema_manager.schema = canonical_schema
     except Exception as exc:
         raise AgolError(
             f"Failed to write AGOL category schema (org-admin "
             f"privileges required): {exc}"
         ) from exc
 
-    return missing
+    return CategorySchemaDiff(
+        will_add=will_add,
+        will_orphan=will_orphan,
+        unchanged=unchanged,
+        applied=True,
+    )
 
 
-def _walk_category_names(schema: dict[str, Any]) -> set[str]:
-    """Flatten the AGOL category schema into a set of category title strings."""
+def _walk_category_names(schema: Any) -> set[str]:
+    """Flatten the AGOL category schema into a set of every title string.
+
+    The AGOL Content-Category schema is a tree: a top-level list of
+    nodes (typically one root node with title 'Categories'), each
+    node a dict ``{"title": str, "categories": [...nested nodes...]}``.
+    This helper recurses through any depth and collects every
+    ``title``.
+
+    Accepts dicts (single node) or lists (collection of nodes) at any
+    level — older SDK versions return either shape depending on org
+    config, so we're defensive about both.
+    """
     names: set[str] = set()
-    for cat in schema.get("categories", []) or []:
-        title = cat.get("title")
+
+    if isinstance(schema, list):
+        for node in schema:
+            names.update(_walk_category_names(node))
+        return names
+
+    if isinstance(schema, dict):
+        title = schema.get("title")
         if title:
             names.add(title)
-        names.update(_walk_category_names(cat))
+        children = schema.get("categories")
+        if children:
+            names.update(_walk_category_names(children))
+        return names
+
     return names
 
 
-def _merge_category_schema(
-    existing: dict[str, Any],
-    desired_titles: list[str],
-) -> dict[str, Any]:
-    """Add any missing desired-title categories at the top level.
+def _top_level_titles(schema: Any) -> set[str]:
+    """Titles of the immediate children of the schema's root.
 
-    Preserves any pre-existing categories already in the schema.
-    Returns a new dict; doesn't mutate the input.
+    The 'root' is the wrapper node titled 'Categories' (singular) —
+    every direct child of that root is a top-level category in the
+    org's facet tree. If the schema has no such wrapper, the
+    schema-itself's list members are treated as top-level.
     """
+    if isinstance(schema, list):
+        # Common shape: [{"title": "Categories", "categories": [...]}]
+        # Skip the wrapper and report the inner categories' titles.
+        # If multiple roots exist (unusual), union them.
+        out: set[str] = set()
+        for node in schema:
+            if isinstance(node, dict):
+                children = node.get("categories", []) or []
+                for c in children:
+                    if isinstance(c, dict) and c.get("title"):
+                        out.add(c["title"])
+        return out
+    if isinstance(schema, dict):
+        children = schema.get("categories", []) or []
+        return {c["title"] for c in children if isinstance(c, dict) and c.get("title")}
+    return set()
+
+
+def _merge_category_schema(
+    existing: Any,
+    desired_titles: list[str],
+) -> Any:
+    """Append missing desired-title categories to the schema's top level.
+
+    Preserves any pre-existing nodes (and their children) untouched.
+    Returns a new structure matching the input shape; doesn't mutate
+    the input.
+
+    For the common ``[{"title": "Categories", "categories": [...]}]``
+    shape, the new categories are appended inside that root node so
+    they appear as siblings of the existing top-level categories.
+    """
+    if isinstance(existing, list) and existing and isinstance(existing[0], dict):
+        # Wrapped-root form. Copy the root, append new categories
+        # under its 'categories' key.
+        root = dict(existing[0])
+        root["categories"] = list(root.get("categories", []) or [])
+        existing_titles = {
+            c["title"] for c in root["categories"]
+            if isinstance(c, dict) and c.get("title")
+        }
+        for title in desired_titles:
+            if title not in existing_titles:
+                root["categories"].append({"title": title, "categories": []})
+        # Preserve any additional roots untouched (rare).
+        return [root] + list(existing[1:])
+
+    # Plain-dict form (older SDK) — preserve for back-compat.
     out = {
-        "categories": list(existing.get("categories", []) or []),
+        "categories": list(
+            (existing or {}).get("categories", []) or []
+        ),
     }
-    existing_top_titles = {c.get("title") for c in out["categories"]}
+    existing_top_titles = {
+        c.get("title") for c in out["categories"] if isinstance(c, dict)
+    }
     for title in desired_titles:
         if title not in existing_top_titles:
-            out["categories"].append({"title": title})
+            out["categories"].append({"title": title, "categories": []})
     return out

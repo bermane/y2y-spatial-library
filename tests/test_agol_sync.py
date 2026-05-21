@@ -122,6 +122,24 @@ def test_compute_item_properties_assigns_category_as_full_display_name() -> None
     assert props["categories"] == ["Jurisdictional & Political Boundaries"]
 
 
+def test_compute_item_properties_includes_subcategory_when_set() -> None:
+    """Species rows with a subcategory tag with [parent, subcategory] so
+    AGOL's nested category tree resolves both levels."""
+    row = _sample_row()
+    row["category"] = "Species"
+    row["subcategory"] = "Grizzly Bear"
+    props = agol_sync.compute_item_properties(row)
+    assert props["categories"] == ["Species", "Grizzly Bear"]
+
+
+def test_compute_item_properties_no_subcategory_means_single_entry() -> None:
+    row = _sample_row()
+    row["category"] = "Water"
+    row["subcategory"] = None
+    props = agol_sync.compute_item_properties(row)
+    assert props["categories"] == ["Water"]
+
+
 def test_compute_item_properties_stamps_type_keywords_for_y2y_discovery() -> None:
     props = agol_sync.compute_item_properties(_sample_row())
     assert "Y2Y" in props["typeKeywords"]
@@ -205,62 +223,116 @@ def test_resolve_group_id_raises_when_group_absent() -> None:
 # ensure_org_categories — bootstrap the 10 typology categories
 # -----------------------------------------------------------------------------
 
-def test_ensure_org_categories_creates_missing(monkeypatch) -> None:
-    cfg = agol_config.AgolConfig()
-    gis = MagicMock()
-    # Pretend the org has no categories yet.
-    gis.content.categories.schema = {"categories": []}
-    written: list[dict[str, Any]] = []
+def _patch_schema_property(gis: MagicMock, initial: Any) -> list[Any]:
+    """Install a property on the MagicMock's category-manager class so
+    ``gis.content.categories.schema = ...`` records the writes.
 
-    # Need to use a property setter for `schema =` — set_attr does it.
+    Returns a list that captures every write — tests inspect it.
+    """
+    state = {"value": initial}
+    written: list[Any] = []
     type(gis.content.categories).schema = property(
-        lambda self: {"categories": []},
-        lambda self, value: written.append(value),
+        lambda self: state["value"],
+        lambda self, value: (written.append(value), state.__setitem__("value", value))[0],
     )
-
-    created = agol_sync.ensure_org_categories(gis, cfg)
-    assert sorted(created) == sorted([
-        "Jurisdictional & Political Boundaries",
-        "Land Designations & Tenure",
-        "Biodiversity & Ecosystems",
-        "Climate Resilience",
-        "Connectivity & Wildlife Movement",
-        "Species",
-        "Water",
-        "Land Cover, Land Use & Disturbance",
-        "Human Dimensions",
-        "Threats & Infrastructure",
-    ])
-    # Schema write happened exactly once and contained all 10.
-    assert len(written) == 1
-    titles_written = {c["title"] for c in written[0]["categories"]}
-    assert titles_written == set(created)
+    return written
 
 
-def test_ensure_org_categories_is_noop_when_all_present() -> None:
+def test_build_canonical_schema_matches_catalogue_typology() -> None:
+    """Canonical schema mirrors taxonomy.CATEGORIES order with Species subcategories nested."""
+    schema = agol_sync.build_canonical_schema()
+    # Wrapped-root shape: [{"title": "Categories", "categories": [...]}]
+    assert isinstance(schema, list)
+    assert len(schema) == 1
+    root = schema[0]
+    assert root["title"] == "Categories"
+    top_titles = [c["title"] for c in root["categories"]]
+    # Exact order matches taxonomy.CATEGORIES
+    from pipeline import taxonomy
+    assert top_titles == list(taxonomy.CATEGORIES)
+    # Species has 7 nested subcategories
+    species_node = next(c for c in root["categories"] if c["title"] == "Species")
+    sub_titles = [c["title"] for c in species_node["categories"]]
+    assert set(sub_titles) == set(taxonomy.SUBCATEGORIES["Species"])
+    # Other categories have empty subcategory lists
+    for top in root["categories"]:
+        if top["title"] != "Species":
+            assert top["categories"] == []
+
+
+def test_ensure_org_categories_writes_canonical_when_org_empty() -> None:
     cfg = agol_config.AgolConfig()
     gis = MagicMock()
-    # Org already has all 10.
-    schema = {
+    written = _patch_schema_property(gis, [{"title": "Categories", "categories": []}])
+
+    diff = agol_sync.ensure_org_categories(gis, cfg, apply=True)
+
+    # Wrote exactly once; result is the canonical schema.
+    assert len(written) == 1
+    assert written[0] == agol_sync.build_canonical_schema()
+    assert diff.applied is True
+    assert len(diff.will_add) == 10
+    assert diff.will_orphan == []
+
+
+def test_ensure_org_categories_orphans_old_categories() -> None:
+    """Simulates the real Y2Y org's pre-2026 state and confirms the rewrite."""
+    cfg = agol_config.AgolConfig()
+    gis = MagicMock()
+    old_schema = [{
+        "title": "Categories",
         "categories": [
-            {"title": c}
-            for c in (
-                "Jurisdictional & Political Boundaries",
-                "Land Designations & Tenure",
-                "Biodiversity & Ecosystems",
-                "Climate Resilience",
-                "Connectivity & Wildlife Movement",
-                "Species",
-                "Water",
-                "Land Cover, Land Use & Disturbance",
-                "Human Dimensions",
-                "Threats & Infrastructure",
-            )
-        ]
-    }
-    gis.content.categories.schema = schema
-    created = agol_sync.ensure_org_categories(gis, cfg)
-    assert created == []
+            {"title": "Administrative and Jurisdictional Boundaries", "categories": []},
+            {"title": "Protected Areas and Conservation Lands", "categories": []},
+            {"title": "Species and Species at Risk", "categories": [
+                {"title": "Grizzly Bear", "categories": []},
+            ]},
+            {"title": "Water", "categories": []},
+            {"title": "Climate Resilience", "categories": []},
+        ],
+    }]
+    written = _patch_schema_property(gis, old_schema)
+
+    diff = agol_sync.ensure_org_categories(gis, cfg, apply=True)
+
+    assert diff.applied is True
+    # 'Water' and 'Climate Resilience' carry over; the rest of the old
+    # categories are orphaned.
+    assert "Water" in diff.unchanged
+    assert "Climate Resilience" in diff.unchanged
+    assert "Administrative and Jurisdictional Boundaries" in diff.will_orphan
+    assert "Protected Areas and Conservation Lands" in diff.will_orphan
+    assert "Species and Species at Risk" in diff.will_orphan
+    # All 10 catalogue categories minus the 2 already-present get added.
+    assert "Jurisdictional & Political Boundaries" in diff.will_add
+    assert "Human Dimensions" in diff.will_add
+    assert "Species" in diff.will_add
+    assert len(written) == 1
+
+
+def test_ensure_org_categories_dry_run_does_not_write() -> None:
+    cfg = agol_config.AgolConfig()
+    gis = MagicMock()
+    written = _patch_schema_property(gis, [{"title": "Categories", "categories": []}])
+
+    diff = agol_sync.ensure_org_categories(gis, cfg, apply=False)
+
+    assert diff.applied is False
+    assert written == []
+    # Diff content still computed.
+    assert len(diff.will_add) == 10
+
+
+def test_ensure_org_categories_is_noop_when_canonical_already_present() -> None:
+    cfg = agol_config.AgolConfig()
+    gis = MagicMock()
+    written = _patch_schema_property(gis, agol_sync.build_canonical_schema())
+
+    diff = agol_sync.ensure_org_categories(gis, cfg, apply=True)
+    assert diff.applied is False  # no write needed
+    assert diff.will_add == []
+    assert diff.will_orphan == []
+    assert written == []
 
 
 # -----------------------------------------------------------------------------

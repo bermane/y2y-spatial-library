@@ -463,34 +463,86 @@ def agol_sync_login() -> None:
 
 
 @agol_sync_group.command("init-categories")
-def agol_sync_init_categories() -> None:
-    """Create the 10 spatial-typology categories in the AGOL org if missing.
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would change but don't write to AGOL.",
+)
+@click.option(
+    "--yes", "skip_confirm",
+    is_flag=True,
+    help="Skip the confirmation prompt (use for scripting).",
+)
+def agol_sync_init_categories(dry_run: bool, skip_confirm: bool) -> None:
+    """Rewrite the AGOL org's category schema to match the catalogue typology.
 
-    Idempotent: existing categories are left alone, missing ones are
-    created. Requires org-admin privileges in AGOL. The category
-    schema then lets the integration tag published items via the
-    ``categories`` property (see DESIGN.md §15).
+    Builds the canonical schema from pipeline/taxonomy.py (10 top-level
+    categories + 7 Species subcategories) and writes it to the org.
+    Any pre-existing categories not in the canonical typology are
+    orphaned — items tagged with them lose those tags.
+
+    Requires org-admin privileges. Confirms before writing unless
+    ``--yes`` is passed. Use ``--dry-run`` to preview the diff without
+    making changes.
     """
     from . import agol_config, agol_sync
 
     cfg = agol_config.load_config()
     try:
         gis = agol_sync.get_gis(cfg)
-        created = agol_sync.ensure_org_categories(gis, cfg)
+        # First do a dry-run probe so we can show the diff.
+        diff = agol_sync.ensure_org_categories(gis, cfg, apply=False)
     except agol_sync.AgolError as exc:
         raise click.ClickException(str(exc))
 
-    if not created:
+    if not diff.will_add and not diff.will_orphan:
         console.print(
-            "[green]all categories already present[/green] — no changes made"
+            "[green]AGOL category schema already matches the catalogue typology[/green] "
+            "— no changes needed"
         )
         return
+
+    # Show the proposed diff.
+    console.print("[bold]Proposed AGOL category schema changes:[/bold]")
+    if diff.will_add:
+        console.print(f"  [green]+ {len(diff.will_add)} to add:[/green]")
+        for c in diff.will_add:
+            console.print(f"      + {c}")
+    if diff.will_orphan:
+        console.print(
+            f"  [red]- {len(diff.will_orphan)} to orphan "
+            f"(items tagged with these will lose those tags):[/red]"
+        )
+        for c in diff.will_orphan:
+            console.print(f"      - {c}")
+    if diff.unchanged:
+        console.print(
+            f"  [dim]= {len(diff.unchanged)} unchanged: "
+            f"{', '.join(diff.unchanged)}[/dim]"
+        )
+
+    if dry_run:
+        console.print()
+        console.print("[yellow]--dry-run: not writing[/yellow]")
+        return
+
+    console.print()
+    if not skip_confirm and not click.confirm(
+        "Rewrite the AGOL category schema with these changes?",
+        default=False,
+    ):
+        console.print("[yellow]aborted[/yellow]")
+        return
+
+    try:
+        applied = agol_sync.ensure_org_categories(gis, cfg, apply=True)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
     console.print(
-        f"[green]created {len(created)} AGOL categor"
-        f"{'y' if len(created) == 1 else 'ies'}[/green]:"
+        f"[green]wrote AGOL category schema[/green] — "
+        f"added {len(applied.will_add)}, orphaned {len(applied.will_orphan)}"
     )
-    for c in created:
-        console.print(f"  + {c}")
 
 
 @agol_sync_group.command("status")
