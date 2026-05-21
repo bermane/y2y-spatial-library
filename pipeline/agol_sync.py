@@ -553,3 +553,637 @@ def _merge_category_schema(
         if title not in existing_top_titles:
             out["categories"].append({"title": title, "categories": []})
     return out
+
+
+# ----------------------------------------------------------------------------
+# push() — the catalogue → AGOL write path (Phase B)
+# ----------------------------------------------------------------------------
+
+# Sync statuses that allow a push attempt. 'pending_pull' and
+# 'conflict' must be resolved first (Phase D), and 'clean' rows don't
+# need pushing (the catalogue hasn't moved).
+_PUSHABLE_STATUSES: frozenset[str] = frozenset({
+    "unpublished", "pending_push", "error",
+})
+
+# Allowed (publish-target, source-format) pairs. Anything else surfaces
+# as a clean validation error before any AGOL contact.
+_VALID_TARGET_FORMAT: dict[str, set[str]] = {
+    "feature-layer":      {"geopackage"},
+    "vector-tile-layer":  {"geopackage"},
+    "imagery-layer":      {"geotiff"},
+}
+
+
+def push(
+    db_path: Path,
+    dataset_id: str,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    target_override: str | None = None,
+    sharing_override: str | None = None,
+    dry_run: bool = False,
+    cache_dir: Path | None = None,
+) -> SyncResult:
+    """Push a single catalogue row to AGOL.
+
+    Resolves the publish target (CLI ``target_override`` wins, else
+    ``row['agol_target']``), branches by target type, generates a
+    thumbnail, sets sharing (org + Conservation Atlas group unless
+    overridden), and updates the catalogue + changelog on success.
+
+    Args:
+        db_path: Path to inventory.db.
+        dataset_id: The row's ``dataset_id`` (ULID).
+        gis: A live ``arcgis.gis.GIS`` connection.
+        config: Loaded AgolConfig (provides folder prefix, group
+            name, etc.).
+        library_root: Typed library root (``library/spatial``).
+        actor: Recorded in the changelog as the sync's actor.
+        target_override: If set, overrides the row's ``agol_target``
+            for this single push. Recorded in the changelog so the
+            ad-hoc choice is auditable.
+        sharing_override: One of ``private`` / ``org`` / ``public``
+            (or ``None`` for the default org+Conservation-Atlas-group).
+        dry_run: If True, computes the planned payload + returns a
+            SyncResult marked ``action='push (dry-run)'`` without
+            touching AGOL or the catalogue.
+        cache_dir: Override the thumbnail/VTPK cache root
+            (``.y2y`` under the project root by default).
+
+    Returns:
+        ``SyncResult`` describing the outcome and the new
+        ``sync_status``.
+
+    Raises:
+        AgolError / AgolToolingError / AgolGroupNotFoundError:
+            for unrecoverable failures. The caller (CLI or batch
+            wrapper) decides how to surface these to the steward.
+    """
+    from . import inventory_manager
+    from .utils import utc_now_iso
+
+    cache_dir = cache_dir or (Path.home() / ".y2y")
+
+    # ----- read + validate the row -------------------------------------
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise AgolError(f"dataset_id {dataset_id!r} not in catalogue")
+
+    if row.get("status") != "active":
+        raise AgolError(
+            f"refusing to push {dataset_id!r}: status is "
+            f"{row.get('status')!r}, not 'active'"
+        )
+
+    sync_status_before = row.get("sync_status") or "unpublished"
+    if sync_status_before not in _PUSHABLE_STATUSES:
+        raise AgolError(
+            f"refusing to push {dataset_id!r}: sync_status is "
+            f"{sync_status_before!r}; resolve via pull or unpublish first."
+        )
+
+    target = target_override or row.get("agol_target")
+    if target not in _VALID_TARGET_FORMAT:
+        raise AgolError(
+            f"unknown agol_target {target!r} on {dataset_id!r}. "
+            f"Expected one of: {sorted(_VALID_TARGET_FORMAT)}"
+        )
+    source_format = row.get("format")
+    allowed_formats = _VALID_TARGET_FORMAT[target]
+    if source_format not in allowed_formats:
+        raise AgolError(
+            f"agol_target {target!r} is not valid for format "
+            f"{source_format!r} (allowed: {sorted(allowed_formats)})."
+        )
+
+    # ----- compute the AGOL-side payload -------------------------------
+    properties = compute_item_properties(row)
+    folder = compute_target_folder(
+        row["category"], prefix=config.folder_prefix
+    )
+    sharing_payload = _resolve_sharing(config, gis, sharing_override)
+
+    # ----- dry-run short-circuit ---------------------------------------
+    if dry_run:
+        note = _format_push_plan(
+            target=target,
+            folder=folder,
+            properties=properties,
+            sharing_payload=sharing_payload,
+            row=row,
+            target_override_used=bool(target_override),
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="push (dry-run)",
+            sync_status_before=sync_status_before,
+            sync_status_after=sync_status_before,
+            agol_item_id=row.get("agol_item_id"),
+            note=note,
+        )
+
+    # ----- pre-flight: thumbnail (per target) --------------------------
+    from . import agol_thumbnails
+
+    try:
+        thumb_path = agol_thumbnails.generate_thumbnail(
+            row, library_root, cache_dir,
+        )
+    except agol_thumbnails.ThumbnailError as exc:
+        # Continue without a thumbnail rather than failing the push;
+        # AGOL handles missing thumbnails fine. Note this in the
+        # changelog so the steward can investigate later.
+        thumb_path = None
+        properties["_thumb_warning"] = f"thumbnail generation failed: {exc}"
+
+    # ----- per-target publish path -------------------------------------
+    source_path = library_root / row["file_path"]
+    if not source_path.exists():
+        raise AgolError(
+            f"source file missing for {dataset_id!r}: {source_path}"
+        )
+
+    if target == "feature-layer":
+        item = _publish_feature_layer(
+            gis=gis, source_path=source_path,
+            properties=properties, folder=folder,
+            existing_item_id=row.get("agol_item_id"),
+            checksum_changed=_checksum_changed(row),
+        )
+    elif target == "vector-tile-layer":
+        item = _publish_vector_tile_layer(
+            gis=gis, source_path=source_path,
+            properties=properties, folder=folder,
+            existing_item_id=row.get("agol_item_id"),
+            dataset_id=dataset_id, checksum=row["checksum_sha256"],
+            cache_dir=cache_dir,
+            checksum_changed=_checksum_changed(row),
+        )
+    elif target == "imagery-layer":
+        item = _publish_imagery_layer(
+            gis=gis, source_path=source_path,
+            properties=properties, folder=folder,
+            existing_item_id=row.get("agol_item_id"),
+            checksum_changed=_checksum_changed(row),
+        )
+    else:
+        # Should be unreachable given the validation above.
+        raise AgolError(f"internal: unhandled target {target!r}")
+
+    # ----- thumbnail attach (post-publish) -----------------------------
+    if thumb_path is not None:
+        try:
+            item.update(thumbnail=str(thumb_path))
+        except Exception as exc:  # pragma: no cover — best-effort
+            # Don't fail the whole push if the thumbnail upload alone
+            # bombs. Note in the changelog.
+            properties["_thumb_warning"] = (
+                f"thumbnail upload failed post-publish: {exc}"
+            )
+
+    # ----- sharing -----------------------------------------------------
+    _apply_sharing(item, sharing_payload)
+
+    # ----- catalogue update --------------------------------------------
+    now = utc_now_iso()
+    updates: dict[str, Any] = {
+        "agol_item_id": item.id,
+        "last_synced_at": now,
+        "sync_status": "clean",
+    }
+    if not row.get("agol_published_at"):
+        updates["agol_published_at"] = now
+
+    # If the push fired a thumbnail or fallback warning, surface it in
+    # internal_notes so the steward can see something happened.
+    warning = properties.pop("_thumb_warning", None)
+    fallback = properties.pop("_fallback_warning", None)
+    annotation_parts: list[str] = []
+    if warning:
+        annotation_parts.append(f"[agol] {warning}")
+    if fallback:
+        annotation_parts.append(f"[agol] {fallback}")
+    if annotation_parts:
+        prior = row.get("internal_notes") or ""
+        annotation = "\n".join(annotation_parts)
+        updates["internal_notes"] = (
+            f"{prior}\n{annotation}".strip() if prior else annotation
+        )
+
+    inventory_manager.update_dataset(db_path, dataset_id, updates)
+
+    # ----- changelog ---------------------------------------------------
+    note_parts = [
+        f"pushed to AGOL as {target}",
+        f"item_id={item.id}",
+        f"folder={folder}",
+    ]
+    if target_override:
+        note_parts.append(f"target overridden via CLI flag")
+    if sharing_override:
+        note_parts.append(f"sharing overridden via CLI flag: {sharing_override}")
+    if annotation_parts:
+        note_parts.extend(annotation_parts)
+    note = " | ".join(note_parts)
+
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=now,
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=row.get("file_path"),
+        detail=note,
+        field_changed="sync_status",
+        old_value=sync_status_before,
+        new_value="clean",
+    )
+
+    return SyncResult(
+        dataset_id=dataset_id,
+        action="push",
+        sync_status_before=sync_status_before,
+        sync_status_after="clean",
+        agol_item_id=item.id,
+        note=note,
+    )
+
+
+# --- per-target publish helpers ----------------------------------------
+
+def _publish_feature_layer(
+    *,
+    gis,
+    source_path: Path,
+    properties: dict[str, Any],
+    folder: str,
+    existing_item_id: str | None,
+    checksum_changed: bool,
+) -> Any:
+    """Publish (or update) a Hosted Feature Layer from a GPKG source."""
+    item_props = _strip_internal(properties)
+    item_props.setdefault("type", "GeoPackage")
+
+    if existing_item_id is None:
+        # Create path: upload + publish.
+        gpkg_item = gis.content.add(
+            item_properties=item_props,
+            data=str(source_path),
+            folder=folder,
+        )
+        try:
+            return gpkg_item.publish(file_type="GeoPackage")
+        except Exception as exc:
+            # Hosted-layer publish failed; the source GPKG item still
+            # exists. Fall back to item-with-file (downloadable but
+            # not a queryable service).
+            properties["_fallback_warning"] = (
+                f"feature-layer publish failed; item retained as "
+                f"downloadable GeoPackage instead. Underlying: {exc}"
+            )
+            return gpkg_item
+
+    # Update path.
+    item = gis.content.get(existing_item_id)
+    if item is None:
+        raise AgolError(
+            f"existing_item_id {existing_item_id!r} no longer exists on AGOL "
+            f"(deleted out-of-band?). Use `y2y agol-sync unpublish` to clear "
+            f"the link, then re-push."
+        )
+    item.update(item_properties=item_props)
+    if checksum_changed:
+        # Replace the data and re-publish the hosted layer.
+        item.update(data=str(source_path))
+        try:
+            item.publish(file_type="GeoPackage", overwrite=True)
+        except Exception as exc:  # pragma: no cover — defensive
+            properties["_fallback_warning"] = (
+                f"re-publish failed; metadata updated but hosted layer "
+                f"may be stale. Underlying: {exc}"
+            )
+    return item
+
+
+def _publish_imagery_layer(
+    *,
+    gis,
+    source_path: Path,
+    properties: dict[str, Any],
+    folder: str,
+    existing_item_id: str | None,
+    checksum_changed: bool,
+) -> Any:
+    """Publish (or update) a Hosted Imagery Layer from a COG source.
+
+    Hosted imagery publishing for COGs is beta in the arcgis SDK.
+    On publish failure we fall back to retaining the uploaded
+    GeoTIFF as a downloadable item (item-with-attached-file mode)
+    and surface that fact in the changelog.
+    """
+    item_props = _strip_internal(properties)
+    # AGOL distinguishes uploaded image types; "Image" is the modern
+    # name for a raster source item.
+    item_props.setdefault("type", "Image")
+
+    if existing_item_id is None:
+        tif_item = gis.content.add(
+            item_properties=item_props,
+            data=str(source_path),
+            folder=folder,
+        )
+        try:
+            return tif_item.publish()
+        except Exception as exc:
+            properties["_fallback_warning"] = (
+                f"hosted imagery publish failed (likely COG beta limitation); "
+                f"item retained as downloadable GeoTIFF. Underlying: {exc}"
+            )
+            return tif_item
+
+    item = gis.content.get(existing_item_id)
+    if item is None:
+        raise AgolError(
+            f"existing_item_id {existing_item_id!r} no longer exists on AGOL. "
+            f"Use `y2y agol-sync unpublish` to clear the link, then re-push."
+        )
+    item.update(item_properties=item_props)
+    if checksum_changed:
+        item.update(data=str(source_path))
+        try:
+            item.publish(overwrite=True)
+        except Exception as exc:
+            properties["_fallback_warning"] = (
+                f"re-publish failed; metadata updated but service "
+                f"may be stale. Underlying: {exc}"
+            )
+    return item
+
+
+def _publish_vector_tile_layer(
+    *,
+    gis,
+    source_path: Path,
+    properties: dict[str, Any],
+    folder: str,
+    existing_item_id: str | None,
+    dataset_id: str,
+    checksum: str,
+    cache_dir: Path,
+    checksum_changed: bool,
+) -> Any:
+    """Publish (or update) a Hosted Vector Tile Service from a locally-built VTPK.
+
+    Steward-confirmed design (DESIGN.md §15 + plan): we never let
+    AGOL create an intermediate Hosted Feature Layer. Instead, we
+    use arcpy on the local machine to build a VTPK, upload that
+    VTPK as an item, and publish the VTPK item to a Hosted Vector
+    Tile Service.
+
+    The arcpy import is detected lazily inside ``agol_vtpk.build_vtpk``;
+    missing-arcpy errors surface as ``AgolToolingError``.
+    """
+    from . import agol_vtpk
+
+    vtpk_path = agol_vtpk.build_vtpk(
+        gpkg_path=source_path,
+        dataset_id=dataset_id,
+        checksum=checksum,
+        cache_dir=cache_dir,
+    )
+
+    item_props = _strip_internal(properties)
+    item_props.setdefault("type", "Vector Tile Package")
+
+    if existing_item_id is None:
+        vtpk_item = gis.content.add(
+            item_properties=item_props,
+            data=str(vtpk_path),
+            folder=folder,
+        )
+        return vtpk_item.publish(file_type="Vector Tile Package")
+
+    # Update path. For VTPK updates we replace the source data and
+    # re-publish; AGOL keeps the same service URL.
+    item = gis.content.get(existing_item_id)
+    if item is None:
+        raise AgolError(
+            f"existing_item_id {existing_item_id!r} no longer exists on AGOL. "
+            f"Use `y2y agol-sync unpublish` to clear the link, then re-push."
+        )
+    item.update(item_properties=item_props)
+    if checksum_changed:
+        item.update(data=str(vtpk_path))
+        item.publish(file_type="Vector Tile Package", overwrite=True)
+    return item
+
+
+# --- sharing -----------------------------------------------------------
+
+def _resolve_sharing(
+    config: AgolConfig,
+    gis,
+    sharing_override: str | None,
+) -> dict[str, Any]:
+    """Compute the sharing payload for ``item.sharing.shared_with``.
+
+    Default: org-visible + shared with the Y2Y Conservation Atlas
+    group. The group ID is resolved lazily (cached).
+
+    CLI ``--sharing`` flag values:
+        'private' → no sharing (only the owner can see)
+        'org'     → org-visible only, no group
+        'public'  → everyone, no group
+    """
+    if sharing_override == "private":
+        return {"everyone": False, "org": False, "groups": []}
+    if sharing_override == "org":
+        return {"everyone": False, "org": True, "groups": []}
+    if sharing_override == "public":
+        return {"everyone": True, "org": True, "groups": []}
+    if sharing_override is not None:
+        raise AgolError(
+            f"unknown sharing override {sharing_override!r}; "
+            f"expected 'private', 'org', or 'public'."
+        )
+
+    # Default: org + Conservation Atlas group.
+    group_id = resolve_group_id(gis, config)
+    return {"everyone": False, "org": True, "groups": [group_id]}
+
+
+def _apply_sharing(item: Any, payload: dict[str, Any]) -> None:
+    """Apply a sharing payload to an item.
+
+    Uses the modern ``item.sharing.sharing_level`` + group-sharing
+    API. Falls back to the legacy ``item.share(...)`` call on older
+    SDK versions.
+    """
+    everyone = bool(payload.get("everyone"))
+    org = bool(payload.get("org"))
+    groups = list(payload.get("groups") or [])
+
+    # Modern path: item.sharing manager.
+    sharing = getattr(item, "sharing", None)
+    if sharing is not None and hasattr(sharing, "sharing_level"):
+        if everyone:
+            sharing.sharing_level = "EVERYONE"
+        elif org:
+            sharing.sharing_level = "ORGANIZATION"
+        else:
+            sharing.sharing_level = "PRIVATE"
+        # Group sharing via the sub-manager.
+        groups_mgr = getattr(sharing, "groups", None)
+        if groups_mgr is not None and groups:
+            for gid in groups:
+                try:
+                    groups_mgr.add(group=gid)
+                except Exception:  # pragma: no cover — defensive
+                    # Some SDK versions take an item arg, some don't.
+                    # Best-effort: continue if this particular call shape
+                    # isn't supported; the org-level sharing still applied.
+                    pass
+        return
+
+    # Legacy path: item.share(everyone=..., org=..., groups=...).
+    try:
+        item.share(
+            everyone=everyone,
+            org=org,
+            groups=groups or None,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        raise AgolError(
+            f"could not apply sharing to item {item.id!r}: {exc}"
+        ) from exc
+
+
+# --- misc helpers ------------------------------------------------------
+
+def _strip_internal(properties: dict[str, Any]) -> dict[str, Any]:
+    """Remove any ``_underscore``-prefixed bookkeeping keys before AGOL upload."""
+    return {k: v for k, v in properties.items() if not k.startswith("_")}
+
+
+def _checksum_changed(row: dict[str, Any]) -> bool:
+    """True iff the file's checksum has changed since the last sync.
+
+    The catalogue's ``checksum_sha256`` is updated whenever
+    ``y2y refresh`` or ingest re-snapshots the file. If the most
+    recent recorded checksum differs from what was on disk at the
+    last successful push, the AGOL-side data needs replacing.
+
+    For v1 this is approximated by checking whether ``last_synced_at``
+    is older than ``date_modified``; we don't store a per-push
+    checksum independently. A subtle precision-cost: a metadata-only
+    edit (which bumps date_modified) flags as "checksum changed"
+    too. That just means we re-upload the source — wasteful but
+    safe. v2 could store the last-pushed checksum in a new column.
+    """
+    last_synced = row.get("last_synced_at")
+    if not last_synced:
+        return True  # never synced → must upload
+    date_modified = row.get("date_modified") or ""
+    return date_modified > last_synced
+
+
+def _format_push_plan(
+    *,
+    target: str,
+    folder: str,
+    properties: dict[str, Any],
+    sharing_payload: dict[str, Any],
+    row: dict[str, Any],
+    target_override_used: bool,
+) -> str:
+    """Render a human-readable dry-run summary."""
+    lines = [
+        f"target:    {target}{' (CLI override)' if target_override_used else ''}",
+        f"folder:    {folder}",
+        f"title:     {properties.get('title')}",
+        f"category:  {properties.get('categories', [None])[0]}",
+        f"tags:      {properties.get('tags')}",
+        f"sharing:   org={sharing_payload.get('org')}, "
+        f"everyone={sharing_payload.get('everyone')}, "
+        f"groups={sharing_payload.get('groups')}",
+    ]
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------------
+# push_all_dirty — batch wrapper
+# ----------------------------------------------------------------------------
+
+def push_all_dirty(
+    db_path: Path,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    sharing_override: str | None = None,
+    dry_run: bool = False,
+) -> list[SyncResult]:
+    """Push every row whose ``sync_status='pending_push'``.
+
+    Per-row failures mark that row's ``sync_status='error'`` (and a
+    structured changelog entry captures the failure reason) but do
+    not abort the batch — subsequent rows still get a chance.
+
+    Returns the list of ``SyncResult`` for every row attempted (one
+    entry per row, in catalogue order).
+    """
+    from . import inventory_manager
+    from .utils import utc_now_iso
+
+    rows = [
+        r for r in inventory_manager.load_inventory(db_path)
+        if r.get("status") == "active"
+        and r.get("sync_status") == "pending_push"
+    ]
+
+    results: list[SyncResult] = []
+    for row in rows:
+        did = row["dataset_id"]
+        try:
+            result = push(
+                db_path, did, gis, config,
+                library_root=library_root, actor=actor,
+                sharing_override=sharing_override,
+                dry_run=dry_run,
+            )
+        except AgolError as exc:
+            # Mark the row as 'error' and record a changelog entry,
+            # then continue.
+            if not dry_run:
+                inventory_manager.update_dataset(
+                    db_path, did, {"sync_status": "error"},
+                )
+                inventory_manager.append_changelog(
+                    db_path,
+                    timestamp=utc_now_iso(),
+                    action="metadata",
+                    dataset_id=did,
+                    actor=actor,
+                    path=row.get("file_path"),
+                    detail=f"push failed: {exc}",
+                    field_changed="sync_status",
+                    old_value="pending_push",
+                    new_value="error",
+                )
+            results.append(SyncResult(
+                dataset_id=did,
+                action="push" if not dry_run else "push (dry-run)",
+                sync_status_before="pending_push",
+                sync_status_after="error" if not dry_run else "pending_push",
+                agol_item_id=row.get("agol_item_id"),
+                note=str(exc),
+                error=str(exc),
+            ))
+        else:
+            results.append(result)
+    return results

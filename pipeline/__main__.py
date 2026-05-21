@@ -661,5 +661,165 @@ def _format_agol_timestamp(ms: int | None) -> str | None:
     )
 
 
+# --- agol-sync push ----------------------------------------------------
+
+_VALID_TARGETS = ("feature-layer", "vector-tile-layer", "imagery-layer")
+_VALID_SHARING = ("private", "org", "public")
+
+
+@agol_sync_group.command("push")
+@click.argument("dataset_id", required=False)
+@click.option(
+    "--all-dirty",
+    is_flag=True,
+    help="Push every row whose sync_status='pending_push' (no <dataset_id> argument).",
+)
+@click.option(
+    "--target",
+    type=click.Choice(_VALID_TARGETS),
+    default=None,
+    help=(
+        "Override the row's persisted agol_target for this one invocation. "
+        "Use for ad-hoc testing; for durable per-dataset changes use "
+        "`y2y update <id> --set agol_target=...`. Not allowed with --all-dirty."
+    ),
+)
+@click.option(
+    "--sharing",
+    type=click.Choice(_VALID_SHARING),
+    default=None,
+    help=(
+        "Override the default sharing (org + Conservation Atlas group). "
+        "private = owner only; org = org-visible, no group; public = "
+        "world-visible, no group."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be pushed without contacting AGOL.",
+)
+@click.option(
+    "--actor",
+    default=None,
+    help="Name recorded in the changelog. Defaults to $USER.",
+)
+@click.pass_context
+def agol_sync_push(
+    ctx: click.Context,
+    dataset_id: str | None,
+    all_dirty: bool,
+    target: str | None,
+    sharing: str | None,
+    dry_run: bool,
+    actor: str | None,
+) -> None:
+    """Push a single dataset (or every pending-push row) to AGOL.
+
+    \b
+    USAGE:
+      y2y agol-sync push <dataset_id>             — push one row
+      y2y agol-sync push --all-dirty              — push every pending_push row
+      y2y agol-sync push <id> --dry-run           — preview without contacting AGOL
+      y2y agol-sync push <id> --target vector-tile-layer
+                                                  — ad-hoc target override
+      y2y agol-sync push --all-dirty --sharing private
+
+    The publish target for each row comes from the catalogue's
+    `agol_target` column unless overridden via --target. Sharing
+    defaults to org + Y2Y Conservation Atlas group; --sharing
+    overrides per invocation.
+    """
+    from . import agol_config, agol_sync
+
+    if all_dirty and dataset_id is not None:
+        raise click.UsageError(
+            "Cannot combine <dataset_id> argument with --all-dirty."
+        )
+    if all_dirty and target is not None:
+        raise click.UsageError(
+            "--target is per-row; not allowed with --all-dirty. "
+            "Use `y2y update <id> --set agol_target=...` to make a "
+            "persistent change to a row's target."
+        )
+    if not all_dirty and dataset_id is None:
+        raise click.UsageError(
+            "Either give a <dataset_id> or pass --all-dirty."
+        )
+
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
+    cfg = agol_config.load_config()
+    actor_name = actor or _default_actor()
+    cache_dir = ctx.obj["root"] / ".y2y"
+
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    if all_dirty:
+        results = agol_sync.push_all_dirty(
+            db_path, gis, cfg,
+            library_root=library, actor=actor_name,
+            sharing_override=sharing, dry_run=dry_run,
+        )
+        _print_push_results(results, dry_run=dry_run)
+        return
+
+    # Single-row push.
+    try:
+        result = agol_sync.push(
+            db_path, dataset_id, gis, cfg,
+            library_root=library, actor=actor_name,
+            target_override=target, sharing_override=sharing,
+            dry_run=dry_run, cache_dir=cache_dir,
+        )
+    except agol_sync.AgolToolingError as exc:
+        # arcpy missing; surface as a click error with the SDK's
+        # clear instructions.
+        raise click.ClickException(str(exc))
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    _print_push_results([result], dry_run=dry_run)
+
+
+def _print_push_results(results, *, dry_run: bool) -> None:
+    """Render a per-result line for `y2y agol-sync push` output."""
+    if not results:
+        console.print("[yellow]no rows to push[/yellow]")
+        return
+
+    n_ok = sum(1 for r in results if r.error is None)
+    n_err = len(results) - n_ok
+
+    if dry_run:
+        console.print(
+            f"[bold]Dry-run: would push {len(results)} row(s)[/bold]"
+        )
+    else:
+        headline = "green" if n_err == 0 else "yellow"
+        console.print(
+            f"[{headline}]push complete[/{headline}] — "
+            f"ok: [bold]{n_ok}[/bold], failed: [bold]{n_err}[/bold]"
+        )
+
+    for r in results:
+        if r.error:
+            console.print(
+                f"  [red]✗[/red] {r.dataset_id}: {r.error}"
+            )
+        else:
+            marker = "[dim](dry-run)[/dim]" if dry_run else ""
+            console.print(
+                f"  [green]✓[/green] {r.dataset_id} → "
+                f"item={r.agol_item_id or '—'}  status={r.sync_status_after}  {marker}"
+            )
+            if dry_run and r.note:
+                # Indent the multi-line dry-run plan.
+                for line in r.note.splitlines():
+                    console.print(f"      {line}")
+
+
 if __name__ == "__main__":
     cli()
