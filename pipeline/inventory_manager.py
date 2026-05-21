@@ -36,7 +36,6 @@ from . import db as _db
 # Public filenames (used by the CLI and a couple of helpers in callers).
 INVENTORY_FILENAME = "inventory.xlsx"        # legacy, now an export target
 DB_FILENAME = "inventory.db"                 # source of truth
-CHANGELOG_FILENAME = "changelog.md"          # legacy human-readable, not regenerated
 
 
 # ----------------------------------------------------------------------------

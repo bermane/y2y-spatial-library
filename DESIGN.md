@@ -144,11 +144,11 @@ reconstruct exactly what happened and when. Corrections are themselves
 logged, not applied in-place.
 
 > **Pre-migration history.** The legacy `inventory/changelog.md` file
-> contains the human-readable changelog as it existed before migration
-> 001. The pipeline no longer writes to it; it is left on disk as
-> historical reference. The exported `inventory.xlsx` includes a
-> `changelog` sheet rendering the SQLite table for steward
-> readability.
+> (the human-readable changelog as it existed before migration 001)
+> has been removed. The pre-migration audit trail survives in the
+> `v0.1-xlsx` git tag if it ever needs to be consulted. The exported
+> `inventory.xlsx` (`y2y export-xlsx`) includes a `changelog` sheet
+> rendering the SQLite table for steward readability.
 
 ---
 
