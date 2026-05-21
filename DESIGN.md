@@ -223,7 +223,7 @@ exporter's layout is in `pipeline/export_xlsx.py`.
 | `dataset_id`  | string (opaque)   | Stable across renames/moves. Primary key. Format `ds_<26-char ULID>`; the schema CHECK enforces the `ds_` prefix. Assigned at scan. |
 | `dataset_type` | enum             | `'spatial'` (only value today). Reserved for future expansion to other library types — see §14. |
 | `category`    | enum              | One of the 10 taxonomy categories — stored as the **display name** (full name from `Spatial_Data_Typology.xlsx`, e.g. `Jurisdictional & Political Boundaries`). Schema CHECK enforces the 10-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Juris_Political_Boundaries`); the pipeline maps display↔folder. Migration 006 carried the 9→10 transition adopted at the 2026 director workshop. |
-| `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`); folder is `Grizzly_Bear`. Only `Species` has subcategories in Phase A. |
+| `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`, `Multi-Species`); folder is `Grizzly_Bear` / `Multi_Species`. Only `Species` has subcategories in Phase A. Display names use **spaces or hyphens**, never underscores — the underscore is reserved for filesystem folder names. `Spatial_Data_Typology.xlsx` matches this convention; if a future revision of the typology document drifts back to underscored sub-category labels, treat it as a typo in the document, not a steward decision to change display naming. |
 | `file_path`   | string (relative) | Path of the **canonical** file relative to `library/spatial/`, using folder names. Set at approve. (Pre-migration-002 the path was relative to `library/`; the relative segments did not change.) |
 | `format`      | enum              | Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
 
@@ -661,6 +661,37 @@ file-already-deleted situation back into agreement without
 `--fix-…` intervention; every other inventory-vs-disk divergence is
 surfaced by reconcile and resolved by the steward through `update` /
 `rename` / file-system action.
+
+#### Hard-delete exception (pre-production only)
+
+While the catalogue is still pre-production, the steward may
+**hard-delete** dataset rows (and their changelog history) instead of
+tombstoning. This is the path used by migrations 004 (re-ingest the
+mis-classified GB rasters) and 005 (purge Phase 6 verification
+artifacts). The mechanics:
+
+1. The exception is invoked **only via a numbered migration script**,
+   never from the CLI. Each invocation is auditable in
+   `pipeline/migrations/` and recorded in `schema_migrations`.
+2. The migration disables FK enforcement (`PRAGMA foreign_keys =
+   OFF`), `DELETE`s the targeted changelog rows, `DELETE`s the
+   dataset rows, runs `PRAGMA foreign_key_check` while still off to
+   verify no other history is orphaned, then re-enables FKs.
+3. Pre-flight safety: the migration refuses to run if any target row
+   isn't already in the expected state (e.g., 005 refuses if either
+   target isn't `status='tombstoned'`).
+
+**This exception is retired at production.** Once the project crosses
+into production use the policy reverts to "tombstone, never delete":
+the FK constraint stays enforced, and the only way to remove a
+dataset from active operation is `y2y tombstone`. Hard-deletes from
+the production catalogue would destroy audit history that funders,
+auditors, and successor stewards depend on.
+
+The pattern exists because pre-production accumulates verification
+scaffolding (test ingests, classifications that turned out wrong)
+whose audit trail genuinely isn't worth keeping. After production,
+every dataset's history matters.
 
 ### Actor resolution
 
