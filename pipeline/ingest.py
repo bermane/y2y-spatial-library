@@ -375,6 +375,12 @@ def _build_row(
         # AGOL linkage & freeform
         "agol_item_id": None,
         "notes": None,
+        # Default AGOL publish target derived from source format
+        # (vector → feature-layer; raster → imagery-layer). Steward
+        # can override to vector-tile-layer in the pending sheet for
+        # vector data they want delivered as a cached tile service.
+        # See DESIGN.md §15.
+        "agol_target": "feature-layer" if meta.is_vector else "imagery-layer",
         # error sink
         pending_sheet.ERROR_COLUMN: None,
     }

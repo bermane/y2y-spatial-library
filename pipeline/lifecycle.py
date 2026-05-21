@@ -45,6 +45,11 @@ UPDATABLE_FIELDS: frozenset[str] = frozenset({
     "data_steward",
     "summary", "description", "tags", "terms_of_use", "acknowledgements",
     "agol_item_id", "internal_notes",
+    # AGOL publish-target intent — steward changes their mind about
+    # how a dataset should be published (e.g., promoting a large
+    # vector from feature-layer to vector-tile-layer). See DESIGN.md
+    # §15.
+    "agol_target",
 })
 
 # Status values reachable via update(). Tombstoning is its own command

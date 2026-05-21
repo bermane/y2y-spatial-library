@@ -69,6 +69,11 @@ COLUMNS: list[tuple[str, str]] = [
     # 3. transform inputs
     (TARGET_FILENAME_COLUMN, "transform"),
     ("classification", "overridable"),
+    # AGOL publish target — auto-prefilled from format (feature-layer
+    # for vectors, imagery-layer for rasters). Steward overrides to
+    # vector-tile-layer for large vectors that should be delivered as
+    # cached tiles. See DESIGN.md §15.
+    ("agol_target", "overridable"),
     # 4. categorisation (auto-prefilled where possible)
     ("category", "overridable"),
     ("subcategory", "overridable"),

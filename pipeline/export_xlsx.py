@@ -73,11 +73,12 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("raster_height", "locked"),
     ("pixel_size_x", "locked"),
     ("pixel_size_y", "locked"),
-    # AGOL linkage (reserved)
+    # AGOL linkage
     ("agol_item_id", "agol"),
     ("agol_published_at", "agol"),
     ("last_synced_at", "agol"),
     ("sync_status", "agol"),
+    ("agol_target", "agol"),
     # source provenance
     ("source_format", "locked"),
     ("source_filename", "locked"),
