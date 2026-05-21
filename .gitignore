@@ -19,6 +19,13 @@ queue/archived/**
 !queue/archived/
 !queue/archived/.gitkeep
 
+# --- AGOL integration local state ---
+# Holds: ~/.y2y/ equivalent files inside the project root, if the
+# steward ever points the AGOL config layer at a project-local
+# directory. Caches: agol_group_cache.json, thumbnails/, vtpk_cache/.
+# All regenerable; never source of truth.
+.y2y/
+
 # --- Generated artifacts ---
 # inventory.xlsx is a regenerated read-only view of inventory.db
 # (post-migration 001); never the source of truth.

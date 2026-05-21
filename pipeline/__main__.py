@@ -420,5 +420,194 @@ def export_xlsx_cmd(ctx: click.Context, out_path: Path | None) -> None:
     )
 
 
+# --- agol-sync ---------------------------------------------------------
+#
+# AGOL integration sub-group. See DESIGN.md §15 for the design.
+#
+# Phase A ships login + init-categories + status (read-only). Phase B
+# adds push. Phase C adds adopt + reconcile + auto-sync triggers.
+# Phase D adds pull + conflict. Phase E adds unpublish.
+
+@cli.group("agol-sync")
+def agol_sync_group() -> None:
+    """Catalogue ↔ ArcGIS Online integration commands."""
+
+
+@agol_sync_group.command("login")
+def agol_sync_login() -> None:
+    """Interactive OAuth login; saves profile for subsequent agol-sync runs.
+
+    Requires the OAuth client_id of your Y2Y AGOL app to be set in
+    the environment variable ``Y2Y_AGOL_CLIENT_ID`` (or in
+    ``~/.y2y/agol_config.yaml``). The browser will open for the
+    consent flow once; thereafter credentials are cached at
+    ``~/.arcgis/profile_y2y``.
+    """
+    from . import agol_config, agol_sync
+
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.login_interactive(cfg)
+    except agol_sync.AgolAuthError as exc:
+        raise click.ClickException(str(exc))
+
+    user = getattr(gis, "users", None)
+    me = user.me if user else None
+    console.print(
+        f"[green]agol-sync login complete[/green] — "
+        f"profile [bold]{cfg.profile_name}[/bold] cached"
+    )
+    if me is not None:
+        console.print(f"  authenticated as: [cyan]{me.username}[/cyan] ({me.fullName})")
+        console.print(f"  org: [cyan]{getattr(me, 'orgId', 'unknown')}[/cyan]")
+
+
+@agol_sync_group.command("init-categories")
+def agol_sync_init_categories() -> None:
+    """Create the 10 spatial-typology categories in the AGOL org if missing.
+
+    Idempotent: existing categories are left alone, missing ones are
+    created. Requires org-admin privileges in AGOL. The category
+    schema then lets the integration tag published items via the
+    ``categories`` property (see DESIGN.md §15).
+    """
+    from . import agol_config, agol_sync
+
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.get_gis(cfg)
+        created = agol_sync.ensure_org_categories(gis, cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    if not created:
+        console.print(
+            "[green]all categories already present[/green] — no changes made"
+        )
+        return
+    console.print(
+        f"[green]created {len(created)} AGOL categor"
+        f"{'y' if len(created) == 1 else 'ies'}[/green]:"
+    )
+    for c in created:
+        console.print(f"  + {c}")
+
+
+@agol_sync_group.command("status")
+@click.option(
+    "--deep",
+    is_flag=True,
+    help=(
+        "Also query AGOL for each linked item's modified timestamp "
+        "and flag rows where AGOL has drifted past the catalogue's "
+        "last_synced_at."
+    ),
+)
+@click.pass_context
+def agol_sync_status(ctx: click.Context, deep: bool) -> None:
+    """Show catalogue ↔ AGOL sync state for every active dataset."""
+    from . import agol_config, agol_sync, inventory_manager
+
+    db_path, _, _ = _resolve_paths(ctx.obj["root"])
+    cfg = agol_config.load_config()
+
+    rows = inventory_manager.load_inventory(db_path)
+    active = [r for r in rows if r.get("status") == "active"]
+
+    from collections import Counter
+    counts = Counter(r.get("sync_status") for r in active)
+
+    console.print(
+        f"[bold]Catalogue ↔ AGOL status[/bold] — "
+        f"{len(active)} active dataset(s)"
+    )
+    for status, n in sorted(counts.items(), key=lambda x: (x[0] or "")):
+        console.print(f"  {n:3d}  {status}")
+    console.print()
+    # Show per-target breakdown so the steward can see how many of
+    # each kind will be published when sync fires.
+    target_counts = Counter(r.get("agol_target") for r in active)
+    console.print("[bold]By agol_target:[/bold]")
+    for target, n in sorted(target_counts.items(), key=lambda x: (x[0] or "")):
+        console.print(f"  {n:3d}  {target}")
+
+    if not deep:
+        return
+
+    # Deep mode: for every row that already has an agol_item_id,
+    # fetch the AGOL item's modified timestamp and compare against
+    # last_synced_at.
+    linked = [r for r in active if r.get("agol_item_id")]
+    if not linked:
+        console.print()
+        console.print(
+            "[dim]--deep: no rows with agol_item_id yet; nothing to query[/dim]"
+        )
+        return
+
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print()
+    console.print(
+        f"[bold]--deep: AGOL modified-timestamp check on "
+        f"{len(linked)} linked row(s):[/bold]"
+    )
+    pull_candidates: list[agol_sync.PullCandidate] = []
+    for row in linked:
+        item_id = row["agol_item_id"]
+        last_synced = row.get("last_synced_at")
+        try:
+            item = gis.content.get(item_id)
+        except Exception as exc:  # pragma: no cover — defensive
+            console.print(
+                f"  [red]ERROR[/red] {row['dataset_id']} item={item_id}: {exc}"
+            )
+            continue
+        if item is None:
+            console.print(
+                f"  [yellow]MISSING ON AGOL[/yellow] {row['dataset_id']} "
+                f"item={item_id} (item was deleted or revoked)"
+            )
+            continue
+        # AGOL's `modified` is a Unix millisecond timestamp.
+        agol_modified = _format_agol_timestamp(getattr(item, "modified", None))
+        marker = ""
+        if last_synced and agol_modified and agol_modified > last_synced:
+            marker = "  [bold yellow]DRIFTED ON AGOL[/bold yellow]"
+            pull_candidates.append(agol_sync.PullCandidate(
+                dataset_id=row["dataset_id"],
+                agol_item_id=item_id,
+                title=row.get("title") or "",
+                last_synced_at=last_synced,
+                agol_modified_at=agol_modified,
+            ))
+        console.print(
+            f"  {row['dataset_id']}  last_synced={last_synced or '—'}  "
+            f"agol_modified={agol_modified or '—'}{marker}"
+        )
+
+    if pull_candidates:
+        console.print()
+        console.print(
+            f"[yellow]{len(pull_candidates)} row(s) need a pull "
+            f"(Phase D — `y2y agol-sync pull <id>`)[/yellow]"
+        )
+
+
+def _format_agol_timestamp(ms: int | None) -> str | None:
+    """AGOL's item.modified is Unix ms; render as ISO-8601 Z to match catalogue."""
+    if ms is None:
+        return None
+    from datetime import datetime, timezone
+    return (
+        datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
 if __name__ == "__main__":
     cli()
