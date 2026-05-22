@@ -678,19 +678,27 @@ def push(
     source_folder = compute_sources_folder()
     sharing_payload = _resolve_sharing(config, gis, sharing_override)
 
-    # Pre-create both AGOL folders so item.move() succeeds. AGOL's
-    # Item.move() requires the target folder to already exist
-    # (gis.content.add() auto-creates, but move() doesn't). The
-    # _ensure_folder helper is idempotent (exist_ok=True) and returns
-    # the live Folder instance — we hand that instance (rather than
-    # the bare name) to _safe_move so the SDK doesn't have to look
-    # the folder up by name (a path that fails silently if AGOL
-    # hasn't yet indexed the just-created folder).
+    # Pre-create the AGOL folder(s) we'll need so item.move()
+    # succeeds. AGOL's Item.move() requires the target folder to
+    # already exist (gis.content.add() auto-creates, but move()
+    # doesn't). The _ensure_folder helper is idempotent
+    # (exist_ok=True) and returns the live Folder instance — we
+    # hand that instance (rather than the bare name) to _safe_move
+    # so the SDK doesn't have to look the folder up by name (a path
+    # that fails silently if AGOL hasn't yet indexed the
+    # just-created folder).
+    #
+    # Imagery layers publish via arcgis.raster.publish_hosted_imagery_layer
+    # in the no-source model (steward-confirmed 2026-05-22): no
+    # separate source TIFF item ever exists, so we skip pre-creating
+    # the _sources folder for imagery rows. Vectors + VTL still need
+    # both folders.
     folder_obj: Any = folder
     source_folder_obj: Any = source_folder
     if not dry_run:
-        source_folder_obj = _ensure_folder(gis, source_folder) or source_folder
         folder_obj = _ensure_folder(gis, folder) or folder
+        if target != "imagery-layer":
+            source_folder_obj = _ensure_folder(gis, source_folder) or source_folder
 
     # ----- dry-run short-circuit ---------------------------------------
     if dry_run:
@@ -1294,68 +1302,82 @@ def _publish_imagery_layer(
     existing_item_id: str | None,
     checksum_changed: bool,
 ) -> Any:
-    """Publish (or update) a Hosted Imagery Layer from a COG source.
+    """Publish (or update) a Hosted Imagery Layer from a GeoTIFF source.
 
-    Hosted imagery publishing for COGs is beta in the arcgis SDK. On
-    publish failure we fall back to retaining the uploaded GeoTIFF as
-    a downloadable item (item-with-attached-file mode) and surface
-    that fact in the changelog.
+    **No-source model** (steward-confirmed 2026-05-22): rasters
+    publish as a hosted imagery layer with **no separate source
+    TIFF item** in the catalogue's My Content tree. The end state
+    matches AGOL's web-UI "Create hosted imagery layer" flow:
+    just one Imagery Layer item, no item in ``_sources/``.
 
-    Returns the **service** item if hosted publish succeeded, or the
-    upgraded source GeoTIFF item if the fallback fired.
+    Implementation: ``arcgis.raster.publish_hosted_imagery_layer``
+    uploads the local TIFF directly into AGOL's internal raster
+    store (Azure blob backend) and creates a hosted imagery layer
+    in one operation. The raster lives inside AGOL's managed
+    infrastructure, not as a user-visible item in the steward's
+    content browser.
+
+    Data refresh: re-call the same function with ``output_name``
+    set to the existing service item. AGOL replaces the underlying
+    raster in place, preserving item ID, URL, sharing, categories.
+
+    Source-related code paths (``_compute_source_item_properties``,
+    ``_reconcile_source_item``, ``_find_source_item``) are
+    deliberately not invoked for the imagery path — there's no
+    source to reconcile.
+
+    Returns the **service** item (Imagery Layer).
     """
+    from arcgis.raster import publish_hosted_imagery_layer
+
     item_props = _strip_internal(properties)
 
     if existing_item_id is None:
-        # Create path: minimal source + full-metadata service.
-        source_props = _compute_source_item_properties(
-            item_props, dataset_id, source_type="Image",
-        )
-        tif_item = gis.content.add(
-            item_properties=source_props,
-            data=str(source_path),
-            folder=source_folder,
-        )
+        # ----- create path -----
+        # publish_hosted_imagery_layer uploads the TIFF to AGOL's
+        # raster store and creates the imagery service. Returns the
+        # Imagery Layer Item directly. No intermediate source item.
         try:
-            service_item = tif_item.publish()
+            service_item = publish_hosted_imagery_layer(
+                input_data=[str(source_path)],
+                layer_configuration="ONE_IMAGE",
+                tiles_only=False,
+                output_name=item_props.get("title") or dataset_id,
+                gis=gis,
+            )
         except Exception as exc:
-            _record_warning(properties, (
-                f"hosted imagery publish failed (likely COG beta "
-                f"limitation); item retained as downloadable GeoTIFF. "
-                f"Underlying: {exc}"
-            ))
-            # Fallback: the source IS the user-facing item. Upgrade
-            # it to service-like treatment (category folder + full
-            # metadata + sharing applied by push()).
-            _safe_move(tif_item, folder_obj or folder, properties)
-            tif_item.update(item_properties=item_props)
-            return tif_item
+            raise AgolError(
+                f"hosted imagery publish failed for {dataset_id!r}: {exc}"
+            ) from exc
+
+        # Move to the category folder + apply the full
+        # steward-authored metadata.
         _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
-    # Update path.
+    # ----- update path -----
     service = _resolve_service_item(gis, existing_item_id)
-    source = _find_source_item(service)
 
-    # Data refresh first (before metadata reapply) so any service-
-    # metadata side effects of the publish are overridden below.
+    # Data refresh: re-publish with output_name=<existing service>.
+    # AGOL replaces the raster in place, preserves item ID + URL +
+    # sharing + categories. Runs before metadata reapply so any
+    # publish side effects on item properties are overridden by our
+    # explicit update below.
     if checksum_changed:
-        if source is None:
+        try:
+            publish_hosted_imagery_layer(
+                input_data=[str(source_path)],
+                layer_configuration="ONE_IMAGE",
+                tiles_only=False,
+                output_name=service,  # existing Item → replace in place
+                gis=gis,
+            )
+        except Exception as exc:
             _record_warning(properties, (
-                "imagery data refresh skipped: no Service2Data link "
-                "back to a source GeoTIFF. Re-publish manually from "
-                "the AGOL UI."
+                f"imagery data refresh failed; metadata updated but "
+                f"service data may be stale. Underlying: {exc}"
             ))
-        else:
-            try:
-                source.update(data=str(source_path))
-                source.publish(overwrite=True)
-            except Exception as exc:
-                _record_warning(properties, (
-                    f"imagery re-publish failed; metadata updated but "
-                    f"service may be stale. Underlying: {exc}"
-                ))
 
     # Apply / re-apply full steward-authored metadata to the service.
     service.update(item_properties=item_props)
@@ -1364,17 +1386,6 @@ def _publish_imagery_layer(
     # rationale as in _publish_feature_layer's update path).
     _safe_move(service, folder_obj or folder, properties)
 
-    # Source reconcile after data refresh so source data is current
-    # before metadata gets stripped.
-    if source is not None:
-        _reconcile_source_item(
-            source, dataset_id,
-            source_folder=source_folder,
-            source_folder_obj=source_folder_obj,
-            source_type="Image",
-            service_properties=item_props,
-            properties=properties,
-        )
     return service
 
 

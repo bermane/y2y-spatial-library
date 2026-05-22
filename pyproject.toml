@@ -30,6 +30,11 @@ dependencies = [
     # publishing a row whose agol_target='vector-tile-layer'.
     "arcgis>=2.3",
     "matplotlib>=3.8",
+    # Required by arcgis.raster.publish_hosted_imagery_layer for
+    # uploading TIFFs to AGOL's raster store (Azure blob backend).
+    # Version pin matches the range arcgis 2.3+ supports — outside
+    # this range the upload_imagery_to_agol_userstore call errors.
+    "azure-storage-blob>=12.1,<=12.17",
 ]
 
 [project.optional-dependencies]

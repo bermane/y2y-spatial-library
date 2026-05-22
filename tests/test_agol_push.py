@@ -1131,17 +1131,33 @@ def test_push_updates_existing_item_with_linked_source_uses_source_publish(
 
 
 # ----------------------------------------------------------------------------
-# Imagery-layer fallback when hosted publish fails
+# Imagery-layer no-source model — uses publish_hosted_imagery_layer directly
 # ----------------------------------------------------------------------------
 
-def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
-    project_tree, _config_no_cache, valid_cog_factory,
+def _patch_publish_hosted_imagery_layer(monkeypatch, return_value):
+    """Patch arcgis.raster.publish_hosted_imagery_layer to return a mock.
+
+    Returns the MagicMock that stands in for the function so callers
+    can inspect call_args / call_count.
+    """
+    fake = MagicMock(return_value=return_value)
+    # The function is imported lazily inside _publish_imagery_layer
+    # via `from arcgis.raster import publish_hosted_imagery_layer`.
+    # Patch the module-level name so the lazy import picks it up.
+    import arcgis.raster
+    monkeypatch.setattr(arcgis.raster, "publish_hosted_imagery_layer", fake)
+    return fake
+
+
+def test_push_imagery_create_uses_publish_hosted_imagery_layer(
+    project_tree, _config_no_cache, valid_cog_factory, monkeypatch,
 ) -> None:
-    """When .publish() on a GeoTIFF item raises, push() retains the
-    source TIFF as a downloadable file (no hosted service), upgrades
-    it to service-like treatment (moved to category folder, full
-    metadata applied), records the fallback in internal_notes +
-    changelog, and marks sync_status='clean'."""
+    """Imagery-layer create path goes through
+    arcgis.raster.publish_hosted_imagery_layer — NOT the deprecated
+    gis.content.add() + Item.publish() chain. This is the no-source
+    model (steward-confirmed 2026-05-22): no separate TIFF item gets
+    created in the catalogue's My Content tree.
+    """
     db = project_tree["db"]
     raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
     raster_dir.mkdir(parents=True, exist_ok=True)
@@ -1155,10 +1171,14 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
     )
     inventory_manager.insert_dataset(db, row)
 
-    gis = _make_gis(
-        new_item_id="raster_item_id",
-        publish_raises=RuntimeError("Hosted imagery for COGs not supported in beta"),
-    )
+    service = MagicMock()
+    service.id = "imagery_layer_id"
+    service.sharing = MagicMock()
+    service.sharing.sharing_level = "PRIVATE"
+    service.sharing.groups = MagicMock()
+
+    gis = _make_gis(new_item_id="imagery_layer_id")
+    fake_publish = _patch_publish_hosted_imagery_layer(monkeypatch, service)
 
     result = agol_sync.push(
         db, "ds_raster", gis, _config_no_cache,
@@ -1166,22 +1186,33 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # Item still got created (as a downloadable file).
-    assert result.agol_item_id == "raster_item_id"
-    assert result.sync_status_after == "clean"
+    # publish_hosted_imagery_layer was the entry point.
+    fake_publish.assert_called_once()
+    call_kwargs = fake_publish.call_args.kwargs
+    assert call_kwargs["layer_configuration"] == "ONE_IMAGE"
+    assert call_kwargs["tiles_only"] is False
+    assert call_kwargs["gis"] is gis
+    input_data = call_kwargs["input_data"]
+    assert isinstance(input_data, list) and len(input_data) == 1
+    assert "r.tif" in input_data[0]
 
-    # Fallback recorded in internal_notes.
-    after = inventory_manager.get_dataset(db, "ds_raster")
-    assert "[agol]" in (after["internal_notes"] or "")
-    assert "fallback" in (after["internal_notes"] or "").lower() \
-        or "hosted imagery publish failed" in (after["internal_notes"] or "")
+    # REGRESSION GUARD: no separate source TIFF item created. The
+    # deprecated gis.content.add() must not have been used for the
+    # imagery path (it's still used by the vector path; that's fine).
+    # We can't simply assert .not_called because the mock object is
+    # shared with the vector path's stub, but we CAN assert that no
+    # _sources folder ops happened.
+    sources_create_calls = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "_sources"
+    ]
+    assert not sources_create_calls, (
+        "imagery push must not create a _sources folder; that's the "
+        "vector path's behaviour"
+    )
 
-    # Fallback "upgrade": the source TIFF — which is what users will
-    # consume since the hosted service publish failed — is moved to
-    # the category folder and gets the full steward-authored metadata.
-    # The move() receives the live Folder instance from folders.create().
-    source_item = gis.content.add.return_value
-    source_item.move.assert_called_once()
+    # Service was moved into the category folder.
+    service.move.assert_called_once()
     category_create_calls = [
         c for c in gis.content.folders.create.call_args_list
         if c.kwargs.get("folder") == "Land_Cover_Use_Disturbance"
@@ -1191,18 +1222,205 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
         "expected folders.create(folder='Land_Cover_Use_Disturbance', "
         "exist_ok=True)"
     )
-    upgrade_calls = [
-        c for c in source_item.update.call_args_list
+
+    # Full metadata applied via item.update(item_properties=...).
+    metadata_calls = [
+        c for c in service.update.call_args_list
         if "item_properties" in c.kwargs
     ]
-    assert len(upgrade_calls) >= 1, (
-        "fallback path must upgrade the source with full metadata"
+    assert metadata_calls, "service must receive full metadata via update()"
+
+    assert result.agol_item_id == "imagery_layer_id"
+    assert result.sync_status_after == "clean"
+
+
+def test_push_imagery_update_refreshes_via_output_name(
+    project_tree, _config_no_cache, valid_cog_factory, monkeypatch,
+) -> None:
+    """Imagery-layer update path refreshes data by calling
+    publish_hosted_imagery_layer again with output_name set to the
+    existing service item. AGOL replaces the underlying raster in
+    place, preserving item ID + URL + sharing + categories.
+    """
+    db = project_tree["db"]
+    raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    valid_cog_factory("r.tif", dest_dir=raster_dir, dtype="uint8", nodata=255)
+
+    existing = MagicMock()
+    existing.id = "preexisting_imagery_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+
+    row = _full_row(
+        dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
+        classification="categorical", format_="geotiff",
+        agol_target="imagery-layer",
+        category="Land Cover, Land Use & Disturbance",
+        sync_status="pending_push",
+        agol_item_id="preexisting_imagery_id",
     )
-    upgrade_props = upgrade_calls[-1].kwargs["item_properties"]
-    assert upgrade_props["title"] == "Test Title"
-    # Categories must be re-applied even though the source originally
-    # didn't get them.
-    assert upgrade_props.get("categories") == ["Land Cover, Land Use & Disturbance"]
+    # Force checksum_changed=True via last_synced_at < date_modified.
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+    fake_publish = _patch_publish_hosted_imagery_layer(
+        monkeypatch, existing,
+    )
+
+    result = agol_sync.push(
+        db, "ds_raster", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # publish_hosted_imagery_layer was called with the existing
+    # service Item as output_name — this is what triggers AGOL's
+    # in-place data replacement.
+    fake_publish.assert_called_once()
+    call_kwargs = fake_publish.call_args.kwargs
+    assert call_kwargs["output_name"] is existing, (
+        "update path must pass existing service Item as output_name "
+        "so AGOL replaces data in place"
+    )
+
+    # Metadata reapplied + service moved to category folder.
+    existing.update.assert_called()
+    existing.move.assert_called()
+    assert result.sync_status_after == "clean"
+
+
+def test_push_imagery_update_skips_refresh_when_checksum_unchanged(
+    project_tree, _config_no_cache, valid_cog_factory, monkeypatch,
+) -> None:
+    """When the source TIFF hasn't changed since last_synced_at, the
+    update path skips the data refresh entirely — no
+    publish_hosted_imagery_layer call. Just metadata reapply + move."""
+    db = project_tree["db"]
+    raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    valid_cog_factory("r.tif", dest_dir=raster_dir, dtype="uint8", nodata=255)
+
+    existing = MagicMock()
+    existing.id = "preexisting_imagery_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+
+    row = _full_row(
+        dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
+        classification="categorical", format_="geotiff",
+        agol_target="imagery-layer",
+        category="Land Cover, Land Use & Disturbance",
+        sync_status="clean",
+        agol_item_id="preexisting_imagery_id",
+    )
+    # last_synced_at >> date_modified → checksum_changed=False.
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+    fake_publish = _patch_publish_hosted_imagery_layer(monkeypatch, existing)
+
+    agol_sync.push(
+        db, "ds_raster", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # No data refresh — publish_hosted_imagery_layer never called.
+    fake_publish.assert_not_called()
+    # Metadata reapply + move still happened.
+    existing.update.assert_called()
+    existing.move.assert_called()
+
+
+def test_push_imagery_records_warning_when_refresh_raises(
+    project_tree, _config_no_cache, valid_cog_factory, monkeypatch,
+) -> None:
+    """If publish_hosted_imagery_layer raises on the update path (e.g.
+    transient AGOL backend error), the catalogue/service stay in a
+    consistent state and a [agol] warning lands in internal_notes."""
+    db = project_tree["db"]
+    raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    valid_cog_factory("r.tif", dest_dir=raster_dir, dtype="uint8", nodata=255)
+
+    existing = MagicMock()
+    existing.id = "preexisting_imagery_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+
+    row = _full_row(
+        dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
+        classification="categorical", format_="geotiff",
+        agol_target="imagery-layer",
+        category="Land Cover, Land Use & Disturbance",
+        sync_status="pending_push",
+        agol_item_id="preexisting_imagery_id",
+    )
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+    import arcgis.raster
+    monkeypatch.setattr(
+        arcgis.raster, "publish_hosted_imagery_layer",
+        MagicMock(side_effect=RuntimeError("AGOL backend transient error")),
+    )
+
+    result = agol_sync.push(
+        db, "ds_raster", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Catalogue still ends in 'clean' — metadata + move succeeded
+    # even though data refresh failed.
+    assert result.sync_status_after == "clean"
+
+    after = inventory_manager.get_dataset(db, "ds_raster")
+    notes = after["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "imagery data refresh failed" in notes
+
+
+def test_push_imagery_create_failure_raises_agol_error(
+    project_tree, _config_no_cache, valid_cog_factory, monkeypatch,
+) -> None:
+    """On the create path, publish_hosted_imagery_layer failures are
+    fatal — there's no source-TIFF fallback under the no-source
+    model. The push aborts with an AgolError so the steward
+    investigates rather than ending up with a half-published state."""
+    db = project_tree["db"]
+    raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
+    raster_dir.mkdir(parents=True, exist_ok=True)
+    valid_cog_factory("r.tif", dest_dir=raster_dir, dtype="uint8", nodata=255)
+
+    row = _full_row(
+        dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
+        classification="categorical", format_="geotiff",
+        agol_target="imagery-layer",
+        category="Land Cover, Land Use & Disturbance",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(new_item_id="imagery_layer_id")
+    import arcgis.raster
+    monkeypatch.setattr(
+        arcgis.raster, "publish_hosted_imagery_layer",
+        MagicMock(side_effect=RuntimeError("hosted imagery publish refused")),
+    )
+
+    with pytest.raises(agol_sync.AgolError, match="hosted imagery publish failed"):
+        agol_sync.push(
+            db, "ds_raster", gis, _config_no_cache,
+            library_root=project_tree["library"], actor="tester",
+            cache_dir=project_tree["root"] / ".y2y",
+        )
 
 
 # ----------------------------------------------------------------------------
