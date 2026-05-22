@@ -814,6 +814,57 @@ def push(
 
 
 # --- per-target publish helpers ----------------------------------------
+#
+# AGOL's hosted-services model is two-item: each published service has
+# a paired source item (the GPKG / GeoTIFF / VTPK file that was
+# originally uploaded) and the service item (the Feature Service /
+# Imagery Service / Vector Tile Service that users actually consume in
+# maps).
+#
+# The catalogue's ``agol_item_id`` always points at the SERVICE item
+# (the user-facing one). To do a data refresh, the integration finds
+# the corresponding source via ``service_item.related_items('Service2Data',
+# 'forward')`` and updates the data through the source. For
+# feature-layer rows the modern arcgis SDK exposes a more direct path:
+# ``FeatureLayerCollection.fromitem(service).manager.overwrite(...)``
+# which replaces the service's underlying data without going through
+# the source item.
+#
+# Why not just call ``service.publish(file_type=..., overwrite=True)``?
+# Because that's the wrong shape for a service item — AGOL interprets
+# it as "create a new service derived from this service", which
+# produces a duplicate item with default sharing and no categories
+# (the failure mode that test #1 surfaced before this fix landed).
+
+
+def _resolve_service_item(gis, agol_item_id: str) -> Any:
+    """Fetch the service item by ID; raise a clear error if missing."""
+    item = gis.content.get(agol_item_id)
+    if item is None:
+        raise AgolError(
+            f"agol_item_id {agol_item_id!r} no longer exists on AGOL "
+            f"(deleted out-of-band?). Use `y2y agol-sync unpublish` to "
+            f"clear the catalogue link, then re-push."
+        )
+    return item
+
+
+def _find_source_item(service_item: Any) -> Any | None:
+    """Walk Service2Data forward to find the source item for a service.
+
+    Returns ``None`` if the relationship isn't present (e.g., the
+    service was created outside our integration via a manual upload
+    workflow that didn't preserve the Service2Data link). Callers
+    decide how to handle that case.
+    """
+    try:
+        related = service_item.related_items(
+            rel_type="Service2Data", direction="forward"
+        ) or []
+    except Exception:
+        return None
+    return related[0] if related else None
+
 
 def _publish_feature_layer(
     *,
@@ -824,49 +875,58 @@ def _publish_feature_layer(
     existing_item_id: str | None,
     checksum_changed: bool,
 ) -> Any:
-    """Publish (or update) a Hosted Feature Layer from a GPKG source."""
+    """Publish (or update) a Hosted Feature Layer from a GPKG source.
+
+    Returns the **service** item (Feature Service) — that's what the
+    catalogue tracks as ``agol_item_id``.
+    """
     item_props = _strip_internal(properties)
-    item_props.setdefault("type", "GeoPackage")
 
     if existing_item_id is None:
-        # Create path: upload + publish.
+        # ----- create path -----
+        # The source GPKG item carries the same metadata as the
+        # eventual service; both get the title, tags, categories, etc.
+        # so the steward sees a consistent labelling in either item.
+        gpkg_props = dict(item_props)
+        gpkg_props.setdefault("type", "GeoPackage")
         gpkg_item = gis.content.add(
-            item_properties=item_props,
+            item_properties=gpkg_props,
             data=str(source_path),
             folder=folder,
         )
         try:
-            return gpkg_item.publish(file_type="GeoPackage")
+            service_item = gpkg_item.publish(file_type="GeoPackage")
         except Exception as exc:
-            # Hosted-layer publish failed; the source GPKG item still
-            # exists. Fall back to item-with-file (downloadable but
-            # not a queryable service).
             properties["_fallback_warning"] = (
                 f"feature-layer publish failed; item retained as "
                 f"downloadable GeoPackage instead. Underlying: {exc}"
             )
             return gpkg_item
+        # Re-apply metadata to the service explicitly: ``publish()``
+        # doesn't always copy item_properties from the source.
+        service_item.update(item_properties=item_props)
+        return service_item
 
-    # Update path.
-    item = gis.content.get(existing_item_id)
-    if item is None:
-        raise AgolError(
-            f"existing_item_id {existing_item_id!r} no longer exists on AGOL "
-            f"(deleted out-of-band?). Use `y2y agol-sync unpublish` to clear "
-            f"the link, then re-push."
-        )
-    item.update(item_properties=item_props)
+    # ----- update path -----
+    service = _resolve_service_item(gis, existing_item_id)
+    # Metadata is updated on the service (that's what users see).
+    service.update(item_properties=item_props)
+
     if checksum_changed:
-        # Replace the data and re-publish the hosted layer.
-        item.update(data=str(source_path))
+        # Data refresh via the FeatureLayerCollection manager. This
+        # replaces the data backing the existing service without
+        # creating any new items.
         try:
-            item.publish(file_type="GeoPackage", overwrite=True)
-        except Exception as exc:  # pragma: no cover — defensive
+            from arcgis.features import FeatureLayerCollection
+            flc = FeatureLayerCollection.fromitem(service)
+            flc.manager.overwrite(str(source_path))
+        except Exception as exc:
             properties["_fallback_warning"] = (
-                f"re-publish failed; metadata updated but hosted layer "
-                f"may be stale. Underlying: {exc}"
+                f"FeatureLayerCollection.overwrite failed; metadata "
+                f"updated but the service's data may be stale. "
+                f"Underlying: {exc}"
             )
-    return item
+    return service
 
 
 def _publish_imagery_layer(
@@ -880,48 +940,64 @@ def _publish_imagery_layer(
 ) -> Any:
     """Publish (or update) a Hosted Imagery Layer from a COG source.
 
-    Hosted imagery publishing for COGs is beta in the arcgis SDK.
-    On publish failure we fall back to retaining the uploaded
-    GeoTIFF as a downloadable item (item-with-attached-file mode)
-    and surface that fact in the changelog.
+    Hosted imagery publishing for COGs is beta in the arcgis SDK. On
+    publish failure we fall back to retaining the uploaded GeoTIFF as
+    a downloadable item (item-with-attached-file mode) and surface
+    that fact in the changelog.
+
+    Returns the **service** item if hosted publish succeeded, or the
+    source GeoTIFF item if the fallback fired.
     """
     item_props = _strip_internal(properties)
-    # AGOL distinguishes uploaded image types; "Image" is the modern
-    # name for a raster source item.
-    item_props.setdefault("type", "Image")
 
     if existing_item_id is None:
+        # Create path.
+        tif_props = dict(item_props)
+        tif_props.setdefault("type", "Image")
         tif_item = gis.content.add(
-            item_properties=item_props,
+            item_properties=tif_props,
             data=str(source_path),
             folder=folder,
         )
         try:
-            return tif_item.publish()
+            service_item = tif_item.publish()
         except Exception as exc:
             properties["_fallback_warning"] = (
-                f"hosted imagery publish failed (likely COG beta limitation); "
-                f"item retained as downloadable GeoTIFF. Underlying: {exc}"
+                f"hosted imagery publish failed (likely COG beta "
+                f"limitation); item retained as downloadable GeoTIFF. "
+                f"Underlying: {exc}"
             )
             return tif_item
+        service_item.update(item_properties=item_props)
+        return service_item
 
-    item = gis.content.get(existing_item_id)
-    if item is None:
-        raise AgolError(
-            f"existing_item_id {existing_item_id!r} no longer exists on AGOL. "
-            f"Use `y2y agol-sync unpublish` to clear the link, then re-push."
-        )
-    item.update(item_properties=item_props)
+    # Update path.
+    service = _resolve_service_item(gis, existing_item_id)
+    service.update(item_properties=item_props)
+
     if checksum_changed:
-        item.update(data=str(source_path))
-        try:
-            item.publish(overwrite=True)
-        except Exception as exc:
+        # Data refresh: find the source GeoTIFF item via the
+        # Service2Data relationship and re-publish through it. AGOL's
+        # imagery overwrite path isn't as cleanly exposed as the
+        # feature-layer FLC manager; the source-publish approach
+        # remains the standard pattern.
+        source = _find_source_item(service)
+        if source is None:
             properties["_fallback_warning"] = (
-                f"re-publish failed; metadata updated but service "
-                f"may be stale. Underlying: {exc}"
+                "imagery data refresh skipped: no Service2Data link "
+                "back to a source GeoTIFF. Re-publish manually from "
+                "the AGOL UI."
             )
-    return item
+        else:
+            try:
+                source.update(data=str(source_path))
+                source.publish(overwrite=True)
+            except Exception as exc:
+                properties["_fallback_warning"] = (
+                    f"imagery re-publish failed; metadata updated but "
+                    f"service may be stale. Underlying: {exc}"
+                )
+    return service
 
 
 def _publish_vector_tile_layer(
@@ -938,14 +1014,17 @@ def _publish_vector_tile_layer(
 ) -> Any:
     """Publish (or update) a Hosted Vector Tile Service from a locally-built VTPK.
 
-    Steward-confirmed design (DESIGN.md §15 + plan): we never let
-    AGOL create an intermediate Hosted Feature Layer. Instead, we
-    use arcpy on the local machine to build a VTPK, upload that
-    VTPK as an item, and publish the VTPK item to a Hosted Vector
-    Tile Service.
+    Steward-confirmed design (DESIGN.md §15 + plan): we never let AGOL
+    create an intermediate Hosted Feature Layer. Instead, we use
+    arcpy on the local machine to build a VTPK, upload that VTPK as
+    an item, and publish the VTPK item to a Hosted Vector Tile
+    Service.
 
-    The arcpy import is detected lazily inside ``agol_vtpk.build_vtpk``;
-    missing-arcpy errors surface as ``AgolToolingError``.
+    The arcpy import is detected lazily inside
+    ``agol_vtpk.build_vtpk``; missing-arcpy errors surface as
+    ``AgolToolingError``.
+
+    Returns the **service** item (Vector Tile Service).
     """
     from . import agol_vtpk
 
@@ -957,29 +1036,44 @@ def _publish_vector_tile_layer(
     )
 
     item_props = _strip_internal(properties)
-    item_props.setdefault("type", "Vector Tile Package")
 
     if existing_item_id is None:
+        # Create path: upload VTPK + publish.
+        vtpk_props = dict(item_props)
+        vtpk_props.setdefault("type", "Vector Tile Package")
         vtpk_item = gis.content.add(
-            item_properties=item_props,
+            item_properties=vtpk_props,
             data=str(vtpk_path),
             folder=folder,
         )
-        return vtpk_item.publish(file_type="Vector Tile Package")
+        service_item = vtpk_item.publish(file_type="Vector Tile Package")
+        service_item.update(item_properties=item_props)
+        return service_item
 
-    # Update path. For VTPK updates we replace the source data and
-    # re-publish; AGOL keeps the same service URL.
-    item = gis.content.get(existing_item_id)
-    if item is None:
-        raise AgolError(
-            f"existing_item_id {existing_item_id!r} no longer exists on AGOL. "
-            f"Use `y2y agol-sync unpublish` to clear the link, then re-push."
-        )
-    item.update(item_properties=item_props)
+    # Update path: metadata on the service; data refresh through the
+    # source VTPK if the underlying source changed.
+    service = _resolve_service_item(gis, existing_item_id)
+    service.update(item_properties=item_props)
+
     if checksum_changed:
-        item.update(data=str(vtpk_path))
-        item.publish(file_type="Vector Tile Package", overwrite=True)
-    return item
+        source = _find_source_item(service)
+        if source is None:
+            properties["_fallback_warning"] = (
+                "vector-tile data refresh skipped: no Service2Data "
+                "link back to a source VTPK. Re-publish manually."
+            )
+        else:
+            try:
+                source.update(data=str(vtpk_path))
+                source.publish(
+                    file_type="Vector Tile Package", overwrite=True,
+                )
+            except Exception as exc:
+                properties["_fallback_warning"] = (
+                    f"VTPK re-publish failed; metadata updated but "
+                    f"service may be stale. Underlying: {exc}"
+                )
+    return service
 
 
 # --- sharing -----------------------------------------------------------

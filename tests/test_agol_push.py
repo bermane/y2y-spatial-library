@@ -307,18 +307,25 @@ def test_push_creates_feature_layer_for_new_vector(
 # Update path — existing item
 # ----------------------------------------------------------------------------
 
-def test_push_updates_existing_item_when_agol_item_id_set(
+def test_push_updates_existing_item_metadata_only_no_data_change(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:
+    """When the catalogue's date_modified < last_synced_at, the file
+    hasn't changed since the last sync. The update path should only
+    push metadata to the service; no data-overwrite, no publish() on
+    the service."""
     db = project_tree["db"]
     valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
 
-    # Existing AGOL item the catalogue is already linked to.
     existing = MagicMock()
     existing.id = "preexisting_id"
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
     existing.sharing.groups = MagicMock()
+    # Tighten the related_items contract: if anyone calls it,
+    # something's wrong (we shouldn't be touching the source on a
+    # metadata-only update).
+    existing.related_items = MagicMock(return_value=[])
 
     row = _full_row(
         dataset_id="ds_test", file_path="Water/v.gpkg",
@@ -340,12 +347,155 @@ def test_push_updates_existing_item_when_agol_item_id_set(
 
     # Used the update path (not the create path).
     gis.content.add.assert_not_called()
-    existing.update.assert_called()
-    # Because checksum didn't change, no .publish() call for re-publish.
+    # service.update was called multiple times: once with
+    # item_properties=... (the metadata push from
+    # _publish_feature_layer) and once with thumbnail=... (the
+    # post-publish thumbnail upload). Verify both happened.
+    update_calls = existing.update.call_args_list
+    assert any("item_properties" in c.kwargs for c in update_calls), (
+        f"expected at least one item.update(item_properties=...) call; "
+        f"got: {update_calls}"
+    )
+    assert any("thumbnail" in c.kwargs for c in update_calls), (
+        f"expected the post-publish thumbnail update; got: {update_calls}"
+    )
+    # **REGRESSION GUARD**: never call publish() on the service item
+    # during an update. The test-#1 bug was caused by exactly this
+    # call shape; AGOL created a duplicate FS derived from the
+    # service. Catching this here means a future regression in the
+    # update path can't repeat that failure mode.
     existing.publish.assert_not_called()
+    # Also: no related_items walk needed when checksum unchanged.
+    existing.related_items.assert_not_called()
 
     assert result.agol_item_id == "preexisting_id"
     assert result.sync_status_after == "clean"
+
+
+def test_push_updates_existing_item_data_changed_uses_FLC_overwrite(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """When the file has changed since the last sync, the update path
+    refreshes the service's data via FeatureLayerCollection.overwrite(),
+    NOT via service.publish(). This is the regression guard for the
+    duplicate-creation bug surfaced by test #1 of the manual pilot."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    existing = MagicMock()
+    existing.id = "preexisting_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.sharing.groups = MagicMock()
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push",
+        agol_item_id="preexisting_id",
+    )
+    # Force checksum_changed = True via last_synced_at < date_modified.
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"  # > last_synced_at
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+
+    # Mock the FLC.fromitem + .manager.overwrite chain so we can
+    # assert it's the call that actually fires.
+    overwrite_calls: list[str] = []
+    fake_flc = MagicMock()
+    fake_flc.manager = MagicMock()
+    fake_flc.manager.overwrite = MagicMock(
+        side_effect=lambda path: overwrite_calls.append(path)
+    )
+    fake_flc_class = MagicMock()
+    fake_flc_class.fromitem = MagicMock(return_value=fake_flc)
+
+    # Patch the arcgis.features.FeatureLayerCollection import inside
+    # _publish_feature_layer.
+    import sys, types
+    fake_features = types.ModuleType("arcgis.features")
+    fake_features.FeatureLayerCollection = fake_flc_class
+    fake_arcgis = sys.modules.get("arcgis") or types.ModuleType("arcgis")
+    monkeypatch.setitem(sys.modules, "arcgis", fake_arcgis)
+    monkeypatch.setitem(sys.modules, "arcgis.features", fake_features)
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Metadata update fired.
+    existing.update.assert_called()
+    # FeatureLayerCollection.fromitem(service).manager.overwrite was
+    # called with the source path.
+    fake_flc_class.fromitem.assert_called_once_with(existing)
+    fake_flc.manager.overwrite.assert_called_once()
+    overwrite_arg = fake_flc.manager.overwrite.call_args.args[0]
+    assert "v.gpkg" in overwrite_arg
+
+    # **REGRESSION GUARD**: service.publish() must NEVER be called on
+    # an update. Calling publish on a service item is what AGOL
+    # interprets as 'derive a new service from this service', which
+    # created the duplicate FS in the pilot.
+    existing.publish.assert_not_called()
+
+    assert result.sync_status_after == "clean"
+
+
+def test_push_update_falls_back_if_FLC_overwrite_raises(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """If FeatureLayerCollection.overwrite raises, the push records a
+    [agol] annotation in internal_notes + changelog rather than
+    aborting. Metadata changes still land."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    existing = MagicMock()
+    existing.id = "preexisting_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.sharing.groups = MagicMock()
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push", agol_item_id="preexisting_id",
+    )
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+
+    # Patch FeatureLayerCollection to raise.
+    import sys, types
+    fake_flc_class = MagicMock()
+    fake_flc_class.fromitem.side_effect = RuntimeError("overwrite failed in test")
+    fake_features = types.ModuleType("arcgis.features")
+    fake_features.FeatureLayerCollection = fake_flc_class
+    fake_arcgis = sys.modules.get("arcgis") or types.ModuleType("arcgis")
+    monkeypatch.setitem(sys.modules, "arcgis", fake_arcgis)
+    monkeypatch.setitem(sys.modules, "arcgis.features", fake_features)
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Push still completed.
+    assert result.sync_status_after == "clean"
+
+    # internal_notes carries the fallback warning.
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "overwrite" in notes.lower() or "stale" in notes.lower()
+
+    # publish on service still not called.
+    existing.publish.assert_not_called()
 
 
 # ----------------------------------------------------------------------------
