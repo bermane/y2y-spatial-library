@@ -39,15 +39,28 @@ from typing import Any
 from .agol_sync import AgolToolingError
 
 
-# Exact Esri-standard tiling-scheme scale values. arcpy refuses
-# rounded values: "ERROR 001856: Cached scale doesn't match tiling
-# scheme." The full Esri pyramid (levels 0–23) is documented at
-# https://developers.arcgis.com/rest/services-reference/online/tile-map-service-specification-pre-10-9/
-# Level 0 = world; level 16 = neighbourhood-scale (~1:9k). We cap
-# at 16 by default — going higher would generate hundreds of MB of
-# tiles for the kind of regional datasets Y2Y publishes.
-_DEFAULT_MIN_CACHED_SCALE = 591_657_527.591555  # level 0
-_DEFAULT_MAX_CACHED_SCALE = 9_027.977411         # level 16
+# Scale-range defaults — intentionally None.
+#
+# arcpy.management.CreateVectorTilePackage rejects any min/max scale
+# value that doesn't match the active tiling scheme's level scales
+# *exactly* (ERROR 001856). With service_type="ONLINE" the scheme is
+# fixed to ArcGIS Online's pyramid; the only safe match is the
+# precise float values it expects, and "precise" here means 18-digit
+# decimals like 591657527.59155178 — not 591657527.591555. Even tiny
+# rounding makes the comparison fail.
+#
+# When these are None, we don't pass min_cached_scale /
+# max_cached_scale to arcpy at all, and the tool uses the scheme's
+# full default range. Tile generation is still bounded by the data
+# extent (via index_polygons=None, which means "use the data
+# extent"), so a "full pyramid" build doesn't generate tiles where
+# there's no data. Result: correct VTPK without scale-precision
+# pitfalls.
+#
+# A future caller who needs to cap levels can pass exact float values
+# via the kwargs.
+_DEFAULT_MIN_CACHED_SCALE: float | None = None
+_DEFAULT_MAX_CACHED_SCALE: float | None = None
 
 _CACHE_DIR_NAME = "vtpk_cache"
 _CHECKSUM_SIDECAR_SUFFIX = ".sha256"
@@ -59,8 +72,8 @@ def build_vtpk(
     checksum: str,
     cache_dir: Path,
     *,
-    min_cached_scale: float = _DEFAULT_MIN_CACHED_SCALE,
-    max_cached_scale: float = _DEFAULT_MAX_CACHED_SCALE,
+    min_cached_scale: float | None = _DEFAULT_MIN_CACHED_SCALE,
+    max_cached_scale: float | None = _DEFAULT_MAX_CACHED_SCALE,
     tile_format: str = "INDEXED",
 ) -> Path:
     """Build (or fetch from cache) a Vector Tile Package for one dataset.
@@ -145,7 +158,16 @@ def build_vtpk(
         out_path.unlink()
 
     import tempfile
-    with tempfile.TemporaryDirectory(prefix="y2y_vtpk_") as tmpdir:
+    # ignore_cleanup_errors=True: arcpy / Pro holds COM-level handles
+    # on the .aprx that aren't released by `del aprx` alone (release
+    # only happens at process exit). Without the flag, TemporaryDirectory
+    # raises a secondary PermissionError on cleanup that masks the
+    # real underlying error (or, on a successful build, makes the
+    # caller think the build failed). Orphaned files in %TEMP% are
+    # harmless — Windows cleans the dir periodically.
+    with tempfile.TemporaryDirectory(
+        prefix="y2y_vtpk_", ignore_cleanup_errors=True,
+    ) as tmpdir:
         staging_aprx = Path(tmpdir) / "vtpk_staging.aprx"
         try:
             aprx = _open_blank_pro_project(
@@ -189,18 +211,27 @@ def build_vtpk(
             # contents.
             aprx.save()
 
+            # Build the arcpy kwargs conditionally so we only pass
+            # scale arguments when the caller explicitly provided
+            # them. arcpy validates min/max scales against the active
+            # tiling scheme; passing None or rounded values triggers
+            # ERROR 001856.
+            create_kwargs: dict[str, Any] = {
+                "in_map": map_obj,
+                "output_file": str(out_path),
+                "service_type": "ONLINE",
+                "tile_structure": "INDEXED",
+                "index_polygons": None,
+                "summary": f"Vector Tile Package for {dataset_id}",
+                "tags": "Y2Y",
+            }
+            if min_cached_scale is not None:
+                create_kwargs["min_cached_scale"] = min_cached_scale
+            if max_cached_scale is not None:
+                create_kwargs["max_cached_scale"] = max_cached_scale
+
             try:
-                arcpy.management.CreateVectorTilePackage(
-                    in_map=map_obj,
-                    output_file=str(out_path),
-                    service_type="ONLINE",
-                    tile_structure="INDEXED",
-                    min_cached_scale=min_cached_scale,
-                    max_cached_scale=max_cached_scale,
-                    index_polygons=None,
-                    summary=f"Vector Tile Package for {dataset_id}",
-                    tags="Y2Y",
-                )
+                arcpy.management.CreateVectorTilePackage(**create_kwargs)
             except Exception as exc:  # pragma: no cover — arcpy-only path
                 raise RuntimeError(
                     f"arcpy.management.CreateVectorTilePackage failed for "

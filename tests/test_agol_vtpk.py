@@ -173,22 +173,14 @@ def test_build_vtpk_invokes_arcpy_create_vtpk(
 
     create_calls = []
 
-    def _fake_create(
-        in_map, output_file, service_type, tile_structure,
-        min_cached_scale, max_cached_scale, index_polygons,
-        summary, tags,
-    ):
-        create_calls.append({
-            "in_map": in_map,
-            "output_file": output_file,
-            "service_type": service_type,
-            "tile_structure": tile_structure,
-            "min_cached_scale": min_cached_scale,
-            "max_cached_scale": max_cached_scale,
-            "summary": summary,
-            "tags": tags,
-        })
-        Path(output_file).write_bytes(b"\x50\x4b\x03\x04fake-vtpk-payload")  # ZIP magic header
+    def _fake_create(**kwargs):
+        # build_vtpk now passes scale arguments only when explicitly
+        # provided (default omits them so arcpy uses the tiling
+        # scheme's natural range). Accept any kwargs.
+        create_calls.append(kwargs)
+        Path(kwargs["output_file"]).write_bytes(
+            b"\x50\x4b\x03\x04fake-vtpk-payload"  # ZIP magic header
+        )
 
     fake.management = types.SimpleNamespace(
         CreateVectorTilePackage=_fake_create
@@ -221,6 +213,14 @@ def test_build_vtpk_invokes_arcpy_create_vtpk(
     assert call["service_type"] == "ONLINE"
     assert call["tile_structure"] == "INDEXED"
     assert call["tags"] == "Y2Y"
+
+    # REGRESSION GUARD (Test 3 ERROR 001856): by default build_vtpk
+    # must NOT pass min_cached_scale or max_cached_scale to arcpy.
+    # arcpy validates these against the active tiling scheme with
+    # exact-float comparison and rounding to 6 decimals fails.
+    # Omitting them lets arcpy use the scheme's natural range.
+    assert "min_cached_scale" not in call
+    assert "max_cached_scale" not in call
 
     # The GPKG layer was added to the staging map and the project
     # was saved before CreateVectorTilePackage ran.
