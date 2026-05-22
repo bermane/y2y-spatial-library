@@ -228,6 +228,53 @@ def test_build_vtpk_invokes_arcpy_create_vtpk(
     project_mock.save.assert_called_once()
 
 
+def test_build_vtpk_strips_doubled_main_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: arcpy.ListFeatureClasses() on a GeoPackage
+    returns names already prefixed with 'main.' (the GPKG default
+    schema). The previous build_vtpk code concatenated another
+    'main.' on top, producing '<gpkg>/main.main.<layer>' which
+    arcpy can't open ('Failed to add data. Possible credentials
+    issue.' — Test 3's actual failure)."""
+    cache = tmp_path / ".y2y"
+    gpkg = tmp_path / "src.gpkg"
+    gpkg.write_bytes(b"fake-gpkg")
+
+    fake = types.ModuleType("arcpy")
+    fake.env = types.SimpleNamespace(workspace=None)
+    # ListFeatureClasses returns the 'main.'-prefixed name (as it
+    # genuinely does on a GeoPackage workspace).
+    fake.ListFeatureClasses = MagicMock(return_value=["main.parks_alberta"])
+
+    captured_layer_ref: list[str] = []
+    def _fake_create(in_map, output_file, **_):
+        Path(output_file).write_bytes(b"fake-vtpk")
+    fake.management = types.SimpleNamespace(
+        CreateVectorTilePackage=_fake_create,
+    )
+    project_mock, map_mock = _stub_pro_project_plumbing(fake, tmp_path)
+    map_mock.addDataFromPath = MagicMock(
+        side_effect=lambda ref: captured_layer_ref.append(ref),
+    )
+    _install_fake_arcpy(monkeypatch, fake)
+
+    agol_vtpk.build_vtpk(
+        gpkg_path=gpkg, dataset_id="ds_alberta",
+        checksum="hash_v1", cache_dir=cache,
+    )
+
+    assert len(captured_layer_ref) == 1
+    ref = captured_layer_ref[0]
+    # The right form is '<gpkg>\main.parks_alberta' — exactly ONE
+    # 'main.' prefix.
+    assert ref == f"{gpkg}\\main.parks_alberta", (
+        f"layer_ref was {ref!r} — expected exactly one 'main.' prefix"
+    )
+    # Most importantly: NEVER doubled.
+    assert "main.main." not in ref
+
+
 def test_build_vtpk_rejects_multi_layer_gpkg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

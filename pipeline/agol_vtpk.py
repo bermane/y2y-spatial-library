@@ -126,7 +126,18 @@ def build_vtpk(
     # opens it, .saveACopy() forks it to our temp location, and
     # we mutate the copy freely.
     layer_name = _resolve_gpkg_layer_name(arcpy, gpkg_path)
-    layer_ref = f"{gpkg_path}\\main.{layer_name}"
+
+    # arcpy.ListFeatureClasses() on a GeoPackage returns names already
+    # prefixed with "main." (the GPKG default schema). Joining with
+    # an additional "main." prefix produces a bogus path like
+    # "<gpkg>/main.main.<layer>" which arcpy can't open ("Failed to
+    # add data. Possible credentials issue." — misleading, it's
+    # really "dataset not found"). Strip the prefix if present.
+    bare_layer_name = (
+        layer_name[len("main."):] if layer_name.startswith("main.")
+        else layer_name
+    )
+    layer_ref = f"{gpkg_path}\\main.{bare_layer_name}"
 
     # Delete any stale .vtpk at the target path — arcpy refuses to
     # overwrite by default.
@@ -147,50 +158,62 @@ def build_vtpk(
                 f"current Python is the Pro bundled environment."
             ) from exc
 
-        maps = aprx.listMaps()
-        if not maps:
-            # createMap signature varies across SDK versions: try the
-            # modern 'map_type' kwarg first then fall back.
+        # Wrap everything from project-open through tool invocation in
+        # a try/finally so the aprx handle is ALWAYS released — even
+        # when an intermediate step (addDataFromPath, etc.) raises.
+        # Otherwise Windows holds the .aprx file open and
+        # TemporaryDirectory.__exit__ fails its own cleanup with a
+        # PermissionError, masking the real underlying error.
+        try:
+            maps = aprx.listMaps()
+            if not maps:
+                # createMap signature varies across SDK versions: try
+                # the modern 'map_type' kwarg first then fall back.
+                try:
+                    map_obj = aprx.createMap("Y2Y_VTPK_Staging", "Map")
+                except TypeError:
+                    map_obj = aprx.createMap("Y2Y_VTPK_Staging")
+            else:
+                map_obj = maps[0]
+
+            # Add the GPKG layer to the map.
             try:
-                map_obj = aprx.createMap("Y2Y_VTPK_Staging", "Map")
-            except TypeError:
-                map_obj = aprx.createMap("Y2Y_VTPK_Staging")
-        else:
-            map_obj = maps[0]
+                map_obj.addDataFromPath(layer_ref)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"arcpy could not add GPKG layer to staging map "
+                    f"({layer_ref!r}): {exc}"
+                ) from exc
 
-        # Add the GPKG layer to the map.
-        try:
-            map_obj.addDataFromPath(layer_ref)
-        except Exception as exc:
-            raise RuntimeError(
-                f"arcpy could not add GPKG layer to staging map "
-                f"({layer_ref!r}): {exc}"
-            ) from exc
+            # Persist so CreateVectorTilePackage can see the map
+            # contents.
+            aprx.save()
 
-        # Persist so CreateVectorTilePackage can see the map contents.
-        aprx.save()
-
-        try:
-            arcpy.management.CreateVectorTilePackage(
-                in_map=map_obj,
-                output_file=str(out_path),
-                service_type="ONLINE",
-                tile_structure="INDEXED",
-                min_cached_scale=min_cached_scale,
-                max_cached_scale=max_cached_scale,
-                index_polygons=None,
-                summary=f"Vector Tile Package for {dataset_id}",
-                tags="Y2Y",
-            )
-        except Exception as exc:  # pragma: no cover — arcpy-only path
-            raise RuntimeError(
-                f"arcpy.management.CreateVectorTilePackage failed for "
-                f"{gpkg_path}: {exc}"
-            ) from exc
+            try:
+                arcpy.management.CreateVectorTilePackage(
+                    in_map=map_obj,
+                    output_file=str(out_path),
+                    service_type="ONLINE",
+                    tile_structure="INDEXED",
+                    min_cached_scale=min_cached_scale,
+                    max_cached_scale=max_cached_scale,
+                    index_polygons=None,
+                    summary=f"Vector Tile Package for {dataset_id}",
+                    tags="Y2Y",
+                )
+            except Exception as exc:  # pragma: no cover — arcpy-only path
+                raise RuntimeError(
+                    f"arcpy.management.CreateVectorTilePackage failed for "
+                    f"{gpkg_path}: {exc}"
+                ) from exc
         finally:
             # Release file handles so the TemporaryDirectory can clean
-            # itself up without 'file in use' errors on Windows.
-            del aprx
+            # itself up without 'file in use' errors on Windows. Must
+            # run regardless of where in the block above we errored.
+            try:
+                del aprx
+            except NameError:
+                pass
 
     if not out_path.exists():
         raise RuntimeError(
