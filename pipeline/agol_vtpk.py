@@ -137,7 +137,9 @@ def build_vtpk(
     with tempfile.TemporaryDirectory(prefix="y2y_vtpk_") as tmpdir:
         staging_aprx = Path(tmpdir) / "vtpk_staging.aprx"
         try:
-            aprx = _open_blank_pro_project(arcpy, staging_aprx)
+            aprx = _open_blank_pro_project(
+                arcpy, staging_aprx, cache_dir=cache_dir,
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to create staging ArcGIS Pro project for VTPK "
@@ -199,33 +201,64 @@ def build_vtpk(
     return out_path
 
 
-def _open_blank_pro_project(arcpy: Any, dest_aprx: Path) -> Any:
-    """Open an ArcGIS Pro project at ``dest_aprx``, seeded from Pro's
-    bundled blank template.
+def _open_blank_pro_project(
+    arcpy: Any, dest_aprx: Path, *, cache_dir: Path | None = None,
+) -> Any:
+    """Open an ArcGIS Pro project at ``dest_aprx``, seeded from a blank
+    template.
 
     arcpy.mp.ArcGISProject only opens existing .aprx files — there's
-    no in-memory or 'create new' constructor. So we locate Pro's
-    blank template, saveACopy() it to ``dest_aprx``, then reopen
-    the copy (which is what the caller mutates).
+    no in-memory or 'create new' constructor. So we locate a blank
+    template, saveACopy() it to ``dest_aprx``, then reopen the copy
+    (which is what the caller mutates).
 
-    The blank template ships at one of a few known paths depending
-    on Pro version. We probe candidates in order. If none exist,
-    the caller's outer try/except surfaces a clear error.
+    Template lookup order:
+
+    1. **Steward override** at ``<cache_dir>/vtpk_template.aprx``.
+       If you have a custom template (e.g., with project-level
+       defaults like a spatial reference), drop it here and the
+       pipeline uses it instead of Pro's bundled one. Stable across
+       Pro upgrades, so this is the recommended setup if Pro's
+       bundled template location moves in a future release.
+    2. **Pro's bundled blank.** Pro 3.x ships ``Blank.aprx`` under
+       ``Resources\\ArcToolBox\\Services\\routingservices\\data\\``
+       (unusual location, but works). We also probe a few other
+       historical paths in case Esri moves it again.
+
+    If none exist, raise with a clear remediation hint pointing at
+    the cache_dir override.
     """
+    candidates: list[Path] = []
+    if cache_dir is not None:
+        candidates.append(Path(cache_dir) / "vtpk_template.aprx")
+
     install_dir = Path(arcpy.GetInstallInfo()["InstallDir"])
-    candidates = [
-        install_dir / "Resources" / "ProjectTemplates" / "BlankTemplate.aptx",
+    candidates.extend([
+        # Pro 3.x — the routing services toolbox happens to ship a
+        # blank .aprx; not officially documented as a template but
+        # arcpy treats it like one.
+        install_dir / "Resources" / "ArcToolBox" / "Services" / "routingservices" / "data" / "Blank.aprx",
+        # Historical / version-specific candidate locations.
+        install_dir / "Resources" / "ProjectTemplates" / "BlankTemplate.aprx",
         install_dir / "Resources" / "ArcCatalog" / "Templates" / "BlankTemplate.aprx",
         install_dir / "Resources" / "ApplicationTemplates" / "BlankTemplate.aprx",
-    ]
+    ])
+
     template: Path | None = next((c for c in candidates if c.exists()), None)
     if template is None:
+        override_hint = (
+            Path(cache_dir) / "vtpk_template.aprx"
+            if cache_dir is not None
+            else Path(".y2y") / "vtpk_template.aprx"
+        )
         raise RuntimeError(
             f"Could not locate a blank ArcGIS Pro project template "
-            f"under {install_dir!r}. Checked: {[str(c) for c in candidates]}. "
-            f"Either Pro is not installed or this version organises "
-            f"templates differently — file an issue with arcpy "
-            f"version + Pro version."
+            f"under {install_dir!r}. Checked: "
+            f"{[str(c) for c in candidates]}. "
+            f"Fix: open ArcGIS Pro → File → New Project → "
+            f"choose any 'Map' template, then save the project as "
+            f"{str(override_hint)!r}. After that the pipeline picks "
+            f"it up automatically on every VTPK build."
         )
 
     src = arcpy.mp.ArcGISProject(str(template))

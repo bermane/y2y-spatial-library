@@ -46,9 +46,11 @@ def _stub_pro_project_plumbing(
     against them.
     """
     install_dir = tmp_path / "fake_pro_install"
-    template_dir = install_dir / "Resources" / "ProjectTemplates"
+    # Plant the template at Pro 3.x's actual bundled location (the
+    # routing-services data folder, an unusual but real location).
+    template_dir = install_dir / "Resources" / "ArcToolBox" / "Services" / "routingservices" / "data"
     template_dir.mkdir(parents=True)
-    template_path = template_dir / "BlankTemplate.aptx"
+    template_path = template_dir / "Blank.aprx"
     template_path.write_bytes(b"fake-template")
 
     fake_arcpy.GetInstallInfo = MagicMock(
