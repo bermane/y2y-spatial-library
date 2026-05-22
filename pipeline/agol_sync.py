@@ -707,7 +707,7 @@ def push(
         # AGOL handles missing thumbnails fine. Note this in the
         # changelog so the steward can investigate later.
         thumb_path = None
-        properties["_thumb_warning"] = f"thumbnail generation failed: {exc}"
+        _record_warning(properties, f"thumbnail generation failed: {exc}")
 
     # ----- per-target publish path -------------------------------------
     source_path = library_root / row["file_path"]
@@ -755,8 +755,9 @@ def push(
         except Exception as exc:  # pragma: no cover — best-effort
             # Don't fail the whole push if the thumbnail upload alone
             # bombs. Note in the changelog.
-            properties["_thumb_warning"] = (
-                f"thumbnail upload failed post-publish: {exc}"
+            _record_warning(
+                properties,
+                f"thumbnail upload failed post-publish: {exc}",
             )
 
     # ----- sharing -----------------------------------------------------
@@ -772,15 +773,12 @@ def push(
     if not row.get("agol_published_at"):
         updates["agol_published_at"] = now
 
-    # If the push fired a thumbnail or fallback warning, surface it in
-    # internal_notes so the steward can see something happened.
-    warning = properties.pop("_thumb_warning", None)
-    fallback = properties.pop("_fallback_warning", None)
-    annotation_parts: list[str] = []
-    if warning:
-        annotation_parts.append(f"[agol] {warning}")
-    if fallback:
-        annotation_parts.append(f"[agol] {fallback}")
+    # Collect every [agol] warning recorded during this push so the
+    # steward sees them all in one place rather than the last-write-
+    # wins behaviour of the prior scalar-key model.
+    annotation_parts: list[str] = [
+        f"[agol] {w}" for w in properties.pop("_warnings", [])
+    ]
     if annotation_parts:
         prior = row.get("internal_notes") or ""
         annotation = "\n".join(annotation_parts)
@@ -912,25 +910,108 @@ def _ensure_folder(gis, folder_name: str) -> None:
         pass
 
 
+def _record_warning(properties: dict[str, Any], message: str) -> None:
+    """Append a [agol] warning message to be surfaced in changelog + internal_notes.
+
+    Stored as a list under ``properties['_warnings']`` so multiple
+    independent warnings from a single push (thumbnail failure +
+    move failure + source-reconcile failure, etc.) all reach the
+    steward instead of overwriting each other.
+    """
+    properties.setdefault("_warnings", []).append(message)
+
+
 def _safe_move(item: Any, folder: str, properties: dict[str, Any]) -> None:
-    """Move ``item`` to ``folder`` and record any failure as a fallback warning.
+    """Move ``item`` to ``folder`` and record any failure visibly.
 
     AGOL's Item.move() can fail for transient reasons (folder doesn't
     exist yet, name conflict, permissions). Rather than silently
     swallowing the error — which the prior implementation did, hiding
     the "item ended up in My Content root" symptom from the steward —
-    we capture the failure into ``properties['_fallback_warning']``
-    which then propagates to ``internal_notes`` and the changelog via
-    push()'s annotation-collection logic.
+    capture the failure via ``_record_warning`` so it propagates to
+    ``internal_notes`` and the changelog via push()'s annotation
+    collection.
     """
     try:
         item.move(folder=folder)
     except Exception as exc:
-        properties["_fallback_warning"] = (
+        _record_warning(properties, (
             f"AGOL item.move to folder {folder!r} failed; item may "
             f"be in My Content root. Move manually from the AGOL UI "
             f"or re-push. Underlying: {exc}"
-        )
+        ))
+
+
+def _reconcile_source_item(
+    source_item: Any,
+    dataset_id: str,
+    *,
+    source_folder: str,
+    source_type: str,
+    service_properties: dict[str, Any],
+    properties: dict[str, Any],
+) -> None:
+    """Enforce the minimal-source policy on an existing source item.
+
+    Called on every push UPDATE path so source items stay in
+    compliance regardless of what manual configuration or legacy
+    state they were in. Steward-confirmed behaviour 2026-05-22:
+    "check them with each push (all scenarios) and move the source
+    files to the correct folder and make sure the source file
+    metadata matches what it should."
+
+    What this enforces:
+
+    * **Folder**: ``Y2Y_Library/_sources``. If the source sits in a
+      category folder or anywhere else, ``_safe_move`` relocates it.
+    * **Item properties**: title aligned with the service, description
+      stub, typeKeywords set to ``['Y2Y', 'Y2Y:source',
+      'Y2Y:dataset_id:<id>']``. Public-facing fields (``categories``,
+      ``tags``, ``snippet``, ``accessInformation``, ``licenseInfo``)
+      are explicitly cleared — those belong on the service item only.
+    * **Sharing**: forced to private (owner-only). Sources are
+      pipeline plumbing and shouldn't appear in any gallery search.
+
+    Idempotent on a compliant source (re-runs are AGOL-side no-ops
+    plus a couple of redundant API calls). Failures are recorded as
+    ``_warnings`` entries but never abort the push — the service-side
+    state is more important than perfect source hygiene.
+    """
+    # Build the minimal-policy properties dict, then explicitly clear
+    # any public-facing fields that may exist from manual setup.
+    target_props = _compute_source_item_properties(
+        service_properties, dataset_id, source_type=source_type,
+    )
+    target_props.update({
+        "categories": [],
+        "tags": [],
+        "snippet": "",
+        "accessInformation": "",
+        "licenseInfo": "",
+    })
+
+    # Move first (if needed) so subsequent property updates land on
+    # the item at its new location.
+    _safe_move(source_item, source_folder, properties)
+
+    # Apply the minimal-policy properties.
+    try:
+        source_item.update(item_properties=target_props)
+    except Exception as exc:
+        _record_warning(properties, (
+            f"failed to reconcile source item {getattr(source_item, 'id', '?')!r} "
+            f"metadata to minimal-source policy: {exc}"
+        ))
+
+    # Force private sharing — the source should never be gallery-visible.
+    sharing = getattr(source_item, "sharing", None)
+    if sharing is not None and hasattr(sharing, "sharing_level"):
+        try:
+            sharing.sharing_level = "PRIVATE"
+        except Exception as exc:
+            _record_warning(properties, (
+                f"failed to set source item sharing to PRIVATE: {exc}"
+            ))
 
 
 def _compute_source_item_properties(
@@ -1042,10 +1123,10 @@ def _publish_feature_layer(
         try:
             service_item = gpkg_item.publish(file_type="GeoPackage")
         except Exception as exc:
-            properties["_fallback_warning"] = (
+            _record_warning(properties, (
                 f"feature-layer publish failed; item retained as "
                 f"downloadable GeoPackage instead. Underlying: {exc}"
-            )
+            ))
             # Fallback: the source IS now the user-facing item.
             # Upgrade it: move from _sources to the category folder,
             # apply the full steward-authored metadata. push() will
@@ -1065,6 +1146,19 @@ def _publish_feature_layer(
     # Metadata is updated on the service (that's what users see).
     service.update(item_properties=item_props)
 
+    # Reconcile the source item on every push (steward-confirmed
+    # 2026-05-22): ensures it sits in _sources with minimal metadata
+    # + private sharing regardless of any prior manual configuration.
+    source = _find_source_item(service)
+    if source is not None:
+        _reconcile_source_item(
+            source, dataset_id,
+            source_folder=source_folder,
+            source_type="GeoPackage",
+            service_properties=item_props,
+            properties=properties,
+        )
+
     if checksum_changed:
         # Data refresh via the FeatureLayerCollection manager. This
         # replaces the data backing the existing service without
@@ -1074,11 +1168,11 @@ def _publish_feature_layer(
             flc = FeatureLayerCollection.fromitem(service)
             flc.manager.overwrite(str(source_path))
         except Exception as exc:
-            properties["_fallback_warning"] = (
+            _record_warning(properties, (
                 f"FeatureLayerCollection.overwrite failed; metadata "
                 f"updated but the service's data may be stale. "
                 f"Underlying: {exc}"
-            )
+            ))
     return service
 
 
@@ -1118,11 +1212,11 @@ def _publish_imagery_layer(
         try:
             service_item = tif_item.publish()
         except Exception as exc:
-            properties["_fallback_warning"] = (
+            _record_warning(properties, (
                 f"hosted imagery publish failed (likely COG beta "
                 f"limitation); item retained as downloadable GeoTIFF. "
                 f"Underlying: {exc}"
-            )
+            ))
             # Fallback: the source IS the user-facing item. Upgrade
             # it to service-like treatment (category folder + full
             # metadata + sharing applied by push()).
@@ -1137,28 +1231,37 @@ def _publish_imagery_layer(
     service = _resolve_service_item(gis, existing_item_id)
     service.update(item_properties=item_props)
 
+    # Source-item reconcile on every push (steward-confirmed 2026-05-22).
+    source = _find_source_item(service)
+    if source is not None:
+        _reconcile_source_item(
+            source, dataset_id,
+            source_folder=source_folder,
+            source_type="Image",
+            service_properties=item_props,
+            properties=properties,
+        )
+
     if checksum_changed:
-        # Data refresh: find the source GeoTIFF item via the
-        # Service2Data relationship and re-publish through it. AGOL's
-        # imagery overwrite path isn't as cleanly exposed as the
-        # feature-layer FLC manager; the source-publish approach
+        # Data refresh: re-publish through the source GeoTIFF item.
+        # AGOL's imagery overwrite path isn't as cleanly exposed as
+        # the feature-layer FLC manager; the source-publish approach
         # remains the standard pattern.
-        source = _find_source_item(service)
         if source is None:
-            properties["_fallback_warning"] = (
+            _record_warning(properties, (
                 "imagery data refresh skipped: no Service2Data link "
                 "back to a source GeoTIFF. Re-publish manually from "
                 "the AGOL UI."
-            )
+            ))
         else:
             try:
                 source.update(data=str(source_path))
                 source.publish(overwrite=True)
             except Exception as exc:
-                properties["_fallback_warning"] = (
+                _record_warning(properties, (
                     f"imagery re-publish failed; metadata updated but "
                     f"service may be stale. Underlying: {exc}"
-                )
+                ))
     return service
 
 
@@ -1220,13 +1323,23 @@ def _publish_vector_tile_layer(
     service = _resolve_service_item(gis, existing_item_id)
     service.update(item_properties=item_props)
 
+    # Source-item reconcile on every push (steward-confirmed 2026-05-22).
+    source = _find_source_item(service)
+    if source is not None:
+        _reconcile_source_item(
+            source, dataset_id,
+            source_folder=source_folder,
+            source_type="Vector Tile Package",
+            service_properties=item_props,
+            properties=properties,
+        )
+
     if checksum_changed:
-        source = _find_source_item(service)
         if source is None:
-            properties["_fallback_warning"] = (
+            _record_warning(properties, (
                 "vector-tile data refresh skipped: no Service2Data "
                 "link back to a source VTPK. Re-publish manually."
-            )
+            ))
         else:
             try:
                 source.update(data=str(vtpk_path))
@@ -1234,10 +1347,10 @@ def _publish_vector_tile_layer(
                     file_type="Vector Tile Package", overwrite=True,
                 )
             except Exception as exc:
-                properties["_fallback_warning"] = (
+                _record_warning(properties, (
                     f"VTPK re-publish failed; metadata updated but "
                     f"service may be stale. Underlying: {exc}"
-                )
+                ))
     return service
 
 

@@ -424,6 +424,171 @@ def test_push_ensures_target_folders_exist_before_publish(
     assert "Y2Y_Library/Water" in requested_folders
 
 
+def test_push_reconciles_source_item_on_every_update(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Every update-path push reconciles the source item to the
+    minimal-source policy: moved to _sources, metadata stripped to
+    title-plus-typeKeywords-plus-stub-description, sharing forced
+    to PRIVATE. Steward-confirmed contract (2026-05-22)."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    # Existing service item with a related source item.
+    service = MagicMock()
+    service.id = "service_id"
+    service.sharing = MagicMock()
+    service.sharing.sharing_level = "ORGANIZATION"
+    service.sharing.groups = MagicMock()
+
+    source = MagicMock()
+    source.id = "source_id"
+    source.sharing = MagicMock()
+    # Pretend the source was manually set to org-visible.
+    source.sharing.sharing_level = "ORGANIZATION"
+
+    # service.related_items('Service2Data', 'forward') → [source]
+    service.related_items.return_value = [source]
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push",
+        agol_item_id="service_id",
+    )
+    # Force checksum_changed = False so this test isolates the
+    # reconcile path (not data-refresh).
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=service)
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # The source item was moved to _sources.
+    source.move.assert_called_with(folder="Y2Y_Library/_sources")
+
+    # The source item was updated with the minimal-source props.
+    source_update_calls = [
+        c for c in source.update.call_args_list
+        if "item_properties" in c.kwargs
+    ]
+    assert source_update_calls, "source must be updated with minimal props"
+    enforced_props = source_update_calls[-1].kwargs["item_properties"]
+    # Minimal-source policy: title + description stub + Y2Y typeKeywords
+    assert enforced_props["title"] == "Test Title"
+    assert "Y2Y:source" in enforced_props["typeKeywords"]
+    assert "Y2Y:dataset_id:ds_test" in enforced_props["typeKeywords"]
+    # Categories and other public-facing fields are explicitly cleared.
+    assert enforced_props["categories"] == []
+    assert enforced_props["tags"] == []
+    assert enforced_props["snippet"] == ""
+    assert enforced_props["accessInformation"] == ""
+    assert enforced_props["licenseInfo"] == ""
+
+    # Source sharing was forced to PRIVATE.
+    assert source.sharing.sharing_level == "PRIVATE"
+
+
+def test_push_skips_source_reconcile_if_no_related_source(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """If the service has no Service2Data link (legacy uploads,
+    manually-linked items), source reconcile silently skips. The
+    update path still completes successfully — service metadata
+    + sharing are independent of source state."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    service = MagicMock()
+    service.id = "service_id"
+    service.sharing = MagicMock()
+    service.sharing.sharing_level = "ORGANIZATION"
+    service.sharing.groups = MagicMock()
+    # No source linked.
+    service.related_items.return_value = []
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push", agol_item_id="service_id",
+    )
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=service)
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Update path completed cleanly.
+    assert result.sync_status_after == "clean"
+    # related_items WAS queried (the integration always tries to find
+    # the source) but returned empty, so no further source-side work.
+    service.related_items.assert_called()
+
+
+def test_push_collects_multiple_warnings_into_internal_notes(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Multiple warnings from a single push (e.g., source move fail
+    + source update fail) all reach the steward instead of last-
+    write-wins overwriting each other. Exercises the update path
+    where two source-side failures can stack."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    # Existing service with a related source; inject TWO failures
+    # in the source's reconcile path so both can be observed in the
+    # final internal_notes.
+    service = MagicMock()
+    service.id = "service_id"
+    service.sharing = MagicMock()
+    service.sharing.sharing_level = "ORGANIZATION"
+    service.sharing.groups = MagicMock()
+
+    source = MagicMock()
+    source.id = "source_id"
+    source.move.side_effect = RuntimeError("simulated source move failure")
+    source.update.side_effect = RuntimeError("simulated source update failure")
+    source.sharing = MagicMock()
+    source.sharing.sharing_level = "ORGANIZATION"
+
+    service.related_items.return_value = [source]
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push", agol_item_id="service_id",
+    )
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=service)
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    # Both warnings present (not one overwriting the other).
+    assert notes.count("[agol]") >= 2, (
+        f"expected at least 2 [agol] annotations; got: {notes!r}"
+    )
+    assert "move" in notes.lower()
+    assert "reconcile" in notes.lower() or "metadata" in notes.lower()
+
+
 def test_push_surfaces_move_failure_as_internal_notes_warning(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:
@@ -516,9 +681,11 @@ def test_push_updates_existing_item_metadata_only_no_data_change(
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
     existing.sharing.groups = MagicMock()
-    # Tighten the related_items contract: if anyone calls it,
-    # something's wrong (we shouldn't be touching the source on a
-    # metadata-only update).
+    # related_items IS called on every update now (for the source
+    # reconcile, steward-confirmed 2026-05-22). Return empty so the
+    # reconcile is a no-op for this metadata-only-update test —
+    # other tests cover the source-reconcile branch when a source
+    # exists.
     existing.related_items = MagicMock(return_value=[])
 
     row = _full_row(
@@ -559,8 +726,12 @@ def test_push_updates_existing_item_metadata_only_no_data_change(
     # service. Catching this here means a future regression in the
     # update path can't repeat that failure mode.
     existing.publish.assert_not_called()
-    # Also: no related_items walk needed when checksum unchanged.
-    existing.related_items.assert_not_called()
+    # related_items IS called (for source reconcile) — verify the
+    # call shape but not the count, since the helper may walk
+    # multiple relationship types in future revisions.
+    existing.related_items.assert_called_with(
+        rel_type="Service2Data", direction="forward",
+    )
 
     assert result.agol_item_id == "preexisting_id"
     assert result.sync_status_after == "clean"
