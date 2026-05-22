@@ -665,6 +665,7 @@ def push(
     folder = compute_target_folder(
         row["category"], prefix=config.folder_prefix
     )
+    source_folder = compute_sources_folder(config)
     sharing_payload = _resolve_sharing(config, gis, sharing_override)
 
     # ----- dry-run short-circuit ---------------------------------------
@@ -710,14 +711,17 @@ def push(
     if target == "feature-layer":
         item = _publish_feature_layer(
             gis=gis, source_path=source_path,
-            properties=properties, folder=folder,
+            properties=properties,
+            folder=folder, source_folder=source_folder,
+            dataset_id=dataset_id,
             existing_item_id=row.get("agol_item_id"),
             checksum_changed=_checksum_changed(row),
         )
     elif target == "vector-tile-layer":
         item = _publish_vector_tile_layer(
             gis=gis, source_path=source_path,
-            properties=properties, folder=folder,
+            properties=properties,
+            folder=folder, source_folder=source_folder,
             existing_item_id=row.get("agol_item_id"),
             dataset_id=dataset_id, checksum=row["checksum_sha256"],
             cache_dir=cache_dir,
@@ -726,7 +730,9 @@ def push(
     elif target == "imagery-layer":
         item = _publish_imagery_layer(
             gis=gis, source_path=source_path,
-            properties=properties, folder=folder,
+            properties=properties,
+            folder=folder, source_folder=source_folder,
+            dataset_id=dataset_id,
             existing_item_id=row.get("agol_item_id"),
             checksum_changed=_checksum_changed(row),
         )
@@ -837,6 +843,76 @@ def push(
 # (the failure mode that test #1 surfaced before this fix landed).
 
 
+# Source items (GPKGs / COGs / VTPKs that feed published services) are
+# pipeline plumbing — not user-facing. They go to a dedicated folder
+# (`<prefix>/_sources/`) so the category-mirroring folder tree stays
+# clean, get the minimum metadata needed for steward findability +
+# audit, and inherit AGOL's default private sharing (the integration
+# never calls _apply_sharing on a source item). Steward-confirmed
+# design 2026-05-22.
+_SOURCES_FOLDER_NAME = "_sources"
+
+_SOURCE_DESCRIPTION = (
+    "Source data for the hosted service. Managed by Y2Y pipeline; "
+    "do not edit directly. The user-facing item is the hosted "
+    "service derived from this source."
+)
+
+
+def compute_sources_folder(config: AgolConfig) -> str:
+    """Return the AGOL folder for source items: ``<prefix>/_sources``.
+
+    All source items (GPKG / COG / VTPK) land in this single flat
+    folder regardless of catalogue category, keeping the
+    category-mirroring folders (``<prefix>/Species/``,
+    ``<prefix>/Water/``, …) clean of plumbing items.
+    """
+    return f"{config.folder_prefix}/{_SOURCES_FOLDER_NAME}"
+
+
+def _compute_source_item_properties(
+    service_properties: dict[str, Any],
+    dataset_id: str,
+    *,
+    source_type: str,
+) -> dict[str, Any]:
+    """Minimal AGOL item property dict for a source (GPKG / COG / VTPK).
+
+    Mirrors only what's needed:
+
+    * ``type`` — AGOL item type ("GeoPackage" / "Image" / "Vector Tile
+      Package") so AGOL knows what kind of binary this is.
+    * ``title`` — same as the service so the steward can find the
+      source pair in their content tree.
+    * ``description`` — short stub flagging this as pipeline plumbing.
+    * ``typeKeywords`` — ``Y2Y``, ``Y2Y:source``,
+      ``Y2Y:dataset_id:<id>``. No ``Y2Y:category:<cat>`` keyword —
+      sources don't carry catalogue category information.
+
+    Deliberately omitted (kept on the service item only):
+
+    * ``snippet`` (summary)
+    * ``tags``
+    * ``accessInformation`` (steward acknowledgements)
+    * ``licenseInfo`` (terms of use)
+    * ``categories`` (AGOL Content Categories — the typology facet)
+
+    Sharing is not part of item properties — it's applied separately,
+    and ``push()`` only applies sharing to the service item, never
+    the source.
+    """
+    return {
+        "type": source_type,
+        "title": service_properties.get("title"),
+        "description": _SOURCE_DESCRIPTION,
+        "typeKeywords": [
+            "Y2Y",
+            "Y2Y:source",
+            f"Y2Y:dataset_id:{dataset_id}",
+        ],
+    }
+
+
 def _resolve_service_item(gis, agol_item_id: str) -> Any:
     """Fetch the service item by ID; raise a clear error if missing."""
     item = gis.content.get(agol_item_id)
@@ -872,6 +948,8 @@ def _publish_feature_layer(
     source_path: Path,
     properties: dict[str, Any],
     folder: str,
+    source_folder: str,
+    dataset_id: str,
     existing_item_id: str | None,
     checksum_changed: bool,
 ) -> Any:
@@ -884,15 +962,19 @@ def _publish_feature_layer(
 
     if existing_item_id is None:
         # ----- create path -----
-        # The source GPKG item carries the same metadata as the
-        # eventual service; both get the title, tags, categories, etc.
-        # so the steward sees a consistent labelling in either item.
-        gpkg_props = dict(item_props)
-        gpkg_props.setdefault("type", "GeoPackage")
+        # Source items get minimal metadata + the dedicated _sources
+        # folder + AGOL's default private sharing (we never call
+        # _apply_sharing on a source). The service item gets the full
+        # steward-authored metadata + the category folder + the
+        # configured sharing (applied by push() after this helper
+        # returns).
+        source_props = _compute_source_item_properties(
+            item_props, dataset_id, source_type="GeoPackage",
+        )
         gpkg_item = gis.content.add(
-            item_properties=gpkg_props,
+            item_properties=source_props,
             data=str(source_path),
-            folder=folder,
+            folder=source_folder,
         )
         try:
             service_item = gpkg_item.publish(file_type="GeoPackage")
@@ -901,9 +983,23 @@ def _publish_feature_layer(
                 f"feature-layer publish failed; item retained as "
                 f"downloadable GeoPackage instead. Underlying: {exc}"
             )
+            # Fallback: the source IS now the user-facing item.
+            # Upgrade it: move from _sources to the category folder,
+            # apply the full steward-authored metadata. push() will
+            # then apply sharing to it as if it were the service.
+            try:
+                gpkg_item.move(folder=folder)
+            except Exception:
+                pass  # best-effort; the metadata update below is more important
+            gpkg_item.update(item_properties=item_props)
             return gpkg_item
-        # Re-apply metadata to the service explicitly: ``publish()``
-        # doesn't always copy item_properties from the source.
+        # Normal path: hosted service was published. Move it to the
+        # category folder (publish() places it in My Content root by
+        # default) and apply the full metadata.
+        try:
+            service_item.move(folder=folder)
+        except Exception:
+            pass  # best-effort; rest of the metadata still applies
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -935,6 +1031,8 @@ def _publish_imagery_layer(
     source_path: Path,
     properties: dict[str, Any],
     folder: str,
+    source_folder: str,
+    dataset_id: str,
     existing_item_id: str | None,
     checksum_changed: bool,
 ) -> Any:
@@ -946,18 +1044,19 @@ def _publish_imagery_layer(
     that fact in the changelog.
 
     Returns the **service** item if hosted publish succeeded, or the
-    source GeoTIFF item if the fallback fired.
+    upgraded source GeoTIFF item if the fallback fired.
     """
     item_props = _strip_internal(properties)
 
     if existing_item_id is None:
-        # Create path.
-        tif_props = dict(item_props)
-        tif_props.setdefault("type", "Image")
+        # Create path: minimal source + full-metadata service.
+        source_props = _compute_source_item_properties(
+            item_props, dataset_id, source_type="Image",
+        )
         tif_item = gis.content.add(
-            item_properties=tif_props,
+            item_properties=source_props,
             data=str(source_path),
-            folder=folder,
+            folder=source_folder,
         )
         try:
             service_item = tif_item.publish()
@@ -967,7 +1066,19 @@ def _publish_imagery_layer(
                 f"limitation); item retained as downloadable GeoTIFF. "
                 f"Underlying: {exc}"
             )
+            # Fallback: the source IS the user-facing item. Upgrade
+            # it to service-like treatment (category folder + full
+            # metadata + sharing applied by push()).
+            try:
+                tif_item.move(folder=folder)
+            except Exception:
+                pass
+            tif_item.update(item_properties=item_props)
             return tif_item
+        try:
+            service_item.move(folder=folder)
+        except Exception:
+            pass
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1006,6 +1117,7 @@ def _publish_vector_tile_layer(
     source_path: Path,
     properties: dict[str, Any],
     folder: str,
+    source_folder: str,
     existing_item_id: str | None,
     dataset_id: str,
     checksum: str,
@@ -1038,15 +1150,20 @@ def _publish_vector_tile_layer(
     item_props = _strip_internal(properties)
 
     if existing_item_id is None:
-        # Create path: upload VTPK + publish.
-        vtpk_props = dict(item_props)
-        vtpk_props.setdefault("type", "Vector Tile Package")
+        # Create path: minimal source VTPK + full-metadata service.
+        source_props = _compute_source_item_properties(
+            item_props, dataset_id, source_type="Vector Tile Package",
+        )
         vtpk_item = gis.content.add(
-            item_properties=vtpk_props,
+            item_properties=source_props,
             data=str(vtpk_path),
-            folder=folder,
+            folder=source_folder,
         )
         service_item = vtpk_item.publish(file_type="Vector Tile Package")
+        try:
+            service_item.move(folder=folder)
+        except Exception:
+            pass
         service_item.update(item_properties=item_props)
         return service_item
 

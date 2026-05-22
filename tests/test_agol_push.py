@@ -102,7 +102,18 @@ def _make_gis(
     group_id: str = "group_abc",
     publish_raises: Exception | None = None,
 ) -> MagicMock:
-    """Build a MagicMock GIS that behaves like arcgis.gis.GIS for push()."""
+    """Build a MagicMock GIS that behaves like arcgis.gis.GIS for push().
+
+    Mock chain (mirrors the AGOL two-item model — source uploaded
+    item + published service):
+
+        gis.content.add(...)            → source_item (MagicMock)
+        source_item.publish(...)        → service_item (MagicMock)
+                                          OR raises publish_raises
+
+    Tests reach the source via ``gis.content.add.return_value`` and the
+    service via ``gis.content.add.return_value.publish.return_value``.
+    """
     gis = MagicMock()
 
     # gis.groups.search → returns a group with matching title.
@@ -111,28 +122,25 @@ def _make_gis(
     group.id = group_id
     gis.groups.search.return_value = [group]
 
-    # gis.content.add → returns an Item whose .publish() returns
-    # either a published Item or raises (per publish_raises).
-    def make_item(item_id: str) -> MagicMock:
-        item = MagicMock()
-        item.id = item_id
-        # Modern sharing API: item.sharing.sharing_level is settable
-        # and item.sharing.groups.add(group=...) works.
-        item.sharing = MagicMock()
-        item.sharing.sharing_level = "PRIVATE"
-        item.sharing.groups = MagicMock()
-        if publish_raises is not None:
-            item.publish.side_effect = publish_raises
-        else:
-            published = MagicMock()
-            published.id = item_id  # same id; published in place
-            published.sharing = MagicMock()
-            published.sharing.sharing_level = "PRIVATE"
-            published.sharing.groups = MagicMock()
-            item.publish.return_value = published
-        return item
+    # The source item — what gis.content.add returns.
+    source = MagicMock()
+    source.id = new_item_id  # for fallback path: stored as agol_item_id
+    source.sharing = MagicMock()
+    source.sharing.sharing_level = "PRIVATE"
+    source.sharing.groups = MagicMock()
 
-    gis.content.add.side_effect = lambda **kwargs: make_item(new_item_id)
+    if publish_raises is not None:
+        source.publish.side_effect = publish_raises
+    else:
+        # The service item — what source.publish() returns.
+        service = MagicMock()
+        service.id = new_item_id  # stored as agol_item_id on the catalogue
+        service.sharing = MagicMock()
+        service.sharing.sharing_level = "PRIVATE"
+        service.sharing.groups = MagicMock()
+        source.publish.return_value = service
+
+    gis.content.add.return_value = source
 
     if existing_item is not None:
         gis.content.get.return_value = existing_item
@@ -270,20 +278,14 @@ def test_push_creates_feature_layer_for_new_vector(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # gis.content.add was called with file=str(library/.../v.gpkg) and the
-    # expected folder.
+    # gis.content.add was called for the SOURCE GPKG item — that lands
+    # in the dedicated _sources folder with minimal properties.
+    # The service item (Feature Service) is created by source.publish()
+    # and then moved to the category folder. See the per-contract
+    # tests below for finer assertions on each step.
     assert gis.content.add.called
-    call_kwargs = gis.content.add.call_args.kwargs
-    assert "Water" in call_kwargs["folder"]
-    assert call_kwargs["folder"] == "Y2Y_Library/Water"
-    # Properties carry the row's title etc.
-    props = call_kwargs["item_properties"]
-    assert props["title"] == "Test Title"
-    assert props["categories"] == ["Water"]
-    assert "Y2Y" in props["typeKeywords"]
-    assert "Y2Y:dataset_id:ds_test" in props["typeKeywords"]
 
-    # Result reflects the new item id.
+    # Result reflects the new item id (the service, not the source).
     assert result.agol_item_id == "new_fl_id"
     assert result.sync_status_after == "clean"
 
@@ -301,6 +303,127 @@ def test_push_creates_feature_layer_for_new_vector(
         and r["field_changed"] == "sync_status"
         for r in log
     )
+
+
+# ----------------------------------------------------------------------------
+# Source-item contract: minimal props + _sources folder + private sharing
+# ----------------------------------------------------------------------------
+
+def _last_content_add_kwargs(gis):
+    """Return the kwargs of the most recent gis.content.add(...) call."""
+    return gis.content.add.call_args.kwargs
+
+
+def test_push_creates_source_with_minimal_properties_in_sources_folder(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Source items (GPKG, COG, VTPK) carry only the minimum metadata:
+    title, type, description stub, and Y2Y typeKeywords. Categories,
+    tags, accessInformation, licenseInfo, snippet — all excluded. Folder
+    is the dedicated _sources folder, not the category folder."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Source GPKG was added with minimal props in _sources folder.
+    source_call_kwargs = _last_content_add_kwargs(gis)
+    assert source_call_kwargs["folder"] == "Y2Y_Library/_sources"
+
+    source_props = source_call_kwargs["item_properties"]
+    # Minimal allowed keys
+    assert source_props["type"] == "GeoPackage"
+    assert source_props["title"] == "Test Title"
+    assert "description" in source_props
+    assert "Y2Y" in source_props["typeKeywords"]
+    assert "Y2Y:source" in source_props["typeKeywords"]
+    assert "Y2Y:dataset_id:ds_test" in source_props["typeKeywords"]
+
+    # Forbidden keys (public-facing metadata that belongs on the service only)
+    for forbidden in ("categories", "tags", "snippet",
+                       "accessInformation", "licenseInfo"):
+        assert forbidden not in source_props, (
+            f"source props leaked {forbidden!r} — public-facing "
+            f"metadata must stay on the service item only"
+        )
+
+    # Source typeKeywords MUST NOT include the Y2Y:category:... keyword.
+    assert not any(
+        k.startswith("Y2Y:category:") for k in source_props["typeKeywords"]
+    ), "source items should not carry the Y2Y:category typeKeyword"
+
+
+def test_push_moves_service_to_category_folder_after_publish(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """The service item is created by source.publish() (lands in My
+    Content root by default), then moved to the category folder. The
+    .move(folder=...) call is the regression guard."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # The service item is the publish() return value. Find it via the
+    # mock chain: gis.content.add → returns source; source.publish →
+    # returns service. The service should have .move(folder='...Water')
+    # called on it.
+    source_item = gis.content.add.return_value
+    service_item = source_item.publish.return_value
+    service_item.move.assert_called_with(folder="Y2Y_Library/Water")
+
+
+def test_push_applies_full_metadata_to_service_not_source(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """The full steward-authored metadata (title, snippet, description,
+    tags, accessInformation, licenseInfo, categories) lands on the
+    SERVICE item via service.update(item_properties=...), not on the
+    source."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Find the service.update(item_properties=...) call.
+    source_item = gis.content.add.return_value
+    service_item = source_item.publish.return_value
+    update_calls_with_props = [
+        c for c in service_item.update.call_args_list
+        if "item_properties" in c.kwargs
+    ]
+    assert len(update_calls_with_props) >= 1, (
+        "service.update(item_properties=...) must be called to apply "
+        "the full steward-authored metadata"
+    )
+    full_props = update_calls_with_props[-1].kwargs["item_properties"]
+    assert full_props["title"] == "Test Title"
+    assert full_props["categories"] == ["Water"]
+    assert full_props["snippet"] == "Summary."
+    assert full_props["accessInformation"] == "Ack."
+    assert full_props["licenseInfo"] == "TOU."
+    assert full_props["tags"] == ["test", "y2y"]
 
 
 # ----------------------------------------------------------------------------
@@ -505,9 +628,11 @@ def test_push_update_falls_back_if_FLC_overwrite_raises(
 def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
     project_tree, _config_no_cache, valid_cog_factory,
 ) -> None:
-    """When .publish() on a GeoTIFF item raises, push() retains the item
-    as a downloadable file (no service), records the fallback in
-    internal_notes + changelog, and still marks sync_status='clean'."""
+    """When .publish() on a GeoTIFF item raises, push() retains the
+    source TIFF as a downloadable file (no hosted service), upgrades
+    it to service-like treatment (moved to category folder, full
+    metadata applied), records the fallback in internal_notes +
+    changelog, and marks sync_status='clean'."""
     db = project_tree["db"]
     raster_dir = project_tree["library"] / "Land_Cover_Use_Disturbance"
     raster_dir.mkdir(parents=True, exist_ok=True)
@@ -541,6 +666,24 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
     assert "[agol]" in (after["internal_notes"] or "")
     assert "fallback" in (after["internal_notes"] or "").lower() \
         or "hosted imagery publish failed" in (after["internal_notes"] or "")
+
+    # Fallback "upgrade": the source TIFF — which is what users will
+    # consume since the hosted service publish failed — is moved to
+    # the category folder and gets the full steward-authored metadata.
+    source_item = gis.content.add.return_value
+    source_item.move.assert_called_with(folder="Y2Y_Library/Land_Cover_Use_Disturbance")
+    upgrade_calls = [
+        c for c in source_item.update.call_args_list
+        if "item_properties" in c.kwargs
+    ]
+    assert len(upgrade_calls) >= 1, (
+        "fallback path must upgrade the source with full metadata"
+    )
+    upgrade_props = upgrade_calls[-1].kwargs["item_properties"]
+    assert upgrade_props["title"] == "Test Title"
+    # Categories must be re-applied even though the source originally
+    # didn't get them.
+    assert upgrade_props.get("categories") == ["Land Cover, Land Use & Disturbance"]
 
 
 # ----------------------------------------------------------------------------
