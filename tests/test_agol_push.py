@@ -193,16 +193,53 @@ def test_push_refuses_when_status_not_active(
         )
 
 
-def test_push_refuses_when_sync_status_is_clean(
+def test_push_allows_re_push_of_clean_row(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:
+    """'clean' is a re-pushable status — the push is idempotent on a
+    clean row (metadata + sharing + source reconcile all converge to
+    the same end state). Pilot testing + force-resyncs need this."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    existing = MagicMock()
+    existing.id = "preexisting_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.related_items.return_value = []  # no source linked
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="clean", agol_item_id="preexisting_id",
+    )
+    # No checksum change so the push is purely a metadata+sharing+
+    # reconcile re-application (no data refresh).
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(existing_item=existing)
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+    assert result.sync_status_after == "clean"
+
+
+def test_push_refuses_when_sync_status_is_pending_pull(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """'pending_pull' indicates AGOL-side drift the steward needs to
+    triage via pull/conflict resolution (Phase D). A push would
+    silently overwrite that drift, so it's refused."""
     db = project_tree["db"]
     valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
     row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg",
-                    sync_status="clean", agol_item_id="abc")
+                    sync_status="pending_pull", agol_item_id="abc")
     inventory_manager.insert_dataset(db, row)
     gis = _make_gis()
-    with pytest.raises(agol_sync.AgolError, match="sync_status is 'clean'"):
+    with pytest.raises(agol_sync.AgolError, match="sync_status is 'pending_pull'"):
         agol_sync.push(
             db, "ds_test", gis, _config_no_cache,
             library_root=project_tree["library"], actor="tester",
@@ -752,6 +789,9 @@ def test_push_updates_existing_item_data_changed_uses_FLC_overwrite(
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
     existing.sharing.groups = MagicMock()
+    # No linked source → push() takes the self-hosted FS branch
+    # (FLC.overwrite) instead of source-publish.
+    existing.related_items.return_value = []
 
     row = _full_row(
         dataset_id="ds_test", file_path="Water/v.gpkg",
@@ -823,6 +863,9 @@ def test_push_update_falls_back_if_FLC_overwrite_raises(
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
     existing.sharing.groups = MagicMock()
+    # No linked source → push() takes the self-hosted FS (FLC.overwrite)
+    # branch, where the fallback warning under test fires.
+    existing.related_items.return_value = []
 
     row = _full_row(
         dataset_id="ds_test", file_path="Water/v.gpkg",
@@ -861,6 +904,89 @@ def test_push_update_falls_back_if_FLC_overwrite_raises(
 
     # publish on service still not called.
     existing.publish.assert_not_called()
+
+
+def test_push_updates_existing_item_with_linked_source_uses_source_publish(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """When the service item has a linked source (Service2Data forward),
+    a checksum-changed update path must refresh the data via
+    ``source.update(data=...) + source.publish(overwrite=True)`` — NOT
+    via ``FeatureLayerCollection.overwrite()``.
+
+    This guards the AGOL Error 500 surfaced by test #1 of the manual
+    pilot: 'User cannot overwrite this service, using this data, as
+    this data is already referring to another service.' Linked-FS
+    services refuse FLC.overwrite at the AGOL backend; they require
+    the source-publish pattern instead.
+    """
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    # The linked source item, returned by service.related_items(Service2Data, forward).
+    linked_source = MagicMock()
+    linked_source.id = "source_gpkg_id"
+    # Default related_items on the source itself (used by _reconcile_source_item).
+    linked_source.related_items.return_value = []
+
+    existing = MagicMock()
+    existing.id = "preexisting_service_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.sharing.groups = MagicMock()
+    # Service2Data forward returns the linked source.
+    existing.related_items.return_value = [linked_source]
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push", agol_item_id="preexisting_service_id",
+    )
+    # Force checksum_changed = True via last_synced_at < date_modified.
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+
+    # Patch FeatureLayerCollection so we can assert it was NOT used.
+    import sys, types
+    fake_flc_class = MagicMock()
+    fake_features = types.ModuleType("arcgis.features")
+    fake_features.FeatureLayerCollection = fake_flc_class
+    fake_arcgis = sys.modules.get("arcgis") or types.ModuleType("arcgis")
+    monkeypatch.setitem(sys.modules, "arcgis", fake_arcgis)
+    monkeypatch.setitem(sys.modules, "arcgis.features", fake_features)
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # source.update(data=<gpkg path>) was called.
+    update_data_args = [
+        c for c in linked_source.update.call_args_list
+        if c.kwargs.get("data") and "v.gpkg" in str(c.kwargs["data"])
+    ]
+    assert update_data_args, "source.update(data=<gpkg path>) was not called"
+
+    # source.publish(file_type='GeoPackage', overwrite=True) was called.
+    linked_source.publish.assert_called_once()
+    pub_kwargs = linked_source.publish.call_args.kwargs
+    assert pub_kwargs.get("file_type") == "GeoPackage"
+    assert pub_kwargs.get("overwrite") is True
+
+    # REGRESSION GUARD: FeatureLayerCollection.overwrite must NOT have
+    # been used — that's the AGOL Error 500 path on linked-FS services.
+    fake_flc_class.fromitem.assert_not_called()
+
+    # Service metadata was still re-applied.
+    existing.update.assert_called()
+    # Service .publish() must never be called on update (would create
+    # a duplicate FS).
+    existing.publish.assert_not_called()
+
+    assert result.sync_status_after == "clean"
 
 
 # ----------------------------------------------------------------------------

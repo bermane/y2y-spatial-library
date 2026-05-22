@@ -560,10 +560,14 @@ def _merge_category_schema(
 # ----------------------------------------------------------------------------
 
 # Sync statuses that allow a push attempt. 'pending_pull' and
-# 'conflict' must be resolved first (Phase D), and 'clean' rows don't
-# need pushing (the catalogue hasn't moved).
+# 'conflict' must be resolved first (Phase D — they indicate AGOL-side
+# drift that the steward needs to triage). 'clean' rows are
+# re-pushable: the push is idempotent (metadata + sharing + source
+# reconcile all converge to the same end state) and the steward may
+# want to force a re-sync for verification or after a manual AGOL-UI
+# edit they want overwritten.
 _PUSHABLE_STATUSES: frozenset[str] = frozenset({
-    "unpublished", "pending_push", "error",
+    "unpublished", "pending_push", "error", "clean",
 })
 
 # Allowed (publish-target, source-format) pairs. Anything else surfaces
@@ -1143,13 +1147,64 @@ def _publish_feature_layer(
 
     # ----- update path -----
     service = _resolve_service_item(gis, existing_item_id)
-    # Metadata is updated on the service (that's what users see).
+    source = _find_source_item(service)
+
+    # Data refresh first (before metadata reapply), so any service-
+    # metadata side effects of the publish are overridden by our
+    # explicit update below. Two AGOL patterns for hosted feature
+    # layers — pick the right SDK call based on whether the service
+    # has a linked source item:
+    #
+    # * Linked FS (has Service2Data forward → source GPKG item):
+    #   update source.data + source.publish(overwrite=True). AGOL
+    #   tracks the source-service linkage and refreshes the existing
+    #   service in place.
+    #
+    # * Self-hosted FS (no source item): FeatureLayerCollection
+    #   .fromitem(service).manager.overwrite(<file>). AGOL accepts
+    #   the file as the new backing data for the service directly.
+    #
+    # Using FLC.overwrite on a linked FS triggers AGOL Error 500
+    # ("this data is already referring to another service") because
+    # AGOL refuses to attach a separate data blob to a service that
+    # already has a linked source.
+    if checksum_changed:
+        if source is not None:
+            try:
+                source.update(data=str(source_path))
+                source.publish(
+                    file_type="GeoPackage", overwrite=True,
+                )
+            except Exception as exc:
+                _record_warning(properties, (
+                    f"feature-layer source-publish refresh failed; "
+                    f"metadata updated but service data may be stale. "
+                    f"Underlying: {exc}"
+                ))
+        else:
+            try:
+                from arcgis.features import FeatureLayerCollection
+                flc = FeatureLayerCollection.fromitem(service)
+                flc.manager.overwrite(str(source_path))
+            except Exception as exc:
+                _record_warning(properties, (
+                    f"FeatureLayerCollection.overwrite failed; metadata "
+                    f"updated but the service's data may be stale. "
+                    f"Underlying: {exc}"
+                ))
+
+    # Apply / re-apply the full steward-authored metadata to the
+    # service. Idempotent — running this on an already-correct
+    # service is a no-op AGOL-side. Required *after* any data
+    # refresh in case AGOL's publish() reset any service-level
+    # properties.
     service.update(item_properties=item_props)
 
     # Reconcile the source item on every push (steward-confirmed
     # 2026-05-22): ensures it sits in _sources with minimal metadata
     # + private sharing regardless of any prior manual configuration.
-    source = _find_source_item(service)
+    # Runs *after* any data refresh so the source's data is current
+    # before we strip its metadata.
     if source is not None:
         _reconcile_source_item(
             source, dataset_id,
@@ -1158,21 +1213,6 @@ def _publish_feature_layer(
             service_properties=item_props,
             properties=properties,
         )
-
-    if checksum_changed:
-        # Data refresh via the FeatureLayerCollection manager. This
-        # replaces the data backing the existing service without
-        # creating any new items.
-        try:
-            from arcgis.features import FeatureLayerCollection
-            flc = FeatureLayerCollection.fromitem(service)
-            flc.manager.overwrite(str(source_path))
-        except Exception as exc:
-            _record_warning(properties, (
-                f"FeatureLayerCollection.overwrite failed; metadata "
-                f"updated but the service's data may be stale. "
-                f"Underlying: {exc}"
-            ))
     return service
 
 
@@ -1229,24 +1269,11 @@ def _publish_imagery_layer(
 
     # Update path.
     service = _resolve_service_item(gis, existing_item_id)
-    service.update(item_properties=item_props)
-
-    # Source-item reconcile on every push (steward-confirmed 2026-05-22).
     source = _find_source_item(service)
-    if source is not None:
-        _reconcile_source_item(
-            source, dataset_id,
-            source_folder=source_folder,
-            source_type="Image",
-            service_properties=item_props,
-            properties=properties,
-        )
 
+    # Data refresh first (before metadata reapply) so any service-
+    # metadata side effects of the publish are overridden below.
     if checksum_changed:
-        # Data refresh: re-publish through the source GeoTIFF item.
-        # AGOL's imagery overwrite path isn't as cleanly exposed as
-        # the feature-layer FLC manager; the source-publish approach
-        # remains the standard pattern.
         if source is None:
             _record_warning(properties, (
                 "imagery data refresh skipped: no Service2Data link "
@@ -1262,6 +1289,20 @@ def _publish_imagery_layer(
                     f"imagery re-publish failed; metadata updated but "
                     f"service may be stale. Underlying: {exc}"
                 ))
+
+    # Apply / re-apply full steward-authored metadata to the service.
+    service.update(item_properties=item_props)
+
+    # Source reconcile after data refresh so source data is current
+    # before metadata gets stripped.
+    if source is not None:
+        _reconcile_source_item(
+            source, dataset_id,
+            source_folder=source_folder,
+            source_type="Image",
+            service_properties=item_props,
+            properties=properties,
+        )
     return service
 
 
@@ -1318,21 +1359,10 @@ def _publish_vector_tile_layer(
         service_item.update(item_properties=item_props)
         return service_item
 
-    # Update path: metadata on the service; data refresh through the
-    # source VTPK if the underlying source changed.
+    # Update path: data refresh via source VTPK (if checksum changed),
+    # then re-apply service metadata, then reconcile source.
     service = _resolve_service_item(gis, existing_item_id)
-    service.update(item_properties=item_props)
-
-    # Source-item reconcile on every push (steward-confirmed 2026-05-22).
     source = _find_source_item(service)
-    if source is not None:
-        _reconcile_source_item(
-            source, dataset_id,
-            source_folder=source_folder,
-            source_type="Vector Tile Package",
-            service_properties=item_props,
-            properties=properties,
-        )
 
     if checksum_changed:
         if source is None:
@@ -1351,6 +1381,17 @@ def _publish_vector_tile_layer(
                     f"VTPK re-publish failed; metadata updated but "
                     f"service may be stale. Underlying: {exc}"
                 ))
+
+    service.update(item_properties=item_props)
+
+    if source is not None:
+        _reconcile_source_item(
+            source, dataset_id,
+            source_folder=source_folder,
+            source_type="Vector Tile Package",
+            service_properties=item_props,
+            properties=properties,
+        )
     return service
 
 
