@@ -37,6 +37,11 @@ import matplotlib.pyplot as plt  # noqa: E402  — must come after use("Agg")
 import numpy as np  # noqa: E402
 
 
+# 300×200 = 3:2 aspect ratio. AGOL's gallery + content browser
+# renders thumbnails at a 3:2 frame; matching that aspect avoids
+# letterboxing/cropping on display. Dimensions are exact — the
+# saver does *not* use bbox_inches='tight' (which would crop to
+# the data's natural bbox and break the 3:2 guarantee).
 THUMBNAIL_WIDTH_PX = 300
 THUMBNAIL_HEIGHT_PX = 200
 THUMBNAIL_DPI = 100
@@ -277,13 +282,22 @@ def _make_figure():
 
 
 def _finish_figure(ax, fig, out_path: Path) -> None:
-    """Tighten margins, save PNG, close figure."""
+    """Save the figure at exact 300×200 (3:2) and close it.
+
+    Deliberately does *not* pass ``bbox_inches='tight'`` to ``savefig``:
+    that argument re-fits the saved figure to the data's natural
+    bounding box, which collapses the aspect ratio. Y2Y region data
+    tends to be tall + narrow (north-south dominant), so
+    ``bbox_inches='tight'`` would produce ~80×200 PNGs that get
+    letterboxed by AGOL's 3:2 thumbnail display. Saving the full
+    figure preserves the 3:2 frame; the data sits centred (because
+    ``set_aspect('equal')`` keeps the data's proportions) with
+    background-coloured padding on either side.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,
         dpi=THUMBNAIL_DPI,
-        bbox_inches="tight",
-        pad_inches=0,
         facecolor=ax.get_facecolor(),
     )
     plt.close(fig)

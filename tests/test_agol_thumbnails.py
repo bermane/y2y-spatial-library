@@ -50,6 +50,55 @@ def test_generate_thumbnail_for_vector_writes_png(
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def _png_dimensions(path: Path) -> tuple[int, int]:
+    """Read the PNG IHDR chunk for width × height without external deps."""
+    import struct
+    with path.open("rb") as f:
+        # PNG header: 8-byte signature, then IHDR chunk: 4-byte length,
+        # 4-byte 'IHDR' marker, 4-byte width, 4-byte height, …
+        f.seek(16)
+        width, height = struct.unpack(">II", f.read(8))
+    return (width, height)
+
+
+def test_generate_thumbnail_always_300x200_for_vector(
+    tmp_path: Path, valid_gpkg_factory,
+) -> None:
+    """3:2 aspect-ratio guarantee — vector data must NOT collapse the PNG
+    to the data's natural bbox aspect. Y2Y region data is tall + narrow,
+    which used to produce ~80×200 PNGs that AGOL letterboxed badly. The
+    fix removed bbox_inches='tight' from savefig."""
+    library = tmp_path / "library"
+    library.mkdir()
+    valid_gpkg_factory("v.gpkg", dest_dir=library)
+    row = _row(file_path="v.gpkg", classification="vector")
+    cache = tmp_path / ".y2y"
+
+    out = agol_thumbnails.generate_thumbnail(row, library, cache)
+    assert _png_dimensions(out) == (
+        agol_thumbnails.THUMBNAIL_WIDTH_PX,
+        agol_thumbnails.THUMBNAIL_HEIGHT_PX,
+    )
+
+
+def test_generate_thumbnail_always_300x200_for_raster(
+    tmp_path: Path, valid_cog_factory,
+) -> None:
+    """3:2 aspect-ratio guarantee — raster data must produce a 300×200
+    PNG regardless of the raster's pixel dimensions."""
+    library = tmp_path / "library"
+    library.mkdir()
+    valid_cog_factory("r.tif", dest_dir=library, dtype="float32", nodata=-9999.0)
+    row = _row(file_path="r.tif", classification="continuous")
+    cache = tmp_path / ".y2y"
+
+    out = agol_thumbnails.generate_thumbnail(row, library, cache)
+    assert _png_dimensions(out) == (
+        agol_thumbnails.THUMBNAIL_WIDTH_PX,
+        agol_thumbnails.THUMBNAIL_HEIGHT_PX,
+    )
+
+
 # --- raster rendering --------------------------------------------------
 
 def test_generate_thumbnail_for_continuous_raster(
