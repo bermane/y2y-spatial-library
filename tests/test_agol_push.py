@@ -477,6 +477,58 @@ def test_push_ensures_target_folders_exist_before_publish(
         )
 
 
+def test_push_update_path_moves_service_to_category_folder(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Regression guard for pilot test #1's persistent stranding bug:
+    a service originally published into My Content root (by a pre-fix
+    run or a manual upload) needs to be relocated to the category
+    folder on subsequent pushes. The update path previously only
+    refreshed data + metadata + source reconcile; service.move() was
+    never called on it. So a service that started life in root stayed
+    in root forever — the symptom the steward kept reporting.
+
+    Item.move() is idempotent server-side, so calling it on every
+    push is safe (a service already in the right folder is a no-op).
+    """
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    existing = MagicMock()
+    existing.id = "preexisting_service_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.related_items.return_value = []  # self-hosted FS
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="clean", agol_item_id="preexisting_service_id",
+    )
+    # No checksum change so the update path is purely metadata +
+    # move + source reconcile — exactly the case where the bug bit.
+    row["last_synced_at"] = "2030-01-01T00:00:00Z"
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(existing_item=existing)
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # The existing service was moved (idempotently) to the Water folder.
+    existing.move.assert_called_once()
+    # Verify the folders.create() for Water happened with exist_ok=True.
+    water_create = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "Water"
+        and c.kwargs.get("exist_ok") is True
+    ]
+    assert water_create, "expected folders.create(folder='Water', exist_ok=True)"
+
+
 def test_push_surfaces_warning_when_move_returns_success_false(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:

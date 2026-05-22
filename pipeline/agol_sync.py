@@ -1254,6 +1254,16 @@ def _publish_feature_layer(
     # properties.
     service.update(item_properties=item_props)
 
+    # Enforce folder placement on every push, not just on create.
+    # Services published in prior runs (or by hand in the AGOL UI)
+    # may be sitting in My Content root or the wrong category folder.
+    # Item.move() is idempotent server-side — if the service is
+    # already in the target folder, AGOL returns success and nothing
+    # changes. Without this, an item that started life in root stays
+    # in root forever because the update path used to only refresh
+    # data + metadata.
+    _safe_move(service, folder_obj or folder, properties)
+
     # Reconcile the source item on every push (steward-confirmed
     # 2026-05-22): ensures it sits in _sources with minimal metadata
     # + private sharing regardless of any prior manual configuration.
@@ -1350,6 +1360,10 @@ def _publish_imagery_layer(
     # Apply / re-apply full steward-authored metadata to the service.
     service.update(item_properties=item_props)
 
+    # Enforce folder placement on every push (idempotent — same
+    # rationale as in _publish_feature_layer's update path).
+    _safe_move(service, folder_obj or folder, properties)
+
     # Source reconcile after data refresh so source data is current
     # before metadata gets stripped.
     if source is not None:
@@ -1443,6 +1457,9 @@ def _publish_vector_tile_layer(
                 ))
 
     service.update(item_properties=item_props)
+
+    # Enforce folder placement on every push (idempotent).
+    _safe_move(service, folder_obj or folder, properties)
 
     if source is not None:
         _reconcile_source_item(
