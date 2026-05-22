@@ -85,6 +85,66 @@ def test_compute_agol_category_rejects_unknown() -> None:
 
 
 # -----------------------------------------------------------------------------
+# compute_service_name — title → AGOL-safe service name
+# -----------------------------------------------------------------------------
+
+def test_compute_service_name_strips_spaces_and_special_chars() -> None:
+    """AGOL service names allow only [A-Za-z0-9_]. Anything else
+    (spaces, parens, dashes, slashes, em-dashes, etc.) must be
+    sanitised. Regression guard for Test 2b's
+    'service name cannot contain spaces or special characters'
+    error against the title 'Y2Y Land Cover (2020)'."""
+    cases = {
+        "Y2Y Land Cover (2020)": "Y2Y_Land_Cover_2020",
+        "Biomass Carbon Density 2022 (t/ha)": "Biomass_Carbon_Density_2022_t_ha",
+        "GB Habitat — Female Fall": "GB_Habitat_Female_Fall",
+        "  leading/trailing  ": "leading_trailing",
+        "Multiple   spaces": "Multiple_spaces",
+        "Already_safe_name": "Already_safe_name",
+        "All*special#chars!": "All_special_chars",
+    }
+    for title, expected in cases.items():
+        row = {"title": title, "dataset_id": "ds_fallback"}
+        assert agol_sync.compute_service_name(row) == expected, (
+            f"compute_service_name({title!r}) → "
+            f"{agol_sync.compute_service_name(row)!r}, expected {expected!r}"
+        )
+
+
+def test_compute_service_name_only_contains_safe_chars() -> None:
+    """Property check: output is always [A-Za-z0-9_]+ regardless of
+    input. AGOL rejects anything else."""
+    import re
+    for title in (
+        "Y2Y Land Cover (2020)",
+        "100% pure — exotic /\\ chars!",
+        "üñîçødé",
+        "  ",  # would fall back to dataset_id
+    ):
+        out = agol_sync.compute_service_name(
+            {"title": title, "dataset_id": "ds_01ABC"}
+        )
+        assert re.fullmatch(r"[A-Za-z0-9_]+", out), (
+            f"compute_service_name({title!r}) returned {out!r} which "
+            f"contains AGOL-illegal characters"
+        )
+
+
+def test_compute_service_name_falls_back_to_dataset_id_on_empty() -> None:
+    """When the title is empty or sanitises to nothing, fall back to
+    the dataset_id (ULID format is AGOL-safe by construction)."""
+    assert agol_sync.compute_service_name(
+        {"title": "", "dataset_id": "ds_01HJK"}
+    ) == "ds_01HJK"
+    assert agol_sync.compute_service_name(
+        {"title": "!!!", "dataset_id": "ds_01XYZ"}
+    ) == "ds_01XYZ"
+    assert agol_sync.compute_service_name(
+        {"title": None, "dataset_id": "ds_01ZZZ"}
+    ) == "ds_01ZZZ"
+
+
+# -----------------------------------------------------------------------------
 # compute_item_properties — catalogue row → AGOL item dict
 # -----------------------------------------------------------------------------
 

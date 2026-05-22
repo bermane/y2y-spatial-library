@@ -157,6 +157,54 @@ def compute_agol_category(category: str) -> str:
     return category
 
 
+def compute_service_name(row: dict[str, Any]) -> str:
+    """Catalogue row → AGOL-safe service name.
+
+    AGOL service names allow only ``[A-Za-z0-9_]`` — no spaces, no
+    punctuation. This function sanitises the steward-authored
+    ``title`` into a name AGOL will accept while keeping it
+    human-readable:
+
+    * Spaces → underscores.
+    * Anything outside ``[A-Za-z0-9_]`` is dropped.
+    * Consecutive underscores collapse to one.
+    * Leading/trailing underscores are stripped.
+    * Empty result (e.g., title was all special chars) falls back to
+      ``dataset_id``, which is ULID-shaped and AGOL-safe by
+      construction.
+
+    Examples:
+
+        ``"Y2Y Land Cover (2020)"``  →  ``"Y2Y_Land_Cover_2020"``
+        ``"Biomass Carbon Density 2022 (t/ha)"``  →  ``"Biomass_Carbon_Density_2022_t_ha"``
+        ``"GB Habitat — Female Fall"``  →  ``"GB_Habitat_Female_Fall"``
+
+    Notes:
+
+    * The service name is what appears in the published service's
+      URL (e.g. ``https://services.../rest/services/<name>/ImageServer``).
+      The human-readable title is preserved separately via
+      ``item.update(item_properties={'title': ...})`` after publish.
+    * AGOL requires uniqueness per user/org. Two datasets whose
+      titles collapse to the same sanitised form would conflict —
+      ``publish_hosted_imagery_layer`` raises a clear "service by
+      that name already exists" error in that case.
+    """
+    import re
+    title = (row.get("title") or "").strip()
+    # Replace any non-alphanumeric character (incl. spaces, parens,
+    # slashes, em-dashes, accented letters, etc.) with an underscore.
+    # This keeps readable separators where punctuation existed
+    # ("t/ha" → "t_ha") rather than dropping the chars and gluing
+    # neighbouring tokens together ("t/ha" → "tha").
+    candidate = re.sub(r"[^A-Za-z0-9]", "_", title)
+    # Collapse runs of underscores.
+    candidate = re.sub(r"_+", "_", candidate)
+    # Strip leading/trailing underscores.
+    candidate = candidate.strip("_")
+    return candidate or (row.get("dataset_id") or "")
+
+
 def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     """Catalogue row → AGOL ``Item`` property dict.
 
@@ -768,6 +816,7 @@ def push(
             folder=folder, source_folder=source_folder,
             folder_obj=folder_obj, source_folder_obj=source_folder_obj,
             dataset_id=dataset_id,
+            service_name=compute_service_name(row),
             existing_item_id=row.get("agol_item_id"),
             checksum_changed=_checksum_changed(row),
         )
@@ -1299,6 +1348,7 @@ def _publish_imagery_layer(
     folder_obj: Any = None,
     source_folder_obj: Any = None,
     dataset_id: str,
+    service_name: str,
     existing_item_id: str | None,
     checksum_changed: bool,
 ) -> Any:
@@ -1342,7 +1392,11 @@ def _publish_imagery_layer(
                 input_data=[str(source_path)],
                 layer_configuration="ONE_IMAGE",
                 tiles_only=False,
-                output_name=item_props.get("title") or dataset_id,
+                # AGOL service names allow only [A-Za-z0-9_], so we
+                # pass the sanitised name (compute_service_name).
+                # The human-readable title is preserved via
+                # item.update(item_properties=...) below.
+                output_name=service_name,
                 gis=gis,
             )
         except Exception as exc:

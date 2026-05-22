@@ -1196,6 +1196,18 @@ def test_push_imagery_create_uses_publish_hosted_imagery_layer(
     assert isinstance(input_data, list) and len(input_data) == 1
     assert "r.tif" in input_data[0]
 
+    # REGRESSION GUARD (Test 2b): output_name must be the sanitised
+    # service name — NOT the raw title 'Test Title' (AGOL rejects
+    # spaces). compute_service_name turns 'Test Title' →
+    # 'Test_Title'.
+    output_name = call_kwargs["output_name"]
+    assert output_name == "Test_Title", (
+        f"output_name was {output_name!r} — must be AGOL-safe "
+        f"(sanitised, only [A-Za-z0-9_])"
+    )
+    import re
+    assert re.fullmatch(r"[A-Za-z0-9_]+", output_name)
+
     # REGRESSION GUARD: no separate source TIFF item created. The
     # deprecated gis.content.add() must not have been used for the
     # imagery path (it's still used by the vector path; that's fine).
