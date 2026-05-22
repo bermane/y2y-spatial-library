@@ -113,13 +113,21 @@ class PullCandidate(NamedTuple):
 # Pure mapping helpers
 # ----------------------------------------------------------------------------
 
-def compute_target_folder(category: str, *, prefix: str) -> str:
+def compute_target_folder(category: str) -> str:
     """Catalogue category → AGOL folder name.
 
-    Mirrors the spatial library's folder structure (DESIGN.md §14):
-    ``Y2Y_Library/Species/``, ``Y2Y_Library/Water/``, etc. Uses the
-    on-disk folder name (underscored) so the AGOL tree matches what
-    the steward sees in ``library/spatial/``.
+    Returns the underscored category folder name (e.g. ``"Species"``,
+    ``"Water"``, ``"Juris_Political_Boundaries"``) — matching the
+    on-disk folder names under ``library/spatial/``.
+
+    AGOL folders are a **flat namespace** — no nesting, no slashes in
+    folder names. An earlier version of this function returned
+    ``"Y2Y_Library/<category>"`` to imply a namespace, but AGOL
+    treats the slash as a literal character: ``content.add()`` accepts
+    it but stores the item under just the trailing segment, while
+    ``Item.move()`` rejects the slash-named target so feature layers
+    silently end up stranded in My Content root. Stripping the prefix
+    makes both calls consistent.
 
     Raises ``AgolError`` if the category isn't in the typology.
     """
@@ -128,7 +136,7 @@ def compute_target_folder(category: str, *, prefix: str) -> str:
             f"category {category!r} is not one of the {len(taxonomy.CATEGORIES)} "
             f"canonical typology categories — cannot map to an AGOL folder."
         )
-    return f"{prefix}/{taxonomy.CATEGORY_FOLDERS[category]}"
+    return taxonomy.CATEGORY_FOLDERS[category]
 
 
 def compute_agol_category(category: str) -> str:
@@ -666,10 +674,8 @@ def push(
 
     # ----- compute the AGOL-side payload -------------------------------
     properties = compute_item_properties(row)
-    folder = compute_target_folder(
-        row["category"], prefix=config.folder_prefix
-    )
-    source_folder = compute_sources_folder(config)
+    folder = compute_target_folder(row["category"])
+    source_folder = compute_sources_folder()
     sharing_payload = _resolve_sharing(config, gis, sharing_override)
 
     # Pre-create both AGOL folders so service.move() succeeds. AGOL's
@@ -869,15 +875,18 @@ _SOURCE_DESCRIPTION = (
 )
 
 
-def compute_sources_folder(config: AgolConfig) -> str:
-    """Return the AGOL folder for source items: ``<prefix>/_sources``.
+def compute_sources_folder() -> str:
+    """Return the AGOL folder for source items: ``_sources``.
 
     All source items (GPKG / COG / VTPK) land in this single flat
     folder regardless of catalogue category, keeping the
-    category-mirroring folders (``<prefix>/Species/``,
-    ``<prefix>/Water/``, …) clean of plumbing items.
+    category-mirroring folders (``Species/``, ``Water/``, …) clean of
+    plumbing items.
+
+    Returns the bare folder name because AGOL folders are a flat
+    namespace — see :func:`compute_target_folder` for context.
     """
-    return f"{config.folder_prefix}/{_SOURCES_FOLDER_NAME}"
+    return _SOURCES_FOLDER_NAME
 
 
 def _ensure_folder(gis, folder_name: str) -> None:
@@ -966,7 +975,7 @@ def _reconcile_source_item(
 
     What this enforces:
 
-    * **Folder**: ``Y2Y_Library/_sources``. If the source sits in a
+    * **Folder**: ``_sources``. If the source sits in a
       category folder or anywhere else, ``_safe_move`` relocates it.
     * **Item properties**: title aligned with the service, description
       stub, typeKeywords set to ``['Y2Y', 'Y2Y:source',

@@ -27,34 +27,41 @@ from pipeline import agol_config, agol_sync
 # -----------------------------------------------------------------------------
 
 def test_compute_target_folder_mirrors_catalogue_folder() -> None:
+    """AGOL folders are flat (no nesting / no slashes). The function
+    returns just the underscored category folder name — matches what
+    the steward sees in ``library/spatial/``."""
+    assert agol_sync.compute_target_folder("Species") == "Species"
     assert (
-        agol_sync.compute_target_folder("Species", prefix="Y2Y_Library")
-        == "Y2Y_Library/Species"
+        agol_sync.compute_target_folder("Jurisdictional & Political Boundaries")
+        == "Juris_Political_Boundaries"
     )
     assert (
-        agol_sync.compute_target_folder(
-            "Jurisdictional & Political Boundaries", prefix="Y2Y_Library"
-        )
-        == "Y2Y_Library/Juris_Political_Boundaries"
-    )
-    assert (
-        agol_sync.compute_target_folder(
-            "Land Designations & Tenure", prefix="Y2Y_Library"
-        )
-        == "Y2Y_Library/Land_Designations_Tenure"
+        agol_sync.compute_target_folder("Land Designations & Tenure")
+        == "Land_Designations_Tenure"
     )
 
 
-def test_compute_target_folder_honours_prefix() -> None:
-    assert (
-        agol_sync.compute_target_folder("Water", prefix="My_Custom_Root")
-        == "My_Custom_Root/Water"
-    )
+def test_compute_target_folder_returns_bare_name_with_no_slash() -> None:
+    """Regression guard: a previous implementation prepended a
+    ``Y2Y_Library/`` namespace prefix. AGOL accepted the slash as a
+    literal character in ``content.add(folder=...)`` (creating a folder
+    literally named with the slash) but ``Item.move(folder=...)``
+    silently failed against the same string, stranding feature layers
+    in My Content root. Stripping the prefix sidesteps both bugs."""
+    for cat in (
+        "Species", "Water", "Jurisdictional & Political Boundaries",
+        "Land Cover, Land Use & Disturbance",
+    ):
+        out = agol_sync.compute_target_folder(cat)
+        assert "/" not in out, (
+            f"compute_target_folder({cat!r}) returned {out!r} — folder "
+            f"names must not contain slashes."
+        )
 
 
 def test_compute_target_folder_rejects_unknown_category() -> None:
     with pytest.raises(agol_sync.AgolError, match="not one of"):
-        agol_sync.compute_target_folder("Not A Real Category", prefix="x")
+        agol_sync.compute_target_folder("Not A Real Category")
 
 
 # -----------------------------------------------------------------------------
@@ -385,7 +392,6 @@ def test_load_config_uses_defaults_with_empty_env(tmp_path) -> None:
     )
     assert cfg.portal_url == "https://www.arcgis.com"
     assert cfg.profile_name == "y2y"
-    assert cfg.folder_prefix == "Y2Y_Library"
     assert cfg.conservation_atlas_group_name == "Y2Y Conservation Atlas"
     assert cfg.auto_push is True
     assert cfg.client_id is None
@@ -411,7 +417,6 @@ def test_load_config_yaml_overrides(tmp_path) -> None:
     yaml_path = tmp_path / "agol_config.yaml"
     yaml_path.write_text(
         "portal_url: https://my.custom.portal/arcgis\n"
-        "folder_prefix: Custom_Y2Y\n"
         'conservation_atlas_group_name: My Custom Group\n'
     )
     cfg = agol_config.load_config(
@@ -420,7 +425,6 @@ def test_load_config_yaml_overrides(tmp_path) -> None:
         group_cache_path=tmp_path / "cache.json",
     )
     assert cfg.portal_url == "https://my.custom.portal/arcgis"
-    assert cfg.folder_prefix == "Custom_Y2Y"
     assert cfg.conservation_atlas_group_name == "My Custom Group"
 
 

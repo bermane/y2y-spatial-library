@@ -372,7 +372,7 @@ def test_push_creates_source_with_minimal_properties_in_sources_folder(
 
     # Source GPKG was added with minimal props in _sources folder.
     source_call_kwargs = _last_content_add_kwargs(gis)
-    assert source_call_kwargs["folder"] == "Y2Y_Library/_sources"
+    assert source_call_kwargs["folder"] == "_sources"
 
     source_props = source_call_kwargs["item_properties"]
     # Minimal allowed keys
@@ -421,7 +421,7 @@ def test_push_moves_service_to_category_folder_after_publish(
     # called on it.
     source_item = gis.content.add.return_value
     service_item = source_item.publish.return_value
-    service_item.move.assert_called_with(folder="Y2Y_Library/Water")
+    service_item.move.assert_called_with(folder="Water")
 
 
 def test_push_ensures_target_folders_exist_before_publish(
@@ -457,8 +457,8 @@ def test_push_ensures_target_folders_exist_before_publish(
         for key in ("folder", "name"):
             if key in c.kwargs:
                 requested_folders.append(c.kwargs[key])
-    assert "Y2Y_Library/_sources" in requested_folders
-    assert "Y2Y_Library/Water" in requested_folders
+    assert "_sources" in requested_folders
+    assert "Water" in requested_folders
 
 
 def test_push_reconciles_source_item_on_every_update(
@@ -507,7 +507,7 @@ def test_push_reconciles_source_item_on_every_update(
     )
 
     # The source item was moved to _sources.
-    source.move.assert_called_with(folder="Y2Y_Library/_sources")
+    source.move.assert_called_with(folder="_sources")
 
     # The source item was updated with the minimal-source props.
     source_update_calls = [
@@ -1039,7 +1039,7 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
     # consume since the hosted service publish failed — is moved to
     # the category folder and gets the full steward-authored metadata.
     source_item = gis.content.add.return_value
-    source_item.move.assert_called_with(folder="Y2Y_Library/Land_Cover_Use_Disturbance")
+    source_item.move.assert_called_with(folder="Land_Cover_Use_Disturbance")
     upgrade_calls = [
         c for c in source_item.update.call_args_list
         if "item_properties" in c.kwargs

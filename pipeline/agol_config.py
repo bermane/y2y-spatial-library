@@ -6,8 +6,6 @@ Single source of truth for the values the AGOL integration needs:
 * The name of the OAuth profile cached in ``~/.arcgis/profile_<name>``.
 * The OAuth ``client_id`` (a public identifier — but kept out of git
   via the ``Y2Y_AGOL_CLIENT_ID`` environment variable).
-* The default folder prefix under which items are organised in the
-  steward's My Content tree.
 * The name of the Y2Y Conservation Atlas group; its AGOL group ID is
   resolved lazily and cached locally.
 * The toggle for auto-sync on catalogue mutations
@@ -36,7 +34,6 @@ import yaml
 
 DEFAULT_PORTAL_URL = "https://www.arcgis.com"
 DEFAULT_PROFILE_NAME = "y2y"
-DEFAULT_FOLDER_PREFIX = "Y2Y_Library"
 DEFAULT_CONSERVATION_ATLAS_GROUP_NAME = "Y2Y Conservation Atlas"
 DEFAULT_AUTO_PUSH = True
 
@@ -60,7 +57,6 @@ class AgolConfig:
 
     portal_url: str = DEFAULT_PORTAL_URL
     profile_name: str = DEFAULT_PROFILE_NAME
-    folder_prefix: str = DEFAULT_FOLDER_PREFIX
     conservation_atlas_group_name: str = DEFAULT_CONSERVATION_ATLAS_GROUP_NAME
     auto_push: bool = DEFAULT_AUTO_PUSH
 
@@ -153,7 +149,6 @@ def load_config(
         or DEFAULT_PROFILE_NAME
     )
     portal_url = overrides.get("portal_url") or DEFAULT_PORTAL_URL
-    folder_prefix = overrides.get("folder_prefix") or DEFAULT_FOLDER_PREFIX
     group_name = (
         overrides.get("conservation_atlas_group_name")
         or DEFAULT_CONSERVATION_ATLAS_GROUP_NAME
@@ -166,7 +161,6 @@ def load_config(
     return AgolConfig(
         portal_url=portal_url,
         profile_name=profile_name,
-        folder_prefix=folder_prefix,
         conservation_atlas_group_name=group_name,
         conservation_atlas_group_id=cached_group_id,
         auto_push=auto_push,
