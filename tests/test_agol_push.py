@@ -387,6 +387,77 @@ def test_push_moves_service_to_category_folder_after_publish(
     service_item.move.assert_called_with(folder="Y2Y_Library/Water")
 
 
+def test_push_ensures_target_folders_exist_before_publish(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """push() pre-creates both the _sources folder and the category
+    folder. AGOL's Item.move() requires the target folder to exist;
+    this guard prevents the 'service ended up in My Content root'
+    symptom test #1 surfaced before this fix landed."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Both folders should have been touched (idempotently) before
+    # the publish + move. The SDK exposes a content.folders manager;
+    # _ensure_folder calls .create(...) on it. We just verify the
+    # call happened (the MagicMock accepts any signature).
+    assert gis.content.folders.create.called
+    # Collect every folder name we asked for.
+    requested_folders = []
+    for c in gis.content.folders.create.call_args_list:
+        # Folder names may come via positional or kwarg; check both.
+        if c.args:
+            requested_folders.append(c.args[0])
+        for key in ("folder", "name"):
+            if key in c.kwargs:
+                requested_folders.append(c.kwargs[key])
+    assert "Y2Y_Library/_sources" in requested_folders
+    assert "Y2Y_Library/Water" in requested_folders
+
+
+def test_push_surfaces_move_failure_as_internal_notes_warning(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """If service.move(folder=...) raises, the failure must surface in
+    internal_notes (and the changelog) — not be silently swallowed.
+    The 'item ended up in My Content root' symptom needs to be
+    visible to the steward."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(new_item_id="new_fl_id")
+    # Make the service's move() raise.
+    source = gis.content.add.return_value
+    service = source.publish.return_value
+    service.move.side_effect = RuntimeError("simulated move failure for test")
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Push still succeeded (move failure isn't fatal).
+    assert result.sync_status_after == "clean"
+
+    # Catalogue carries the [agol] annotation describing the move failure.
+    after = inventory_manager.get_dataset(db, "ds_test")
+    assert "[agol]" in (after["internal_notes"] or "")
+    assert "move" in (after["internal_notes"] or "").lower()
+    assert "My Content root" in (after["internal_notes"] or "")
+
+
 def test_push_applies_full_metadata_to_service_not_source(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:

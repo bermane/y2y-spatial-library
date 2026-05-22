@@ -668,6 +668,14 @@ def push(
     source_folder = compute_sources_folder(config)
     sharing_payload = _resolve_sharing(config, gis, sharing_override)
 
+    # Pre-create both AGOL folders so service.move() succeeds. AGOL's
+    # Item.move() requires the target folder to already exist
+    # (gis.content.add() auto-creates, but move() doesn't). The
+    # _ensure_folder helper is idempotent — safe to call repeatedly.
+    if not dry_run:
+        _ensure_folder(gis, source_folder)
+        _ensure_folder(gis, folder)
+
     # ----- dry-run short-circuit ---------------------------------------
     if dry_run:
         note = _format_push_plan(
@@ -870,6 +878,61 @@ def compute_sources_folder(config: AgolConfig) -> str:
     return f"{config.folder_prefix}/{_SOURCES_FOLDER_NAME}"
 
 
+def _ensure_folder(gis, folder_name: str) -> None:
+    """Idempotently ensure ``folder_name`` exists in the user's content.
+
+    AGOL's ``Item.move(folder=...)`` requires the target folder to
+    already exist — unlike ``gis.content.add(folder=...)`` which
+    auto-creates. We touch the folder explicitly before any move()
+    call so the move succeeds even on a fresh org / first-ever push
+    into a category.
+
+    Folder creation is idempotent server-side (AGOL returns the
+    existing folder if a folder of that name already exists for the
+    user). We catch + ignore exceptions here — the failure mode that
+    matters is the subsequent move() call, which surfaces its own
+    error with a clearer message.
+    """
+    try:
+        # SDK 2.x: gis.content.folders.create(...)
+        folders_mgr = gis.content.folders
+        # The exact API varies across SDK minor versions; try the
+        # modern signature first, then the legacy fallback.
+        try:
+            folders_mgr.create(folder=folder_name)
+        except TypeError:
+            try:
+                folders_mgr.create(name=folder_name)
+            except TypeError:
+                folders_mgr.create(folder_name)
+    except Exception:
+        # If folder creation fails (e.g., folder already exists in a
+        # form the SDK can't introspect, or older SDK without the
+        # folders manager), the subsequent move() will tell us more.
+        pass
+
+
+def _safe_move(item: Any, folder: str, properties: dict[str, Any]) -> None:
+    """Move ``item`` to ``folder`` and record any failure as a fallback warning.
+
+    AGOL's Item.move() can fail for transient reasons (folder doesn't
+    exist yet, name conflict, permissions). Rather than silently
+    swallowing the error — which the prior implementation did, hiding
+    the "item ended up in My Content root" symptom from the steward —
+    we capture the failure into ``properties['_fallback_warning']``
+    which then propagates to ``internal_notes`` and the changelog via
+    push()'s annotation-collection logic.
+    """
+    try:
+        item.move(folder=folder)
+    except Exception as exc:
+        properties["_fallback_warning"] = (
+            f"AGOL item.move to folder {folder!r} failed; item may "
+            f"be in My Content root. Move manually from the AGOL UI "
+            f"or re-push. Underlying: {exc}"
+        )
+
+
 def _compute_source_item_properties(
     service_properties: dict[str, Any],
     dataset_id: str,
@@ -987,19 +1050,13 @@ def _publish_feature_layer(
             # Upgrade it: move from _sources to the category folder,
             # apply the full steward-authored metadata. push() will
             # then apply sharing to it as if it were the service.
-            try:
-                gpkg_item.move(folder=folder)
-            except Exception:
-                pass  # best-effort; the metadata update below is more important
+            _safe_move(gpkg_item, folder, properties)
             gpkg_item.update(item_properties=item_props)
             return gpkg_item
         # Normal path: hosted service was published. Move it to the
         # category folder (publish() places it in My Content root by
         # default) and apply the full metadata.
-        try:
-            service_item.move(folder=folder)
-        except Exception:
-            pass  # best-effort; rest of the metadata still applies
+        _safe_move(service_item, folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1069,16 +1126,10 @@ def _publish_imagery_layer(
             # Fallback: the source IS the user-facing item. Upgrade
             # it to service-like treatment (category folder + full
             # metadata + sharing applied by push()).
-            try:
-                tif_item.move(folder=folder)
-            except Exception:
-                pass
+            _safe_move(tif_item, folder, properties)
             tif_item.update(item_properties=item_props)
             return tif_item
-        try:
-            service_item.move(folder=folder)
-        except Exception:
-            pass
+        _safe_move(service_item, folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1160,10 +1211,7 @@ def _publish_vector_tile_layer(
             folder=source_folder,
         )
         service_item = vtpk_item.publish(file_type="Vector Tile Package")
-        try:
-            service_item.move(folder=folder)
-        except Exception:
-            pass
+        _safe_move(service_item, folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
