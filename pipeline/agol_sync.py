@@ -37,6 +37,7 @@ that actually needs a GIS connection.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1338,6 +1339,30 @@ def _publish_feature_layer(
     return service
 
 
+@contextmanager
+def _suppress_insecure_request_warnings():
+    """Context manager that silences urllib3's InsecureRequestWarning.
+
+    The arcgis SDK's hosted imagery publish flow polls AGOL's raster
+    analysis service (``rasteranalysis*.arcgis.com``) repeatedly
+    while the server processes the upload. Those internal SDK
+    requests are made with ``verify=False``, so urllib3 emits an
+    ``InsecureRequestWarning`` on every poll. For a multi-minute
+    publish of a single raster, that's easily 1000+ warnings dumped
+    to stderr — drowning out real signal.
+
+    We can't fix the SDK's choice (it's Esri-internal traffic), and
+    we don't want to disable the warning globally (it's a legitimate
+    signal in other contexts), so we suppress it narrowly at the
+    publish_hosted_imagery_layer call sites only.
+    """
+    import warnings
+    from urllib3.exceptions import InsecureRequestWarning
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+        yield
+
+
 def _publish_imagery_layer(
     *,
     gis,
@@ -1388,17 +1413,18 @@ def _publish_imagery_layer(
         # raster store and creates the imagery service. Returns the
         # Imagery Layer Item directly. No intermediate source item.
         try:
-            service_item = publish_hosted_imagery_layer(
-                input_data=[str(source_path)],
-                layer_configuration="ONE_IMAGE",
-                tiles_only=False,
-                # AGOL service names allow only [A-Za-z0-9_], so we
-                # pass the sanitised name (compute_service_name).
-                # The human-readable title is preserved via
-                # item.update(item_properties=...) below.
-                output_name=service_name,
-                gis=gis,
-            )
+            with _suppress_insecure_request_warnings():
+                service_item = publish_hosted_imagery_layer(
+                    input_data=[str(source_path)],
+                    layer_configuration="ONE_IMAGE",
+                    tiles_only=False,
+                    # AGOL service names allow only [A-Za-z0-9_], so
+                    # we pass the sanitised name (compute_service_name).
+                    # The human-readable title is preserved via
+                    # item.update(item_properties=...) below.
+                    output_name=service_name,
+                    gis=gis,
+                )
         except Exception as exc:
             raise AgolError(
                 f"hosted imagery publish failed for {dataset_id!r}: {exc}"
@@ -1420,13 +1446,14 @@ def _publish_imagery_layer(
     # explicit update below.
     if checksum_changed:
         try:
-            publish_hosted_imagery_layer(
-                input_data=[str(source_path)],
-                layer_configuration="ONE_IMAGE",
-                tiles_only=False,
-                output_name=service,  # existing Item → replace in place
-                gis=gis,
-            )
+            with _suppress_insecure_request_warnings():
+                publish_hosted_imagery_layer(
+                    input_data=[str(source_path)],
+                    layer_configuration="ONE_IMAGE",
+                    tiles_only=False,
+                    output_name=service,  # existing Item → replace in place
+                    gis=gis,
+                )
         except Exception as exc:
             _record_warning(properties, (
                 f"imagery data refresh failed; metadata updated but "
