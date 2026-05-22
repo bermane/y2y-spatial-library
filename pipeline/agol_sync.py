@@ -678,13 +678,19 @@ def push(
     source_folder = compute_sources_folder()
     sharing_payload = _resolve_sharing(config, gis, sharing_override)
 
-    # Pre-create both AGOL folders so service.move() succeeds. AGOL's
+    # Pre-create both AGOL folders so item.move() succeeds. AGOL's
     # Item.move() requires the target folder to already exist
     # (gis.content.add() auto-creates, but move() doesn't). The
-    # _ensure_folder helper is idempotent — safe to call repeatedly.
+    # _ensure_folder helper is idempotent (exist_ok=True) and returns
+    # the live Folder instance — we hand that instance (rather than
+    # the bare name) to _safe_move so the SDK doesn't have to look
+    # the folder up by name (a path that fails silently if AGOL
+    # hasn't yet indexed the just-created folder).
+    folder_obj: Any = folder
+    source_folder_obj: Any = source_folder
     if not dry_run:
-        _ensure_folder(gis, source_folder)
-        _ensure_folder(gis, folder)
+        source_folder_obj = _ensure_folder(gis, source_folder) or source_folder
+        folder_obj = _ensure_folder(gis, folder) or folder
 
     # ----- dry-run short-circuit ---------------------------------------
     if dry_run:
@@ -731,6 +737,7 @@ def push(
             gis=gis, source_path=source_path,
             properties=properties,
             folder=folder, source_folder=source_folder,
+            folder_obj=folder_obj, source_folder_obj=source_folder_obj,
             dataset_id=dataset_id,
             existing_item_id=row.get("agol_item_id"),
             checksum_changed=_checksum_changed(row),
@@ -740,6 +747,7 @@ def push(
             gis=gis, source_path=source_path,
             properties=properties,
             folder=folder, source_folder=source_folder,
+            folder_obj=folder_obj, source_folder_obj=source_folder_obj,
             existing_item_id=row.get("agol_item_id"),
             dataset_id=dataset_id, checksum=row["checksum_sha256"],
             cache_dir=cache_dir,
@@ -750,6 +758,7 @@ def push(
             gis=gis, source_path=source_path,
             properties=properties,
             folder=folder, source_folder=source_folder,
+            folder_obj=folder_obj, source_folder_obj=source_folder_obj,
             dataset_id=dataset_id,
             existing_item_id=row.get("agol_item_id"),
             checksum_changed=_checksum_changed(row),
@@ -889,8 +898,8 @@ def compute_sources_folder() -> str:
     return _SOURCES_FOLDER_NAME
 
 
-def _ensure_folder(gis, folder_name: str) -> None:
-    """Idempotently ensure ``folder_name`` exists in the user's content.
+def _ensure_folder(gis, folder_name: str) -> Any | None:
+    """Idempotently ensure ``folder_name`` exists; return its Folder instance.
 
     AGOL's ``Item.move(folder=...)`` requires the target folder to
     already exist — unlike ``gis.content.add(folder=...)`` which
@@ -898,29 +907,28 @@ def _ensure_folder(gis, folder_name: str) -> None:
     call so the move succeeds even on a fresh org / first-ever push
     into a category.
 
-    Folder creation is idempotent server-side (AGOL returns the
-    existing folder if a folder of that name already exists for the
-    user). We catch + ignore exceptions here — the failure mode that
-    matters is the subsequent move() call, which surfaces its own
-    error with a clearer message.
+    Returning the live ``Folder`` instance matters because
+    ``Item.move()`` is more reliable when given the instance directly
+    rather than the folder name. When given a string, the SDK does
+    ``gis.content.folders.get(folder=name)._fid`` internally — if
+    ``get()`` returns ``None`` (folder name with special characters,
+    AGOL hasn't indexed a just-created folder yet, etc.), that
+    crashes with AttributeError. Passing the Folder instance skips
+    the lookup entirely.
+
+    Idempotency: ``exist_ok=True`` makes ``Folders.create()`` return
+    the existing Folder rather than raising ``FolderException``. SDK
+    2.3+.
+
+    Returns ``None`` if folder creation fails (e.g., legacy SDK
+    without the folders manager). Callers fall back to passing the
+    folder name string to ``Item.move()``, which will surface its
+    own error via the success-flag check in ``_safe_move``.
     """
     try:
-        # SDK 2.x: gis.content.folders.create(...)
-        folders_mgr = gis.content.folders
-        # The exact API varies across SDK minor versions; try the
-        # modern signature first, then the legacy fallback.
-        try:
-            folders_mgr.create(folder=folder_name)
-        except TypeError:
-            try:
-                folders_mgr.create(name=folder_name)
-            except TypeError:
-                folders_mgr.create(folder_name)
+        return gis.content.folders.create(folder=folder_name, exist_ok=True)
     except Exception:
-        # If folder creation fails (e.g., folder already exists in a
-        # form the SDK can't introspect, or older SDK without the
-        # folders manager), the subsequent move() will tell us more.
-        pass
+        return None
 
 
 def _record_warning(properties: dict[str, Any], message: str) -> None:
@@ -934,24 +942,55 @@ def _record_warning(properties: dict[str, Any], message: str) -> None:
     properties.setdefault("_warnings", []).append(message)
 
 
-def _safe_move(item: Any, folder: str, properties: dict[str, Any]) -> None:
+def _safe_move(item: Any, folder: Any, properties: dict[str, Any]) -> None:
     """Move ``item`` to ``folder`` and record any failure visibly.
 
-    AGOL's Item.move() can fail for transient reasons (folder doesn't
-    exist yet, name conflict, permissions). Rather than silently
-    swallowing the error — which the prior implementation did, hiding
-    the "item ended up in My Content root" symptom from the steward —
-    capture the failure via ``_record_warning`` so it propagates to
-    ``internal_notes`` and the changelog via push()'s annotation
+    AGOL's ``Item.move()`` doesn't raise on server-side failure — it
+    returns a JSON dict ``{"success": true|false, "itemId": ..., ...}``
+    and a ``success: false`` payload looks identical to a success
+    from the caller's perspective. The previous implementation only
+    caught Python exceptions, so an item that AGOL refused to move
+    silently stayed in My Content root with no diagnostic. We now
+    check the return value's ``success`` flag explicitly.
+
+    ``folder`` is either a string folder name OR a ``Folder`` instance
+    (as returned by ``_ensure_folder``). Prefer the instance —
+    ``Item.move()`` resolves a string by calling
+    ``gis.content.folders.get(folder=name)._fid`` internally, which
+    crashes with AttributeError if AGOL's folder index hasn't caught
+    up with a just-created folder.
+
+    Failures are captured via ``_record_warning`` so they propagate
+    to ``internal_notes`` and the changelog via push()'s annotation
     collection.
     """
+    folder_label = getattr(folder, "name", None) or str(folder)
     try:
-        item.move(folder=folder)
+        result = item.move(folder=folder)
     except Exception as exc:
         _record_warning(properties, (
-            f"AGOL item.move to folder {folder!r} failed; item may "
-            f"be in My Content root. Move manually from the AGOL UI "
-            f"or re-push. Underlying: {exc}"
+            f"AGOL item.move to folder {folder_label!r} failed; item "
+            f"may be in My Content root. Move manually from the AGOL "
+            f"UI or re-push. Underlying: {exc}"
+        ))
+        return
+    # Defensive: explicit success-flag check. AGOL signals failure
+    # via the payload, not via an exception.
+    if isinstance(result, dict) and result.get("success") is False:
+        _record_warning(properties, (
+            f"AGOL item.move to folder {folder_label!r} returned "
+            f"success=False; item is still in My Content root. AGOL "
+            f"payload: {result!r}. Move manually from the AGOL UI or "
+            f"re-push."
+        ))
+    elif result is None:
+        # Item.move() returns None when it can't resolve the folder
+        # arg (logs "Folder not found for given owner" to stdout and
+        # bails). The item didn't move.
+        _record_warning(properties, (
+            f"AGOL item.move to folder {folder_label!r} returned "
+            f"None — the SDK could not resolve the target folder. "
+            f"Item is still in My Content root."
         ))
 
 
@@ -960,6 +999,7 @@ def _reconcile_source_item(
     dataset_id: str,
     *,
     source_folder: str,
+    source_folder_obj: Any = None,
     source_type: str,
     service_properties: dict[str, Any],
     properties: dict[str, Any],
@@ -1004,8 +1044,11 @@ def _reconcile_source_item(
     })
 
     # Move first (if needed) so subsequent property updates land on
-    # the item at its new location.
-    _safe_move(source_item, source_folder, properties)
+    # the item at its new location. Prefer the Folder instance (more
+    # reliable in the SDK), fall back to the string name.
+    _safe_move(
+        source_item, source_folder_obj or source_folder, properties,
+    )
 
     # Apply the minimal-policy properties.
     try:
@@ -1106,6 +1149,8 @@ def _publish_feature_layer(
     properties: dict[str, Any],
     folder: str,
     source_folder: str,
+    folder_obj: Any = None,
+    source_folder_obj: Any = None,
     dataset_id: str,
     existing_item_id: str | None,
     checksum_changed: bool,
@@ -1144,13 +1189,13 @@ def _publish_feature_layer(
             # Upgrade it: move from _sources to the category folder,
             # apply the full steward-authored metadata. push() will
             # then apply sharing to it as if it were the service.
-            _safe_move(gpkg_item, folder, properties)
+            _safe_move(gpkg_item, folder_obj or folder, properties)
             gpkg_item.update(item_properties=item_props)
             return gpkg_item
         # Normal path: hosted service was published. Move it to the
         # category folder (publish() places it in My Content root by
         # default) and apply the full metadata.
-        _safe_move(service_item, folder, properties)
+        _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1218,6 +1263,7 @@ def _publish_feature_layer(
         _reconcile_source_item(
             source, dataset_id,
             source_folder=source_folder,
+            source_folder_obj=source_folder_obj,
             source_type="GeoPackage",
             service_properties=item_props,
             properties=properties,
@@ -1232,6 +1278,8 @@ def _publish_imagery_layer(
     properties: dict[str, Any],
     folder: str,
     source_folder: str,
+    folder_obj: Any = None,
+    source_folder_obj: Any = None,
     dataset_id: str,
     existing_item_id: str | None,
     checksum_changed: bool,
@@ -1269,10 +1317,10 @@ def _publish_imagery_layer(
             # Fallback: the source IS the user-facing item. Upgrade
             # it to service-like treatment (category folder + full
             # metadata + sharing applied by push()).
-            _safe_move(tif_item, folder, properties)
+            _safe_move(tif_item, folder_obj or folder, properties)
             tif_item.update(item_properties=item_props)
             return tif_item
-        _safe_move(service_item, folder, properties)
+        _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1308,6 +1356,7 @@ def _publish_imagery_layer(
         _reconcile_source_item(
             source, dataset_id,
             source_folder=source_folder,
+            source_folder_obj=source_folder_obj,
             source_type="Image",
             service_properties=item_props,
             properties=properties,
@@ -1322,6 +1371,8 @@ def _publish_vector_tile_layer(
     properties: dict[str, Any],
     folder: str,
     source_folder: str,
+    folder_obj: Any = None,
+    source_folder_obj: Any = None,
     existing_item_id: str | None,
     dataset_id: str,
     checksum: str,
@@ -1364,7 +1415,7 @@ def _publish_vector_tile_layer(
             folder=source_folder,
         )
         service_item = vtpk_item.publish(file_type="Vector Tile Package")
-        _safe_move(service_item, folder, properties)
+        _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
@@ -1397,6 +1448,7 @@ def _publish_vector_tile_layer(
         _reconcile_source_item(
             source, dataset_id,
             source_folder=source_folder,
+            source_folder_obj=source_folder_obj,
             source_type="Vector Tile Package",
             service_properties=item_props,
             properties=properties,

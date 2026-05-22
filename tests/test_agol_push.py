@@ -417,11 +417,28 @@ def test_push_moves_service_to_category_folder_after_publish(
 
     # The service item is the publish() return value. Find it via the
     # mock chain: gis.content.add → returns source; source.publish →
-    # returns service. The service should have .move(folder='...Water')
-    # called on it.
+    # returns service. The service should have .move() called on it
+    # with the Folder instance returned by content.folders.create().
     source_item = gis.content.add.return_value
     service_item = source_item.publish.return_value
-    service_item.move.assert_called_with(folder="Water")
+    # _safe_move now passes the live Folder instance (from
+    # _ensure_folder, which calls gis.content.folders.create) rather
+    # than the raw string name — string-based lookups are unreliable
+    # right after folder creation (AGOL hasn't indexed it yet).
+    service_item.move.assert_called_once()
+    move_kwargs = service_item.move.call_args.kwargs
+    assert "folder" in move_kwargs
+    # The folder arg is the Folder instance returned by
+    # folders.create(folder="Water", exist_ok=True). Verify the
+    # create() call asked for the correct name.
+    create_calls = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "Water"
+        and c.kwargs.get("exist_ok") is True
+    ]
+    assert create_calls, (
+        "expected folders.create(folder='Water', exist_ok=True) before move"
+    )
 
 
 def test_push_ensures_target_folders_exist_before_publish(
@@ -443,22 +460,84 @@ def test_push_ensures_target_folders_exist_before_publish(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # Both folders should have been touched (idempotently) before
-    # the publish + move. The SDK exposes a content.folders manager;
-    # _ensure_folder calls .create(...) on it. We just verify the
-    # call happened (the MagicMock accepts any signature).
+    # Both folders should have been touched (idempotently, via
+    # exist_ok=True) before the publish + move. _ensure_folder calls
+    # gis.content.folders.create(folder=<name>, exist_ok=True).
     assert gis.content.folders.create.called
-    # Collect every folder name we asked for.
-    requested_folders = []
-    for c in gis.content.folders.create.call_args_list:
-        # Folder names may come via positional or kwarg; check both.
-        if c.args:
-            requested_folders.append(c.args[0])
-        for key in ("folder", "name"):
-            if key in c.kwargs:
-                requested_folders.append(c.kwargs[key])
+    requested_folders = [
+        c.kwargs.get("folder") for c in gis.content.folders.create.call_args_list
+    ]
     assert "_sources" in requested_folders
     assert "Water" in requested_folders
+    # Every create call must use exist_ok=True (idempotent — second
+    # push of the same dataset would FolderException otherwise).
+    for c in gis.content.folders.create.call_args_list:
+        assert c.kwargs.get("exist_ok") is True, (
+            f"folders.create called without exist_ok=True: {c}"
+        )
+
+
+def test_push_surfaces_warning_when_move_returns_success_false(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Regression guard for the silent-fail symptom of pilot test #1:
+    AGOL's Item.move() returns ``{"success": False, ...}`` instead of
+    raising when the server-side move refuses. The previous
+    _safe_move only caught Python exceptions, so a success=False
+    payload silently left the item in My Content root with no
+    diagnostic. We now check the success flag explicitly."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    # Make the service's move() return success=False (mimicking AGOL
+    # refusing the move).
+    source_item = gis.content.add.return_value
+    service_item = source_item.publish.return_value
+    service_item.move.return_value = {
+        "success": False, "itemId": "new_fl_id", "error": "denied",
+    }
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "success=False" in notes or "still in My Content root" in notes
+
+
+def test_push_surfaces_warning_when_move_returns_none(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Item.move() returns ``None`` when the SDK can't resolve the
+    target folder (logs 'Folder not found for given owner' to stdout
+    and bails). Silent failure — _safe_move must catch this."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    source_item = gis.content.add.return_value
+    service_item = source_item.publish.return_value
+    service_item.move.return_value = None
+
+    agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "None" in notes or "could not resolve" in notes
 
 
 def test_push_reconciles_source_item_on_every_update(
@@ -506,8 +585,18 @@ def test_push_reconciles_source_item_on_every_update(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # The source item was moved to _sources.
-    source.move.assert_called_with(folder="_sources")
+    # The source item was moved to _sources. _safe_move passes the
+    # live Folder instance returned by folders.create(); verify the
+    # create() call asked for the right name.
+    source.move.assert_called_once()
+    sources_create_calls = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "_sources"
+        and c.kwargs.get("exist_ok") is True
+    ]
+    assert sources_create_calls, (
+        "expected folders.create(folder='_sources', exist_ok=True)"
+    )
 
     # The source item was updated with the minimal-source props.
     source_update_calls = [
@@ -1038,8 +1127,18 @@ def test_push_imagery_falls_back_to_item_with_file_on_publish_failure(
     # Fallback "upgrade": the source TIFF — which is what users will
     # consume since the hosted service publish failed — is moved to
     # the category folder and gets the full steward-authored metadata.
+    # The move() receives the live Folder instance from folders.create().
     source_item = gis.content.add.return_value
-    source_item.move.assert_called_with(folder="Land_Cover_Use_Disturbance")
+    source_item.move.assert_called_once()
+    category_create_calls = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "Land_Cover_Use_Disturbance"
+        and c.kwargs.get("exist_ok") is True
+    ]
+    assert category_create_calls, (
+        "expected folders.create(folder='Land_Cover_Use_Disturbance', "
+        "exist_ok=True)"
+    )
     upgrade_calls = [
         c for c in source_item.update.call_args_list
         if "item_properties" in c.kwargs
