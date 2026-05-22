@@ -28,6 +28,52 @@ def _install_fake_arcpy(monkeypatch: pytest.MonkeyPatch, fake) -> None:
     monkeypatch.setitem(sys.modules, "arcpy", fake)
 
 
+def _stub_pro_project_plumbing(
+    fake_arcpy: types.ModuleType, tmp_path: Path,
+) -> tuple[MagicMock, MagicMock]:
+    """Wire the fake arcpy with a working .mp.ArcGISProject + GetInstallInfo.
+
+    build_vtpk needs:
+
+    * ``arcpy.GetInstallInfo()['InstallDir']`` → an install dir we
+      can plant a fake BlankTemplate.aprx under.
+    * ``arcpy.mp.ArcGISProject(template_path)`` → returns a project
+      with a saveACopy method that creates the destination file.
+    * ``arcpy.mp.ArcGISProject(dest_path)`` → returns a project
+      with listMaps/createMap/save/addDataFromPath methods.
+
+    Returns the (project, map) mocks so individual tests can assert
+    against them.
+    """
+    install_dir = tmp_path / "fake_pro_install"
+    template_dir = install_dir / "Resources" / "ProjectTemplates"
+    template_dir.mkdir(parents=True)
+    template_path = template_dir / "BlankTemplate.aptx"
+    template_path.write_bytes(b"fake-template")
+
+    fake_arcpy.GetInstallInfo = MagicMock(
+        return_value={"InstallDir": str(install_dir)}
+    )
+
+    map_mock = MagicMock()
+    map_mock.addDataFromPath = MagicMock()
+    project_mock = MagicMock()
+    project_mock.listMaps = MagicMock(return_value=[map_mock])
+    project_mock.save = MagicMock()
+    # saveACopy must actually create the destination so subsequent
+    # ArcGISProject(dest) calls in production code don't crash on
+    # missing-file. Our build_vtpk calls saveACopy then re-opens
+    # the same path.
+    def _save_a_copy(dest):
+        Path(dest).write_bytes(b"fake-staging-aprx")
+    project_mock.saveACopy = MagicMock(side_effect=_save_a_copy)
+
+    fake_arcpy.mp = types.SimpleNamespace(
+        ArcGISProject=MagicMock(return_value=project_mock)
+    )
+    return project_mock, map_mock
+
+
 # --- arcpy availability ------------------------------------------------
 
 def test_is_arcpy_available_when_absent() -> None:
@@ -145,6 +191,7 @@ def test_build_vtpk_invokes_arcpy_create_vtpk(
     fake.management = types.SimpleNamespace(
         CreateVectorTilePackage=_fake_create
     )
+    project_mock, map_mock = _stub_pro_project_plumbing(fake, tmp_path)
     _install_fake_arcpy(monkeypatch, fake)
 
     out = agol_vtpk.build_vtpk(
@@ -165,11 +212,18 @@ def test_build_vtpk_invokes_arcpy_create_vtpk(
     # arcpy was driven with the right inputs.
     assert len(create_calls) == 1
     call = create_calls[0]
-    assert call["in_map"] == f"{gpkg}\\main.src"
+    # in_map is now the Map object from the staging project, NOT a
+    # feature class path (arcpy 3.x requires a real Map).
+    assert call["in_map"] is map_mock
     assert call["output_file"] == str(out)
     assert call["service_type"] == "ONLINE"
     assert call["tile_structure"] == "INDEXED"
     assert call["tags"] == "Y2Y"
+
+    # The GPKG layer was added to the staging map and the project
+    # was saved before CreateVectorTilePackage ran.
+    map_mock.addDataFromPath.assert_called_once_with(f"{gpkg}\\main.src")
+    project_mock.save.assert_called_once()
 
 
 def test_build_vtpk_rejects_multi_layer_gpkg(
