@@ -1332,6 +1332,13 @@ def _unpublish_agol_items(
     command will share this helper for the explicit
     ``y2y agol-sync unpublish`` workflow.
 
+    ``permanent=True`` is critical here: without it, AGOL sends
+    the item to the recycle bin and keeps the service name
+    reservation alive. The next publish on the same service name
+    then fails with "Service name '...' already exists for '<userid>'".
+    For target-switch we want the name freed immediately so the
+    new representation can be published.
+
     Failures are recorded as ``[agol]`` warnings rather than
     aborting — partial cleanup is better than leaving the catalogue
     in an inconsistent state with no remediation message. The
@@ -1355,16 +1362,36 @@ def _unpublish_agol_items(
 
     for src in linked:
         try:
-            src.delete()
+            src.delete(permanent=True)
+        except TypeError:
+            # SDK pre-2.4 didn't expose permanent= kwarg; fall back.
+            try:
+                src.delete()
+            except Exception as exc:
+                _record_warning(properties, (
+                    f"failed to delete linked source item "
+                    f"{getattr(src, 'id', '?')!r} during target "
+                    f"switch: {exc}"
+                ))
         except Exception as exc:
             _record_warning(properties, (
                 f"failed to delete linked source item "
                 f"{getattr(src, 'id', '?')!r} during target switch: {exc}"
             ))
 
-    # Now delete the service itself.
+    # Now delete the service itself, also permanently so the name
+    # frees up for the new target's publish.
     try:
-        service_item.delete()
+        service_item.delete(permanent=True)
+    except TypeError:
+        try:
+            service_item.delete()
+        except Exception as exc:
+            _record_warning(properties, (
+                f"failed to delete service item "
+                f"{getattr(service_item, 'id', '?')!r} during target "
+                f"switch: {exc}"
+            ))
     except Exception as exc:
         _record_warning(properties, (
             f"failed to delete service item "
