@@ -526,3 +526,230 @@ def test_cache_group_id_persists_and_can_be_reloaded(tmp_path) -> None:
     import json
     raw = json.loads(cache_path.read_text())
     assert raw == {"Group A": "id_a", "Group B": "id_b"}
+
+
+# ----------------------------------------------------------------------------
+# Phase C: adoption
+# ----------------------------------------------------------------------------
+
+from pipeline import inventory_manager
+
+
+@pytest.fixture
+def _config_no_cache(tmp_path: Path) -> agol_config.AgolConfig:
+    """An AgolConfig with the Conservation Atlas group ID
+    pre-populated so resolve_group_id() doesn't need to call AGOL.
+    Mirrors the fixture in test_agol_push.py."""
+    return agol_config.AgolConfig(
+        conservation_atlas_group_id="cached_group_xyz",
+    )
+
+
+def _adoption_row(dataset_id: str = "ds_adopt_test") -> dict:
+    """Row dict for a pre-existing AGOL item (agol_item_id set,
+    sync_status='unpublished'). Reuses test_agol_push._full_row to
+    stay schema-current."""
+    from tests.test_agol_push import _full_row
+    row = _full_row(
+        dataset_id=dataset_id,
+        file_path="Juris_Political_Boundaries/fortress_mountain.gpkg",
+        category="Jurisdictional & Political Boundaries",
+        agol_item_id="ad594173963245388b45bd2a123f9466",
+        sync_status="unpublished",
+    )
+    # _full_row defaults: title='Test Title', summary='Summary.',
+    # description='Description.', tags='test;y2y',
+    # acknowledgements='Ack.', terms_of_use='TOU.'.
+    return row
+
+
+def _make_agol_item(
+    *,
+    # Defaults match _full_row's defaults so a vanilla
+    # _make_agol_item() represents an AGOL item that field-for-field
+    # matches the catalogue row built by _adoption_row().
+    title="Test Title",
+    snippet="Summary.",
+    description="Description.",
+    tags=("test", "y2y"),
+    access_information="Ack.",
+    license_info="TOU.",
+    categories=("Jurisdictional & Political Boundaries",),
+    created=1700000000000,
+) -> MagicMock:
+    """A MagicMock that looks like an arcgis.gis.Item with the
+    fields adopt_row reads."""
+    item = MagicMock()
+    item.title = title
+    item.snippet = snippet
+    item.description = description
+    item.tags = list(tags)
+    item.accessInformation = access_information
+    item.licenseInfo = license_info
+    item.categories = list(categories)
+    item.created = created
+    return item
+
+
+def test_adopt_row_marks_clean_when_agol_matches_catalogue(
+    project_tree, _config_no_cache,
+) -> None:
+    """When AGOL field-for-field matches catalogue, adoption flips
+    sync_status to 'clean' and populates last_synced_at +
+    agol_published_at."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    inventory_manager.insert_dataset(db, row)
+
+    # Default _make_agol_item already matches the catalogue row
+    # built by _adoption_row() field-for-field — no overrides needed.
+    item = _make_agol_item()
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.adopt_row(
+        db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+    )
+
+    assert result.sync_status_after == "clean"
+    assert result.sync_status_before == "unpublished"
+    assert result.error is None
+
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == "clean"
+    assert fresh["last_synced_at"] is not None
+    assert fresh["agol_published_at"] is not None
+
+
+def test_adopt_row_marks_conflict_when_agol_differs(
+    project_tree, _config_no_cache,
+) -> None:
+    """When any field differs between AGOL and catalogue, adoption
+    flips sync_status to 'conflict' and writes a structured diff
+    to changelog. Adoption never mutates AGOL."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    inventory_manager.insert_dataset(db, row)
+
+    # AGOL has a different title than the catalogue (catalogue =
+    # 'Test Title' from _full_row default; AGOL = 'Old AGOL Title').
+    item = _make_agol_item(
+        title="Old AGOL Title",
+        snippet="Summary.",
+        description="Description.",
+        tags=["test", "y2y"],
+        access_information="Ack.",
+        license_info="TOU.",
+        categories=["Jurisdictional & Political Boundaries"],
+    )
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.adopt_row(
+        db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+    )
+
+    assert result.sync_status_after == "conflict"
+
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == "conflict"
+
+    # The changelog entry captures the structured per-field diff.
+    log = inventory_manager.load_changelog(db)
+    relevant = [
+        r for r in log
+        if r["dataset_id"] == row["dataset_id"]
+        and r["field_changed"] == "sync_status"
+        and r["new_value"] == "conflict"
+    ]
+    assert len(relevant) == 1
+    note = relevant[0]["note"] or ""
+    assert "title" in note
+    assert "Old AGOL Title" in note  # AGOL side
+    assert "Test Title" in note      # catalogue side
+
+
+def test_adopt_row_marks_error_when_agol_item_missing(
+    project_tree, _config_no_cache,
+) -> None:
+    """If gis.content.get() returns None (item deleted out-of-band),
+    adoption marks the row 'error' with a remediation hint in
+    internal_notes pointing at unpublish + re-push."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    inventory_manager.insert_dataset(db, row)
+
+    gis = MagicMock()
+    gis.content.get.return_value = None  # AGOL item missing
+
+    result = agol_sync.adopt_row(
+        db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+    )
+
+    assert result.sync_status_after == "error"
+    assert result.error is not None
+    assert "no longer exists" in result.error.lower()
+
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == "error"
+    notes = fresh["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "no longer exists" in notes
+
+
+def test_adopt_row_rejects_row_without_agol_item_id(
+    project_tree, _config_no_cache,
+) -> None:
+    """Adoption only applies to rows with a pre-existing
+    agol_item_id. Rows without one are nonsense to 'adopt'."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    row["agol_item_id"] = None
+    inventory_manager.insert_dataset(db, row)
+    gis = MagicMock()
+
+    with pytest.raises(agol_sync.AgolError, match="no agol_item_id"):
+        agol_sync.adopt_row(
+            db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+        )
+
+
+def test_adopt_row_rejects_row_already_under_management(
+    project_tree, _config_no_cache,
+) -> None:
+    """Only sync_status='unpublished' rows are eligible. A row that
+    already went through adoption (or push) is rejected with a
+    clear message."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    row["sync_status"] = "clean"
+    inventory_manager.insert_dataset(db, row)
+    gis = MagicMock()
+
+    with pytest.raises(agol_sync.AgolError, match="sync_status is 'clean'"):
+        agol_sync.adopt_row(
+            db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+        )
+
+
+def test_adopt_row_normalises_tags_as_set_comparison(
+    project_tree, _config_no_cache,
+) -> None:
+    """Tags compare set-equality, not list-order. Catalogue stores
+    ';'-delimited strings; AGOL stores a list. The same logical
+    set should adopt clean regardless of order."""
+    db = project_tree["db"]
+    row = _adoption_row()
+    inventory_manager.insert_dataset(db, row)
+
+    # AGOL has tags in reverse order — should still match.
+    item = _make_agol_item(
+        tags=["y2y", "test"],  # catalogue tags is 'test;y2y'
+    )
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.adopt_row(
+        db, row["dataset_id"], gis, _config_no_cache, actor="tester",
+    )
+    assert result.sync_status_after == "clean"

@@ -42,8 +42,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import taxonomy
+from . import inventory_manager, taxonomy
 from .agol_config import AgolConfig, cache_group_id
+from .utils import utc_now_iso
 
 
 # ----------------------------------------------------------------------------
@@ -2232,3 +2233,281 @@ def push_all_dirty(
         else:
             results.append(result)
     return results
+
+
+# ----------------------------------------------------------------------------
+# Adoption (Phase C)
+# ----------------------------------------------------------------------------
+
+# Field-by-field comparison for adoption. Each tuple is
+# (catalogue_field, agol_attribute, comparator) where comparator(cat, agol)
+# returns True if the values match. Order matters only for the
+# reported diff sequence (titles first, then snippet, etc.).
+def _tag_set(value: Any) -> set[str]:
+    """Normalise a tags value to a set for set-equality comparison.
+
+    Catalogue stores tags as a ``;``-delimited string. AGOL exposes
+    ``item.tags`` as a list. Trim/lowercase nothing — case matters
+    for AGOL search.
+    """
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {t.strip() for t in value.split(";") if t.strip()}
+    if isinstance(value, (list, tuple)):
+        return {str(t).strip() for t in value if str(t).strip()}
+    return {str(value).strip()}
+
+
+def _diff_adoption_fields(
+    row: dict[str, Any], item: Any,
+) -> list[tuple[str, Any, Any]]:
+    """Return per-field (field_name, agol_value, catalogue_value) diffs.
+
+    Empty list means the AGOL item matches the catalogue's intended
+    state field-for-field. A non-empty list means at least one field
+    drifted — adoption marks the row 'conflict' and the steward
+    resolves via Phase D pull.
+
+    Diff semantics:
+
+    * Strings: stripped, normalise None → '' so 'no value' on either
+      side compares equal to '' on the other.
+    * Tags: set-equality (order-independent, whitespace-trimmed).
+    * Categories: list-equality after normalising AGOL's list to a
+      single canonical display name.
+    """
+    diffs: list[tuple[str, Any, Any]] = []
+    expected = compute_item_properties(row)
+
+    def _str(v: Any) -> str:
+        return (v or "").strip() if isinstance(v, (str, type(None))) else str(v).strip()
+
+    # Title
+    cat_title = _str(expected.get("title"))
+    agol_title = _str(getattr(item, "title", None))
+    if cat_title != agol_title:
+        diffs.append(("title", agol_title, cat_title))
+
+    # Snippet (summary)
+    cat_snippet = _str(expected.get("snippet"))
+    agol_snippet = _str(getattr(item, "snippet", None))
+    if cat_snippet != agol_snippet:
+        diffs.append(("snippet", agol_snippet, cat_snippet))
+
+    # Description
+    cat_desc = _str(expected.get("description"))
+    agol_desc = _str(getattr(item, "description", None))
+    if cat_desc != agol_desc:
+        diffs.append(("description", agol_desc, cat_desc))
+
+    # Tags — set-equality.
+    cat_tags = _tag_set(expected.get("tags"))
+    agol_tags = _tag_set(getattr(item, "tags", None))
+    if cat_tags != agol_tags:
+        diffs.append(("tags", sorted(agol_tags), sorted(cat_tags)))
+
+    # Access information (acknowledgements)
+    cat_access = _str(expected.get("accessInformation"))
+    agol_access = _str(getattr(item, "accessInformation", None))
+    if cat_access != agol_access:
+        diffs.append(("accessInformation", agol_access, cat_access))
+
+    # License info (terms_of_use)
+    cat_license = _str(expected.get("licenseInfo"))
+    agol_license = _str(getattr(item, "licenseInfo", None))
+    if cat_license != agol_license:
+        diffs.append(("licenseInfo", agol_license, cat_license))
+
+    # Categories — list-equality after normalising both sides.
+    cat_cats = list(expected.get("categories") or [])
+    agol_cats = list(getattr(item, "categories", None) or [])
+    if sorted(cat_cats) != sorted(agol_cats):
+        diffs.append(("categories", agol_cats, cat_cats))
+
+    return diffs
+
+
+def adopt_row(
+    db_path: Path,
+    dataset_id: str,
+    gis,
+    config: AgolConfig,
+    *,
+    actor: str,
+) -> SyncResult:
+    """Adopt one row under sync management.
+
+    Pre-condition: the row has ``agol_item_id`` set and
+    ``sync_status='unpublished'`` (a "pre-existing AGOL item" that
+    was published manually before this integration existed). Post-
+    adoption the row is either ``'clean'`` (no drift) or
+    ``'conflict'`` (drift; Phase D pull resolves), and is now
+    under bidirectional sync management.
+
+    Adoption never mutates AGOL. It only reads the AGOL item and
+    updates the catalogue's sync-state columns + writes a
+    changelog entry. Steward decides direction at conflict
+    resolution via ``y2y agol-sync pull <id>``.
+
+    Raises ``AgolError`` if the row isn't in adoption-eligible
+    state, or if the AGOL connection fails outright (Item-missing
+    is handled in-band by marking sync_status='error').
+    """
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise AgolError(f"row {dataset_id!r} not in catalogue")
+    sync_status_before = row.get("sync_status") or "unpublished"
+    agol_item_id = row.get("agol_item_id")
+    if not agol_item_id:
+        raise AgolError(
+            f"row {dataset_id!r} has no agol_item_id; nothing to adopt"
+        )
+    if sync_status_before != "unpublished":
+        raise AgolError(
+            f"row {dataset_id!r} sync_status is {sync_status_before!r}; "
+            f"only 'unpublished' rows are eligible for adoption"
+        )
+
+    # Fetch the AGOL item. ``gis.content.get()`` returns ``None`` if
+    # the item doesn't exist on AGOL.
+    item = gis.content.get(agol_item_id)
+    now = utc_now_iso()
+    if item is None:
+        # AGOL item is gone (deleted out-of-band). Mark error so the
+        # steward can decide: re-push from catalogue or unpublish.
+        msg = (
+            f"AGOL item {agol_item_id!r} no longer exists "
+            f"(deleted out-of-band?). Use `y2y agol-sync unpublish "
+            f"{dataset_id}` to clear the catalogue link, or "
+            f"`y2y agol-sync push {dataset_id}` to re-create."
+        )
+        inventory_manager.update_dataset(
+            db_path, dataset_id,
+            {"sync_status": "error",
+             "internal_notes": _append_note(row.get("internal_notes"), f"[agol] adoption: {msg}")},
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value="unpublished",
+            new_value="error",
+            detail=f"adoption failed: {msg}",
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="adopt",
+            sync_status_before=sync_status_before,
+            sync_status_after="error",
+            agol_item_id=agol_item_id,
+            note=msg,
+            error=msg,
+        )
+
+    diffs = _diff_adoption_fields(row, item)
+    # AGOL-side "created" timestamp gives us a reasonable
+    # agol_published_at. Falls back to now if not exposed.
+    agol_published_at = (
+        getattr(item, "created", None) or now
+    )
+    # ``created`` on arcgis SDK Items is a Unix epoch millisecond
+    # integer. Convert to ISO-8601 Z form if needed.
+    if isinstance(agol_published_at, (int, float)):
+        from datetime import datetime, timezone
+        agol_published_at = datetime.fromtimestamp(
+            agol_published_at / 1000, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not diffs:
+        # Clean adoption — AGOL matches catalogue.
+        inventory_manager.update_dataset(
+            db_path, dataset_id,
+            {
+                "sync_status": "clean",
+                "last_synced_at": now,
+                # Only set agol_published_at if not already populated;
+                # don't overwrite a prior value (e.g. from a past push).
+                **({"agol_published_at": agol_published_at}
+                   if not row.get("agol_published_at") else {}),
+            },
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value="unpublished",
+            new_value="clean",
+            detail=(
+                f"adopted: AGOL item {agol_item_id!r} matches catalogue "
+                f"field-for-field. Now under sync management."
+            ),
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="adopt",
+            sync_status_before=sync_status_before,
+            sync_status_after="clean",
+            agol_item_id=agol_item_id,
+            note=f"adopted (no drift)",
+        )
+
+    # Conflict — AGOL drifted from catalogue. Steward resolves via
+    # Phase D pull. Diff summary lands in changelog as a structured
+    # multi-line note so the diff is recoverable.
+    diff_lines = [
+        f"  {field}: AGOL={agol_val!r}  catalogue={cat_val!r}"
+        for field, agol_val, cat_val in diffs
+    ]
+    diff_summary = "\n".join(diff_lines)
+    detail = (
+        f"adopted with conflict: AGOL item {agol_item_id!r} has "
+        f"{len(diffs)} field(s) that disagree with the catalogue. "
+        f"Steward resolves via `y2y agol-sync pull {dataset_id}` "
+        f"(Phase D). Diff:\n{diff_summary}"
+    )
+    inventory_manager.update_dataset(
+        db_path, dataset_id,
+        {
+            "sync_status": "conflict",
+            "last_synced_at": now,
+            **({"agol_published_at": agol_published_at}
+               if not row.get("agol_published_at") else {}),
+        },
+    )
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=now,
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=row.get("file_path"),
+        field_changed="sync_status",
+        old_value="unpublished",
+        new_value="conflict",
+        detail=detail,
+    )
+    return SyncResult(
+        dataset_id=dataset_id,
+        action="adopt",
+        sync_status_before=sync_status_before,
+        sync_status_after="conflict",
+        agol_item_id=agol_item_id,
+        note=f"adopted with conflict ({len(diffs)} field(s) drifted)",
+    )
+
+
+def _append_note(prior: str | None, addition: str) -> str:
+    """Append ``addition`` to ``prior`` (or use ``addition`` if empty)."""
+    prior = (prior or "").strip()
+    if not prior:
+        return addition
+    return f"{prior}\n{addition}"

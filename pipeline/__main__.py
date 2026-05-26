@@ -943,5 +943,56 @@ def _print_push_results(results, *, dry_run: bool) -> None:
                     console.print(f"      {line}")
 
 
+@agol_sync_group.command("adopt")
+@click.argument("dataset_id")
+@click.option(
+    "--actor", default=None,
+    help="Name to record as the changelog actor. Defaults to $USER.",
+)
+@click.pass_context
+def agol_sync_adopt(
+    ctx: click.Context, dataset_id: str, actor: str | None,
+) -> None:
+    """Bring one pre-existing AGOL item under catalogue sync management.
+
+    For a row whose ``agol_item_id`` is set but ``sync_status`` is
+    still ``'unpublished'`` (typically published to AGOL manually
+    before this integration existed), fetch the AGOL item and diff
+    it against the catalogue field-by-field. Mark the row
+    ``'clean'`` (no drift) or ``'conflict'`` (drift; resolve via
+    Phase D pull). Adoption never mutates AGOL.
+
+    Migration 009 runs this same logic across every adoption
+    candidate at once. Use this ad-hoc command for one-off rows
+    that get an ``agol_item_id`` later (e.g. a steward manually
+    publishes another item and wires it into the catalogue).
+    """
+    from . import agol_config, agol_sync
+
+    db_path, _, _ = _resolve_paths(ctx.obj["root"])
+    cfg = agol_config.load_config()
+
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    try:
+        result = agol_sync.adopt_row(
+            db_path, dataset_id, gis, cfg,
+            actor=actor or _default_actor(),
+        )
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    colour = "green" if result.sync_status_after == "clean" else "yellow"
+    console.print(
+        f"[{colour}]adopt complete[/{colour}] — "
+        f"{result.dataset_id} → sync_status={result.sync_status_after}"
+    )
+    console.print(f"  {result.note}")
+    _auto_export_xlsx(ctx)
+
+
 if __name__ == "__main__":
     cli()
