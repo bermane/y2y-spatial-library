@@ -74,6 +74,37 @@ def cli(ctx: click.Context, root: Path | None) -> None:
     ctx.obj["root"] = (root or Path.cwd()).resolve()
 
 
+def _auto_export_xlsx(ctx: click.Context) -> None:
+    """Regenerate inventory/inventory.xlsx from the current catalogue.
+
+    Called at the success path of every command that mutates
+    inventory.db so the rendered xlsx view stays current
+    automatically. The xlsx is NOT a source of truth — it's a
+    snapshot that stewards open in Excel to inspect catalogue
+    state. Without auto-export, the file drifts behind the DB and
+    stewards working from it see stale data.
+
+    Silent on failure: we don't want a stuck Excel lock or a
+    transient I/O hiccup to break the primary command's
+    success-reporting flow. If the export fails, the steward can
+    still manually run ``y2y export-xlsx`` later.
+
+    Skipped when the catalogue file doesn't exist (e.g., a CLI
+    invocation before the first migration).
+    """
+    from . import export_xlsx
+
+    try:
+        db_path, _, default_xlsx = _resolve_paths(ctx.obj["root"])
+        if not db_path.exists():
+            return
+        export_xlsx.export(db_path, default_xlsx)
+    except Exception:
+        # Auto-export is best-effort. Don't surface the failure;
+        # the primary command's success message already printed.
+        pass
+
+
 # --- ingest ------------------------------------------------------------
 
 @cli.command()
@@ -142,6 +173,9 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
                     f"`{rem.expected_vtpk_path.name}`, drop in "
                     f"`queue/incoming/`, then run `y2y ingest`."
                 )
+        # Auto-export the rendered xlsx so it stays current.
+        if result.promoted:
+            _auto_export_xlsx(ctx)
         return
 
     scan_result = ingest_mod.scan(
@@ -161,6 +195,7 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
         console.print(f"  rejections:   [cyan]{rejected}[/cyan] (see .rejected.yaml sidecars)")
 
     # --- VTPK ingest results (rev 3) ---
+    moved: list = []
     if scan_result.vtpk_results:
         moved = [r for r in scan_result.vtpk_results if r.status == "moved"]
         problems = [r for r in scan_result.vtpk_results if r.status != "moved"]
@@ -177,6 +212,13 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             )
             for r in problems:
                 console.print(f"  · [{r.status}] {r.vtpk_path.name}: {r.message}")
+
+    # Auto-export xlsx if any VTPK ingest moved a file (changelog
+    # was appended). Phase 1 scan itself only writes to
+    # pending.xlsx, not the catalogue, so we skip auto-export when
+    # only source datasets were staged.
+    if moved:
+        _auto_export_xlsx(ctx)
 
 
 # --- lifecycle: update / rename / refresh / tombstone -----------------
@@ -218,6 +260,7 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
         f"dataset_id=[bold]{dataset_id}[/bold] fields=[bold]{list(fields)}[/bold]"
     )
     console.print(f"  date_modified: [cyan]{row.get('date_modified')}[/cyan]")
+    _auto_export_xlsx(ctx)
 
 
 @cli.command()
@@ -248,6 +291,7 @@ def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None
         f"[green]rename complete[/green] — "
         f"dataset_id=[bold]{dataset_id}[/bold] file_path=[cyan]{row['file_path']}[/cyan]"
     )
+    _auto_export_xlsx(ctx)
 
 
 @cli.command()
@@ -281,6 +325,7 @@ def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
         f"dataset_id=[bold]{dataset_id}[/bold]"
     )
     console.print(f"  date_modified: [cyan]{row.get('date_modified')}[/cyan]")
+    _auto_export_xlsx(ctx)
 
 
 @cli.command()
@@ -316,6 +361,7 @@ def tombstone(
         f"[yellow]tombstoned[/yellow] dataset_id=[bold]{dataset_id}[/bold] "
         "(file deleted, inventory row preserved as audit record)"
     )
+    _auto_export_xlsx(ctx)
 
 
 # --- reconcile ---------------------------------------------------------
@@ -383,6 +429,12 @@ def reconcile(
         )
     console.print(f"  report: [cyan]{result.report_path}[/cyan]")
 
+    # Reconcile mutates the catalogue when it auto-resolves drift
+    # via lifecycle.refresh. Auto-export so the rendered xlsx
+    # picks up the refreshed snapshots.
+    if result.auto_resolved:
+        _auto_export_xlsx(ctx)
+
     if not fix_renames:
         return
 
@@ -420,6 +472,8 @@ def reconcile(
         f"[green]fix-renames done[/green] — applied: [bold]{applied}[/bold], "
         f"skipped: [bold]{skipped}[/bold]"
     )
+    if applied:
+        _auto_export_xlsx(ctx)
 
 
 # --- export-xlsx -------------------------------------------------------
@@ -811,6 +865,9 @@ def agol_sync_push(
             sharing_override=sharing, dry_run=dry_run,
         )
         _print_push_results(results, dry_run=dry_run)
+        # Auto-export if any row actually mutated the catalogue.
+        if not dry_run and any(r.error is None for r in results):
+            _auto_export_xlsx(ctx)
         return
 
     # Single-row push.
@@ -829,6 +886,11 @@ def agol_sync_push(
         raise click.ClickException(str(exc))
 
     _print_push_results([result], dry_run=dry_run)
+    # push mutates the catalogue's agol_item_id / sync_status /
+    # last_synced_at; auto-export so the xlsx view reflects it.
+    # Dry-runs don't mutate, skip.
+    if not dry_run:
+        _auto_export_xlsx(ctx)
 
 
 def _print_push_results(results, *, dry_run: bool) -> None:
