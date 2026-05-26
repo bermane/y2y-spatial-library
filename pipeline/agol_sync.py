@@ -2236,6 +2236,136 @@ def push_all_dirty(
 
 
 # ----------------------------------------------------------------------------
+# Auto-sync hook (Phase C.2)
+# ----------------------------------------------------------------------------
+
+# sync_status values that the auto-push hook will actually attempt. Any
+# other state means a previous push left the row in a non-pushable
+# place (pending_pull / conflict / error) and the steward must
+# intervene before auto-sync touches it again.
+_AUTO_PUSHABLE_STATUSES: frozenset[str] = frozenset({
+    "unpublished", "pending_push",
+})
+
+
+def try_auto_push(
+    db_path: Path,
+    dataset_id: str,
+    *,
+    library_root: Path,
+    actor: str,
+    trigger: str,
+) -> SyncResult | None:
+    """Best-effort AGOL push fired after a catalogue mutation.
+
+    The auto-sync contract (see DESIGN.md §15) is:
+
+    * Catalogue mutations always succeed independent of AGOL state —
+      the catalogue is the source of truth.
+    * If ``Y2Y_AGOL_AUTO_PUSH=false`` (env-var, default ``true``), the
+      hook is a no-op.
+    * Otherwise, attempt to load the AGOL config + open a GIS
+      connection + run ``push()``. Any failure (no profile yet,
+      offline, AGOL 5xx, validation error) is **swallowed**. The
+      catalogue stays in its post-mutation state (``sync_status``
+      already marked ``pending_push`` by ``_maybe_mark_dirty`` if it
+      was ``clean``); a follow-up ``y2y agol-sync reconcile`` or
+      ``push --all-dirty`` retries it.
+    * On any non-trivial failure we append a structured ``metadata``
+      changelog entry so the audit trail records *why* the auto-push
+      didn't land.
+
+    Returns the ``SyncResult`` on a successful push, or ``None`` for
+    any of: auto-push disabled, row not pushable, AGOL contact failed.
+
+    Never raises — the catalogue mutation that triggered this hook
+    is already committed and must not be undone by an AGOL failure.
+    """
+    from . import agol_config, inventory_manager
+    from .utils import utc_now_iso
+
+    # --- check config + row state without touching AGOL --------------
+    try:
+        config = agol_config.load_config()
+    except Exception:
+        # Config malformed → silently skip auto-push. The steward will
+        # hit the explicit `y2y agol-sync` command and get a real error.
+        return None
+
+    if not config.auto_push:
+        return None
+
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        return None
+    if row.get("status") != "active":
+        return None
+    sync_status = row.get("sync_status") or "unpublished"
+    if sync_status not in _AUTO_PUSHABLE_STATUSES:
+        return None
+
+    # If the row has no agol_format pinned yet, there's nothing
+    # meaningful to publish; skip silently.
+    if not row.get("agol_format"):
+        return None
+
+    # --- open GIS + attempt push (best-effort) -----------------------
+    try:
+        gis = get_gis(config)
+    except Exception as exc:
+        # No profile, expired tokens, offline — write a single
+        # changelog note and return. We don't spam every mutation;
+        # one note per attempt is enough.
+        try:
+            inventory_manager.append_changelog(
+                db_path,
+                timestamp=utc_now_iso(),
+                action="metadata",
+                dataset_id=dataset_id,
+                actor=actor,
+                path=str(row.get("file_path") or "—"),
+                detail=(
+                    f"auto-push deferred after {trigger}: AGOL connection "
+                    f"unavailable ({exc.__class__.__name__}). Row stays "
+                    f"sync_status={sync_status!r}; next "
+                    f"`y2y agol-sync reconcile` will retry."
+                ),
+            )
+        except Exception:
+            pass
+        return None
+
+    try:
+        result = push(
+            db_path, dataset_id, gis, config,
+            library_root=library_root, actor=actor,
+        )
+        return result
+    except Exception as exc:
+        # Push failed mid-flight (AGOL 5xx, validation error, etc.).
+        # The row's sync_status is whatever push() left it as; we
+        # just write an audit note.
+        try:
+            inventory_manager.append_changelog(
+                db_path,
+                timestamp=utc_now_iso(),
+                action="metadata",
+                dataset_id=dataset_id,
+                actor=actor,
+                path=str(row.get("file_path") or "—"),
+                detail=(
+                    f"auto-push attempt after {trigger} failed: {exc}. "
+                    f"Steward action: re-run `y2y agol-sync push "
+                    f"{dataset_id}` to surface the error directly, or "
+                    f"`y2y agol-sync reconcile` to retry in a batch."
+                ),
+            )
+        except Exception:
+            pass
+        return None
+
+
+# ----------------------------------------------------------------------------
 # Adoption (Phase C)
 # ----------------------------------------------------------------------------
 

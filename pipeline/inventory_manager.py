@@ -312,6 +312,70 @@ def append_changelog(
             ) from exc
 
 
+# ----------------------------------------------------------------------------
+# AGOL auto-sync helpers
+# ----------------------------------------------------------------------------
+
+def _maybe_mark_dirty(
+    db_path: Path,
+    dataset_id: str,
+    *,
+    actor: str,
+    trigger: str,
+) -> str | None:
+    """Mark a row's ``sync_status='pending_push'`` if it was ``clean``.
+
+    Called by lifecycle and ingest after a successful catalogue mutation
+    so the AGOL integration knows the row has drifted from AGOL and
+    needs a push. The next auto-push attempt (or the next
+    ``y2y agol-sync push --all-dirty``) picks it up.
+
+    No-op when the prior status is anything other than ``clean``:
+
+    - ``unpublished``       → already not-on-AGOL; push() handles it.
+    - ``pending_push``      → already flagged.
+    - ``pending_pull`` /
+      ``conflict``          → blocked by Phase-D resolution; we don't
+                              clobber that.
+    - ``error``             → already a manual-recovery state.
+
+    Records a ``metadata`` changelog entry capturing the auto-mark so
+    the audit trail shows why the row became dirty.
+
+    Returns the new sync_status, or ``None`` if no change was made.
+    """
+    row = get_dataset(db_path, dataset_id)
+    if row is None:
+        return None
+    prior = row.get("sync_status") or "unpublished"
+    if prior != "clean":
+        return None
+
+    update_dataset(db_path, dataset_id, {"sync_status": "pending_push"})
+    append_changelog(
+        db_path,
+        timestamp=_utc_now(),
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=str(row.get("file_path") or "—"),
+        detail=(
+            f"sync_status auto-marked pending_push after {trigger}; "
+            f"next auto-push or `y2y agol-sync reconcile` will republish."
+        ),
+        field_changed="sync_status",
+        old_value=prior,
+        new_value="pending_push",
+    )
+    return "pending_push"
+
+
+def _utc_now() -> str:
+    """Indirection so this module doesn't import ``utils`` at module load."""
+    from . import utils
+    return utils.utc_now_iso()
+
+
 def load_changelog(db_path: Path) -> list[dict[str, Any]]:
     """Return every changelog row, oldest first. For audit / export."""
     db_path = Path(db_path)

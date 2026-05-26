@@ -753,3 +753,307 @@ def test_adopt_row_normalises_tags_as_set_comparison(
         db, row["dataset_id"], gis, _config_no_cache, actor="tester",
     )
     assert result.sync_status_after == "clean"
+
+
+# =============================================================================
+# Auto-sync hooks (Phase C.2)
+# =============================================================================
+
+# ----- inventory_manager._maybe_mark_dirty -----------------------------------
+
+def test_maybe_mark_dirty_promotes_clean_to_pending_push(project_tree) -> None:
+    """The clean → pending_push transition is the auto-sync entry point.
+
+    Any catalogue mutation on a 'clean' row signals the integration
+    that AGOL is now out of date and a push is owed.
+    """
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_dirty_test", file_path="Water/x.gpkg",
+        sync_status="clean",
+        agol_item_id="abc123", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = inventory_manager._maybe_mark_dirty(
+        db, row["dataset_id"], actor="tester", trigger="update",
+    )
+    assert result == "pending_push"
+
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == "pending_push"
+
+    # A changelog entry captures the auto-mark.
+    log = inventory_manager.load_changelog(db)
+    auto_marks = [r for r in log if "auto-marked pending_push" in (r["note"] or "")]
+    assert len(auto_marks) == 1
+    assert auto_marks[0]["field_changed"] == "sync_status"
+    assert auto_marks[0]["old_value"] == "clean"
+    assert auto_marks[0]["new_value"] == "pending_push"
+
+
+@pytest.mark.parametrize("prior_status", [
+    "unpublished", "pending_push", "pending_pull", "conflict", "error",
+])
+def test_maybe_mark_dirty_leaves_non_clean_rows_alone(
+    project_tree, prior_status,
+) -> None:
+    """Only 'clean' rows transition. Anything else stays put — pulls,
+    conflicts, and existing pending_push/error states all encode
+    steward-relevant information that auto-marking would erase."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_dirty_skip", file_path="Water/x.gpkg",
+        sync_status=prior_status,
+        agol_item_id="abc123", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = inventory_manager._maybe_mark_dirty(
+        db, row["dataset_id"], actor="tester", trigger="update",
+    )
+    assert result is None
+
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == prior_status
+
+
+def test_maybe_mark_dirty_tolerates_missing_row(project_tree) -> None:
+    """A typo'd dataset_id is a no-op, not a crash. Lifecycle callers
+    rely on this being safe to call unconditionally after every
+    mutation."""
+    from pipeline import inventory_manager
+    assert inventory_manager._maybe_mark_dirty(
+        project_tree["db"], "ds_does_not_exist",
+        actor="tester", trigger="update",
+    ) is None
+
+
+# ----- agol_sync.try_auto_push -----------------------------------------------
+
+def test_try_auto_push_skips_when_auto_push_disabled(
+    project_tree, monkeypatch,
+) -> None:
+    """If the steward sets Y2Y_AGOL_AUTO_PUSH=false, the hook returns
+    immediately without touching AGOL — even for pushable rows."""
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "false")
+    # Even if push() would raise, we should never get there.
+    monkeypatch.setattr(agol_sync, "push", MagicMock(side_effect=AssertionError(
+        "push should not be called when auto_push is disabled"
+    )))
+
+    result = agol_sync.try_auto_push(
+        project_tree["db"], "ds_anything",
+        library_root=project_tree["library"],
+        actor="tester", trigger="update",
+    )
+    assert result is None
+
+
+def test_try_auto_push_skips_when_row_not_pushable(
+    project_tree, monkeypatch,
+) -> None:
+    """Rows in 'pending_pull' / 'conflict' / 'error' are blocked from
+    auto-push — they need manual resolution. The hook silently skips."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "true")
+    monkeypatch.setattr(agol_sync, "push", MagicMock(side_effect=AssertionError(
+        "push should not be called for non-pushable status"
+    )))
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_blocked", file_path="Water/x.gpkg",
+        sync_status="conflict",
+        agol_item_id="abc123", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.try_auto_push(
+        db, row["dataset_id"],
+        library_root=project_tree["library"], actor="tester", trigger="update",
+    )
+    assert result is None
+
+
+def test_try_auto_push_skips_when_agol_format_unset(
+    project_tree, monkeypatch,
+) -> None:
+    """A row with sync_status='unpublished' but no agol_format pinned
+    has no meaningful target — skip without contacting AGOL."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "true")
+    monkeypatch.setattr(agol_sync, "push", MagicMock(side_effect=AssertionError(
+        "push should not be called when agol_format is unset"
+    )))
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_no_target", file_path="Water/x.gpkg",
+        sync_status="unpublished",
+        agol_format=None,
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.try_auto_push(
+        db, row["dataset_id"],
+        library_root=project_tree["library"], actor="tester", trigger="update",
+    )
+    assert result is None
+
+
+def test_try_auto_push_swallows_gis_connection_failure(
+    project_tree, monkeypatch,
+) -> None:
+    """If get_gis() raises (no profile, offline, expired tokens), the
+    hook writes a deferred-push changelog entry and returns None. The
+    catalogue row is unchanged."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "true")
+    monkeypatch.setattr(
+        agol_sync, "get_gis",
+        MagicMock(side_effect=agol_sync.AgolAuthError("no profile")),
+    )
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_offline", file_path="Water/x.gpkg",
+        sync_status="pending_push",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.try_auto_push(
+        db, row["dataset_id"],
+        library_root=project_tree["library"], actor="tester", trigger="update",
+    )
+    assert result is None
+
+    # Row's sync_status is unchanged.
+    fresh = inventory_manager.get_dataset(db, row["dataset_id"])
+    assert fresh["sync_status"] == "pending_push"
+
+    # Changelog records the deferred attempt.
+    log = inventory_manager.load_changelog(db)
+    deferred = [r for r in log if "auto-push deferred" in (r["note"] or "")]
+    assert len(deferred) == 1
+    assert "AgolAuthError" in deferred[0]["note"]
+
+
+def test_try_auto_push_swallows_push_failure(
+    project_tree, monkeypatch,
+) -> None:
+    """If push() raises mid-flight (AGOL 5xx, validation error), the
+    hook catches the exception, writes an audit changelog entry, and
+    returns None. The catalogue mutation that triggered the hook is
+    NOT rolled back — auto-sync is best-effort."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "true")
+    monkeypatch.setattr(agol_sync, "get_gis", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        agol_sync, "push",
+        MagicMock(side_effect=agol_sync.AgolError("AGOL returned 503")),
+    )
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_push_fail", file_path="Water/x.gpkg",
+        sync_status="pending_push",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.try_auto_push(
+        db, row["dataset_id"],
+        library_root=project_tree["library"], actor="tester", trigger="update",
+    )
+    assert result is None
+
+    log = inventory_manager.load_changelog(db)
+    failures = [r for r in log if "auto-push attempt" in (r["note"] or "") and
+                "failed" in (r["note"] or "")]
+    assert len(failures) == 1
+    assert "AGOL returned 503" in failures[0]["note"]
+
+
+def test_try_auto_push_fires_push_when_everything_is_set_up(
+    project_tree, monkeypatch,
+) -> None:
+    """The happy path: row is pushable, agol_format set, GIS connects,
+    push() returns a SyncResult. The hook returns it."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "true")
+    monkeypatch.setattr(agol_sync, "get_gis", MagicMock(return_value=MagicMock()))
+    fake_result = agol_sync.SyncResult(
+        dataset_id="ds_happy",
+        action="push",
+        sync_status_before="pending_push",
+        sync_status_after="clean",
+        agol_item_id="abc123",
+        note="ok",
+    )
+    push_mock = MagicMock(return_value=fake_result)
+    monkeypatch.setattr(agol_sync, "push", push_mock)
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_happy", file_path="Water/x.gpkg",
+        sync_status="pending_push",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.try_auto_push(
+        db, row["dataset_id"],
+        library_root=project_tree["library"], actor="tester", trigger="update",
+    )
+    assert result is fake_result
+    push_mock.assert_called_once()
+
+
+# ----- lifecycle.update integration -------------------------------------------
+
+def test_lifecycle_update_auto_marks_pending_push_on_clean_row(
+    project_tree, populate_dataset, monkeypatch,
+) -> None:
+    """End-to-end: a steward edits a 'clean' row → sync_status moves
+    to 'pending_push' automatically. Auto-push attempt is gated by
+    a separate flag; this test asserts the dirty-mark itself."""
+    from pipeline import inventory_manager, lifecycle
+
+    # Make sure no actual push happens.
+    monkeypatch.setenv("Y2Y_AGOL_AUTO_PUSH", "false")
+
+    db = project_tree["db"]
+    # populate_dataset is a callable factory — invoke it to scan + approve
+    # a fresh GPKG and produce a 'unpublished' row. Then promote to 'clean'
+    # so we can observe the auto-mark trigger.
+    dataset_id, _ = populate_dataset()
+    inventory_manager.update_dataset(db, dataset_id, {
+        "sync_status": "clean", "agol_item_id": "abc123",
+    })
+
+    lifecycle.update(
+        db, dataset_id=dataset_id,
+        fields={"summary": "Revised summary text"},
+        actor="tester",
+    )
+
+    fresh = inventory_manager.get_dataset(db, dataset_id)
+    assert fresh["sync_status"] == "pending_push"

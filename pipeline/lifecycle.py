@@ -78,12 +78,22 @@ def update(
     dataset_id: str,
     fields: dict[str, Any],
     actor: str,
+    library_root: Path | None = None,
+    auto_push: bool = False,
 ) -> dict[str, Any]:
     """Update specified fields on an inventory row.
 
     Only fields in :data:`UPDATABLE_FIELDS` may be changed. Locked
     columns (checksum, size, mtime, etc.) and movement-bound columns
     (file_path, category, subcategory) are rejected with a clear error.
+
+    On successful mutation, the row's ``sync_status`` is auto-marked
+    ``pending_push`` if it was previously ``clean`` (see
+    :func:`inventory_manager._maybe_mark_dirty`). When ``auto_push``
+    is true and ``library_root`` is supplied, a best-effort AGOL push
+    is attempted via :func:`agol_sync.try_auto_push` — failures are
+    swallowed so the catalogue mutation always succeeds independent
+    of AGOL state.
 
     Returns the updated row dict (re-read after the change).
     """
@@ -135,6 +145,19 @@ def update(
         path=str(target.get("file_path") or "—"),
         detail=detail,
     )
+
+    # AGOL auto-sync: mark dirty + best-effort push. Swallows AGOL
+    # failures so the catalogue mutation never depends on AGOL state.
+    inventory_manager._maybe_mark_dirty(
+        db_path, dataset_id, actor=actor, trigger="update",
+    )
+    if auto_push and library_root is not None:
+        from . import agol_sync
+        agol_sync.try_auto_push(
+            db_path, dataset_id,
+            library_root=library_root, actor=actor, trigger="update",
+        )
+
     return _require_row(db_path, dataset_id)
 
 
@@ -147,6 +170,7 @@ def rename(
     dataset_id: str,
     new_path: str,
     actor: str,
+    auto_push: bool = False,
 ) -> dict[str, Any]:
     """Move a file within library/ and update the inventory's ``file_path``.
 
@@ -255,6 +279,18 @@ def rename(
         old_value=old_path,
         new_value=new_path,
     )
+
+    # AGOL auto-sync: mark dirty + best-effort push.
+    inventory_manager._maybe_mark_dirty(
+        db_path, dataset_id, actor=actor, trigger="rename",
+    )
+    if auto_push:
+        from . import agol_sync
+        agol_sync.try_auto_push(
+            db_path, dataset_id,
+            library_root=library_root, actor=actor, trigger="rename",
+        )
+
     return _require_row(db_path, dataset_id)
 
 
@@ -330,6 +366,7 @@ def refresh(
     *,
     dataset_id: str,
     actor: str,
+    auto_push: bool = False,
 ) -> dict[str, Any]:
     """Re-stat the canonical file in library/ and update the inventory snapshot.
 
@@ -412,4 +449,16 @@ def refresh(
         path=file_path,
         detail=f"snapshot refreshed from disk: {detail}",
     )
+
+    # AGOL auto-sync: mark dirty + best-effort push.
+    inventory_manager._maybe_mark_dirty(
+        db_path, dataset_id, actor=actor, trigger="refresh",
+    )
+    if auto_push:
+        from . import agol_sync
+        agol_sync.try_auto_push(
+            db_path, dataset_id,
+            library_root=library_root, actor=actor, trigger="refresh",
+        )
+
     return _require_row(db_path, dataset_id)

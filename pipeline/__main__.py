@@ -140,6 +140,7 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             result = ingest_mod.approve(
                 processing, library, db_path,
                 actor=actor or _default_actor(),
+                auto_push=True,
             )
         except inventory_manager.InventoryLockedError as exc:
             raise click.ClickException(str(exc))
@@ -257,13 +258,14 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
         raise click.UsageError("Provide at least one --set key=value")
 
     fields = _parse_set_pairs(set_pairs)
-    db_path, _, _ = _resolve_paths(ctx.obj["root"])
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
 
     try:
         row = lifecycle.update(
             db_path,
             dataset_id=dataset_id, fields=fields,
             actor=actor or _default_actor(),
+            library_root=library, auto_push=True,
         )
     except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
@@ -296,6 +298,7 @@ def rename(ctx: click.Context, dataset_id: str, new_path: str, actor: str | None
             db_path, library,
             dataset_id=dataset_id, new_path=new_path,
             actor=actor or _default_actor(),
+            auto_push=True,
         )
     except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
@@ -329,6 +332,7 @@ def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
         row = lifecycle.refresh(
             db_path, library,
             dataset_id=dataset_id, actor=actor or _default_actor(),
+            auto_push=True,
         )
     except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))

@@ -287,11 +287,18 @@ def approve(
     *,
     actor: str,
     archived_dir: Path | None = None,
+    auto_push: bool = False,
 ) -> ApproveResult:
     """Phase 3: transform → validate → snapshot → promote → archive source.
 
     ``db_path`` points at ``inventory/inventory.db`` (the SQLite
     catalogue). The inventory and changelog are both inside it.
+
+    When ``auto_push`` is true, each successfully-promoted row fires
+    a best-effort AGOL push via :func:`agol_sync.try_auto_push` —
+    AGOL failures never block promotion (the catalogue is the source
+    of truth). The CLI's ``y2y ingest --approve`` sets this to True
+    by default; tests and library callers leave it False.
     """
     pending_path = processing_dir / pending_sheet.PENDING_FILENAME
     if archived_dir is None:
@@ -364,7 +371,9 @@ def approve(
             continue
 
         try:
-            _promote(row, target_path, library_root, db_path, actor=actor)
+            _promote(
+                row, target_path, library_root, db_path, actor=actor,
+            )
             # If a VTPK was paired with this GPKG at scan time, it's
             # now in processing/<dataset_id>/. Promote it to
             # library/vtpk/ BEFORE _archive_source moves the staging
@@ -393,6 +402,20 @@ def approve(
                 reminder = _vtpk_reminder_for_row(fresh_row, library_root)
                 if reminder is not None:
                     vtpk_reminders.append(reminder)
+            # AGOL auto-sync: best-effort push of the freshly-approved
+            # row. Fires AFTER the paired VTPK (if any) has been
+            # placed at library/vtpk/<stem>.vtpk so VTL pushes find
+            # what they need. For rows with a missing VTPK,
+            # try_auto_push falls through silently — the row stays
+            # 'unpublished' and the next reconcile picks it up once
+            # the steward drops the VTPK in queue/incoming/.
+            if auto_push and fresh_row is not None:
+                from . import agol_sync
+                agol_sync.try_auto_push(
+                    db_path, str(row["dataset_id"]),
+                    library_root=library_root, actor=actor,
+                    trigger="ingest-approve",
+                )
         except Exception as exc:  # pragma: no cover — defensive
             row[pending_sheet.READY_COLUMN] = False
             row[pending_sheet.ERROR_COLUMN] = f"promotion failed: {exc}"
@@ -995,6 +1018,11 @@ def _promote(
             f"source: {row.get('source_format')} '{row.get('source_filename')}'."
         ),
     )
+
+    # NOTE: AGOL auto-push for newly-approved rows happens in
+    # approve() AFTER _maybe_promote_paired_vtpk lands the VTPK at
+    # its canonical location — pushing a VTL row from here would
+    # fail because the VTPK isn't on disk yet.
     return library_full
 
 
