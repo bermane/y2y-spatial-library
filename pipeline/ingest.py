@@ -505,7 +505,19 @@ _REQUIRED_NON_EMPTY = (
     pending_sheet.TARGET_FILENAME_COLUMN,
     "status", "data_steward",
     "summary", "description", "tags", "terms_of_use", "acknowledgements",
+    # agol_format is pre-filled by _build_row from format (vector →
+    # feature-layer, raster → imagery-layer); the steward may
+    # override to vector-tile-layer. Empty values shouldn't reach
+    # the catalogue — the column has a CHECK enum + downstream push
+    # uses it to pick the publish path.
+    "agol_format",
 )
+
+# Allowed values for agol_format. Mirrors the CHECK constraint
+# defined in pipeline/schema.sql.
+_AGOL_FORMAT_VALUES = frozenset({
+    "feature-layer", "vector-tile-layer", "imagery-layer",
+})
 
 
 def _is_ready(row: dict[str, Any]) -> bool:
@@ -573,6 +585,16 @@ def _validate_declarations(row: dict[str, Any], processing_dir: Path) -> list[st
     if status and status not in taxonomy.INGEST_STATUSES:
         errors.append(
             f"status '{status}' is not allowed at ingest; use 'active' or 'deprecated'"
+        )
+
+    # agol_format enum (matches schema.sql CHECK). The non-empty
+    # check is handled by _REQUIRED_NON_EMPTY; this rejects values
+    # that are present but invalid.
+    agol_fmt = row.get("agol_format")
+    if agol_fmt and agol_fmt not in _AGOL_FORMAT_VALUES:
+        errors.append(
+            f"agol_format {agol_fmt!r} is not allowed; "
+            f"must be one of {sorted(_AGOL_FORMAT_VALUES)}"
         )
 
     # Classification: must match the target type.

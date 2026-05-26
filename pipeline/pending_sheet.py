@@ -80,13 +80,15 @@ COLUMNS: list[tuple[str, str]] = [
     ("tags", "required"),
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
-    # AGOL publish target sits with the steward-authored metadata
+    # AGOL publish format sits with the steward-authored metadata
     # block (immediately after acknowledgements, per steward
     # preference 2026-05-27). Auto-prefilled from format:
     # ``feature-layer`` for vectors, ``imagery-layer`` for rasters.
     # Steward overrides to ``vector-tile-layer`` for large vectors
-    # that should be delivered as cached tiles. See DESIGN.md §15.
-    ("agol_format", "overridable"),
+    # that should be delivered as cached tiles. Coloured
+    # "required" — ingest.approve() rejects empty/invalid values.
+    # See DESIGN.md §15.
+    ("agol_format", "required"),
     ("data_steward", "required"),
     # 6. optional
     ("agol_item_id", "optional"),

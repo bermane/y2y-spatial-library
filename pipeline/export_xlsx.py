@@ -48,13 +48,12 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("tags", "required"),
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
-    # agol_format sits with the steward-authored metadata block (and
-    # next to acknowledgements specifically per steward preference)
-    # because the steward picks the publish target at ingest time
-    # rather than at push time. Sibling AGOL state columns
-    # (agol_item_id, agol_published_at, last_synced_at, sync_status)
-    # stay grouped further down with the rest of the AGOL linkage.
-    ("agol_format", "overridable"),
+    # agol_format sits with the steward-authored metadata block
+    # (next to acknowledgements). Coloured "required" to match the
+    # other must-have steward inputs — the catalogue's CHECK enum
+    # rejects NULL/invalid values at insert, and ingest._validate_declarations
+    # rejects empty/invalid values at approve.
+    ("agol_format", "required"),
     ("data_steward", "required"),
     ("internal_notes", "optional"),
     # lifecycle

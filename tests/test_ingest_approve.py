@@ -178,6 +178,37 @@ def test_approve_fails_on_invalid_category(project_tree, valid_gpkg_factory) -> 
     assert "category" in err
 
 
+def test_approve_fails_when_agol_format_empty(project_tree, valid_gpkg_factory) -> None:
+    """agol_format must be present at approve time. It's pre-filled
+    by _build_row from the source format (vector → feature-layer,
+    raster → imagery-layer), but a steward who clears the cell or
+    types whitespace gets rejected."""
+    pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    _fill_required(row)
+    row["agol_format"] = None
+    pending_sheet.save_pending(pending_path, [row])
+
+    assert _approve(project_tree).failed == 1
+    err = pending_sheet.load_pending(pending_path)[0]["_validation_error"] or ""
+    assert "agol_format" in err
+
+
+def test_approve_fails_when_agol_format_invalid(project_tree, valid_gpkg_factory) -> None:
+    """agol_format must be one of the three enum values
+    (feature-layer / vector-tile-layer / imagery-layer). Anything
+    else is rejected with an actionable error before any
+    transformation runs."""
+    pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    _fill_required(row)
+    row["agol_format"] = "not-a-real-target"
+    pending_sheet.save_pending(pending_path, [row])
+
+    assert _approve(project_tree).failed == 1
+    err = pending_sheet.load_pending(pending_path)[0]["_validation_error"] or ""
+    assert "agol_format" in err
+    assert "not allowed" in err or "not-a-real-target" in err
+
+
 def test_approve_fails_species_without_subcategory(project_tree, valid_gpkg_factory) -> None:
     pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
     _fill_required(row, category="Species", subcategory=None)
