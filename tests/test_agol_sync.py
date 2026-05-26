@@ -1057,3 +1057,257 @@ def test_lifecycle_update_auto_marks_pending_push_on_clean_row(
 
     fresh = inventory_manager.get_dataset(db, dataset_id)
     assert fresh["sync_status"] == "pending_push"
+
+
+# =============================================================================
+# reconcile_bidirectional (Phase C.3)
+# =============================================================================
+
+def test_reconcile_pushes_pending_push_rows(
+    project_tree, _config_no_cache, monkeypatch,
+) -> None:
+    """A 'pending_push' row gets push()'d. On success it lands in
+    the 'pushed' bucket with sync_status_after='clean'."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_pp", file_path="Water/x.gpkg",
+        sync_status="pending_push", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    fake_result = agol_sync.SyncResult(
+        dataset_id="ds_pp", action="push",
+        sync_status_before="pending_push", sync_status_after="clean",
+        agol_item_id="new123", note="published",
+    )
+    monkeypatch.setattr(agol_sync, "push", MagicMock(return_value=fake_result))
+
+    report = agol_sync.reconcile_bidirectional(
+        db, MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    assert report.counts_by_bucket.get("pushed") == 1
+    assert report.outcomes[0].sync_status_after == "clean"
+    assert report.report_path.exists()
+    text = report.report_path.read_text()
+    assert "ds_pp" in text
+    assert "pushed" in text.lower()
+
+
+def test_reconcile_marks_clean_row_pending_pull_when_agol_drifted(
+    project_tree, _config_no_cache,
+) -> None:
+    """A 'clean' row whose AGOL item.modified is newer than
+    last_synced_at is flagged pending_pull, with a changelog entry."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_drift", file_path="Water/x.gpkg",
+        sync_status="clean", agol_item_id="item123",
+        agol_format="feature-layer",
+    )
+    row["last_synced_at"] = "2026-01-01T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    # Item.modified must be parseable as ms-epoch and resolve to an
+    # ISO-8601 string AFTER 2026-01-01.
+    item = MagicMock()
+    # 2026-06-01 00:00 UTC in milliseconds
+    item.modified = 1780272000000
+
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    report = agol_sync.reconcile_bidirectional(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    fresh = inventory_manager.get_dataset(db, "ds_drift")
+    assert fresh["sync_status"] == "pending_pull"
+    assert report.counts_by_bucket.get("pulled_flag") == 1
+
+    log = inventory_manager.load_changelog(db)
+    flagged = [r for r in log if "reconcile flagged AGOL drift" in (r["note"] or "")]
+    assert len(flagged) == 1
+
+
+def test_reconcile_leaves_clean_row_alone_when_agol_in_sync(
+    project_tree, _config_no_cache,
+) -> None:
+    """A 'clean' row whose AGOL.modified is older than last_synced_at
+    stays clean. Outcome lands in 'clean_confirmed'."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_stable", file_path="Water/x.gpkg",
+        sync_status="clean", agol_item_id="item123",
+        agol_format="feature-layer",
+    )
+    row["last_synced_at"] = "2026-06-01T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    item = MagicMock()
+    # 2026-01-01 00:00 UTC in milliseconds — older than last_synced_at
+    item.modified = 1767225600000
+
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    report = agol_sync.reconcile_bidirectional(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    fresh = inventory_manager.get_dataset(db, "ds_stable")
+    assert fresh["sync_status"] == "clean"
+    assert report.counts_by_bucket.get("clean_confirmed") == 1
+
+
+def test_reconcile_marks_failed_push_as_error(
+    project_tree, _config_no_cache, monkeypatch,
+) -> None:
+    """A 'pending_push' row whose push() raises AgolError gets
+    sync_status='error' and lands in the 'push_failed' bucket."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_fail", file_path="Water/x.gpkg",
+        sync_status="pending_push", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    monkeypatch.setattr(
+        agol_sync, "push",
+        MagicMock(side_effect=agol_sync.AgolError("AGOL returned 503")),
+    )
+
+    report = agol_sync.reconcile_bidirectional(
+        db, MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    fresh = inventory_manager.get_dataset(db, "ds_fail")
+    assert fresh["sync_status"] == "error"
+    assert report.counts_by_bucket.get("push_failed") == 1
+
+
+def test_reconcile_retries_error_rows_once(
+    project_tree, _config_no_cache, monkeypatch,
+) -> None:
+    """A row stuck in 'error' gets one retry attempt. Success →
+    'error_retry_ok' bucket and sync_status='clean'."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_recovers", file_path="Water/x.gpkg",
+        sync_status="error", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    fake_result = agol_sync.SyncResult(
+        dataset_id="ds_recovers", action="push",
+        sync_status_before="pending_push", sync_status_after="clean",
+        agol_item_id="new123", note="published",
+    )
+    monkeypatch.setattr(agol_sync, "push", MagicMock(return_value=fake_result))
+
+    report = agol_sync.reconcile_bidirectional(
+        db, MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    assert report.counts_by_bucket.get("error_retry_ok") == 1
+
+
+def test_reconcile_skips_conflict_and_pending_pull(
+    project_tree, _config_no_cache,
+) -> None:
+    """Rows in 'conflict' or 'pending_pull' are reconcile-out-of-scope;
+    they need Phase D pull. Skipped with explanatory notes."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    for did, status, item_id in (
+        ("ds_c", "conflict", "abc1"),
+        ("ds_pp_pull", "pending_pull", "abc2"),
+    ):
+        row = _full_row(
+            dataset_id=did, file_path="Water/x.gpkg",
+            sync_status=status, agol_item_id=item_id,
+            agol_format="feature-layer",
+        )
+        inventory_manager.insert_dataset(db, row)
+
+    report = agol_sync.reconcile_bidirectional(
+        db, MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    assert report.counts_by_bucket.get("skipped") == 2
+
+
+def test_reconcile_dry_run_does_not_mutate_catalogue(
+    project_tree, _config_no_cache, monkeypatch,
+) -> None:
+    """Dry-run reports planned actions but does not push or mutate
+    sync_status. Useful for previewing the impact of a scheduled run."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_dryrun", file_path="Water/x.gpkg",
+        sync_status="pending_push", agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    push_mock = MagicMock(side_effect=AssertionError("dry-run should not push"))
+    monkeypatch.setattr(agol_sync, "push", push_mock)
+
+    report = agol_sync.reconcile_bidirectional(
+        db, MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+        dry_run=True,
+    )
+
+    fresh = inventory_manager.get_dataset(db, "ds_dryrun")
+    assert fresh["sync_status"] == "pending_push"
+    assert report.counts_by_bucket.get("skipped") == 1
+    push_mock.assert_not_called()
+
+
+def test_reconcile_writes_report_even_when_no_rows(
+    project_tree, _config_no_cache,
+) -> None:
+    """Empty catalogue → still produces a report (audit trail) noting
+    no active rows."""
+    report = agol_sync.reconcile_bidirectional(
+        project_tree["db"], MagicMock(), _config_no_cache,
+        library_root=project_tree["library"], actor="reconcile-cron",
+        reports_dir=project_tree["root"] / "reports",
+    )
+
+    assert report.report_path.exists()
+    assert report.outcomes == []
+    assert "no active rows" in report.report_path.read_text()

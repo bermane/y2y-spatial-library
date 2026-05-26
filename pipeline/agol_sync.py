@@ -2641,3 +2641,404 @@ def _append_note(prior: str | None, addition: str) -> str:
     if not prior:
         return addition
     return f"{prior}\n{addition}"
+
+
+# ----------------------------------------------------------------------------
+# Bidirectional reconcile (Phase C.3)
+# ----------------------------------------------------------------------------
+
+class ReconcileOutcome(NamedTuple):
+    """One row's outcome from ``reconcile_bidirectional``."""
+
+    dataset_id: str
+    title: str
+    sync_status_before: str
+    sync_status_after: str
+    bucket: str           # 'pushed' / 'push_failed' / 'pulled_flag' /
+                          # 'clean_confirmed' / 'error_retry_ok' /
+                          # 'error_retry_failed' / 'skipped'
+    note: str
+
+
+class ReconcileReport(NamedTuple):
+    """Aggregate outcome of a single ``reconcile_bidirectional`` run."""
+
+    timestamp_iso: str
+    report_path: Path
+    outcomes: list[ReconcileOutcome]
+    counts_by_bucket: dict[str, int]
+
+
+def _agol_modified_iso(item: Any) -> str | None:
+    """Convert AGOL ``Item.modified`` (Unix-ms epoch) to ISO-8601.
+
+    Returns None if the attribute is missing or unparseable. Used to
+    detect remote drift (catalogue's ``last_synced_at`` vs AGOL's
+    ``modified``).
+    """
+    raw = getattr(item, "modified", None)
+    if raw is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        # AGOL hands back milliseconds since epoch (int or float).
+        ts = float(raw) / 1000.0
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+
+
+def reconcile_bidirectional(
+    db_path: Path,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    reports_dir: Path,
+    dry_run: bool = False,
+) -> ReconcileReport:
+    """Bidirectional AGOL ↔ catalogue reconciliation.
+
+    Iterates every ``status='active'`` row and handles it based on
+    its current ``sync_status``:
+
+    * ``pending_push`` → call :func:`push`. On success the row
+      becomes ``clean``; on failure it becomes ``error`` and a
+      ``metadata`` changelog entry records why. (Mirrors the
+      semantics of ``push_all_dirty`` but folded into the unified
+      report.)
+    * ``clean`` → query AGOL's ``modified`` timestamp. If newer
+      than the catalogue's ``last_synced_at``, mark the row
+      ``pending_pull`` so the steward can resolve via Phase-D
+      pull. Otherwise emit a ``clean_confirmed`` outcome (no
+      mutation).
+    * ``error`` → retry the push once. Outcome bucket records
+      whether the retry succeeded.
+    * Anything else (``unpublished``, ``pending_pull``,
+      ``conflict``) → skipped with an explanatory note. These
+      states encode steward intent or open conflicts and aren't
+      reconcile's territory.
+
+    A markdown report is written to
+    ``reports/agol_reconcile_<timestamp>.md`` with one section per
+    bucket; the steward's weekly cron job greps it for non-empty
+    push_failed / pulled_flag sections.
+
+    Args:
+        db_path: SQLite catalogue path.
+        gis: Live ``arcgis.gis.GIS`` connection.
+        config: Loaded ``AgolConfig``.
+        library_root: Typed library root (``library/spatial``).
+        actor: Changelog actor (e.g. ``"reconcile-cron"``).
+        reports_dir: Directory for the markdown report.
+        dry_run: If True, computes outcomes without mutating the
+            catalogue or contacting AGOL for push attempts; still
+            writes a report capturing the planned actions.
+
+    Returns the ``ReconcileReport`` with per-row outcomes + bucket
+    counts. Reports are catalogue-centric: items on AGOL that have
+    no corresponding catalogue row are explicitly ignored (see
+    DESIGN.md §15, "Reconciliation scope").
+    """
+    from . import inventory_manager
+    from .utils import utc_now_iso
+
+    rows = [
+        r for r in inventory_manager.load_inventory(db_path)
+        if r.get("status") == "active"
+    ]
+
+    outcomes: list[ReconcileOutcome] = []
+    buckets: dict[str, int] = {}
+
+    def _record(outcome: ReconcileOutcome) -> None:
+        outcomes.append(outcome)
+        buckets[outcome.bucket] = buckets.get(outcome.bucket, 0) + 1
+
+    for row in rows:
+        did = row["dataset_id"]
+        title = row.get("title") or ""
+        status = row.get("sync_status") or "unpublished"
+
+        if status == "pending_push":
+            if dry_run:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="skipped",
+                    note="dry-run: would push",
+                ))
+                continue
+            try:
+                result = push(
+                    db_path, did, gis, config,
+                    library_root=library_root, actor=actor,
+                )
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status,
+                    sync_status_after=result.sync_status_after,
+                    bucket="pushed",
+                    note=result.note,
+                ))
+            except AgolError as exc:
+                inventory_manager.update_dataset(
+                    db_path, did, {"sync_status": "error"},
+                )
+                inventory_manager.append_changelog(
+                    db_path,
+                    timestamp=utc_now_iso(),
+                    action="metadata",
+                    dataset_id=did,
+                    actor=actor,
+                    path=row.get("file_path"),
+                    detail=f"reconcile push failed: {exc}",
+                    field_changed="sync_status",
+                    old_value=status,
+                    new_value="error",
+                )
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after="error",
+                    bucket="push_failed",
+                    note=str(exc),
+                ))
+            continue
+
+        if status == "clean":
+            agol_item_id = row.get("agol_item_id")
+            if not agol_item_id:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="skipped",
+                    note="clean row without agol_item_id (state inconsistent)",
+                ))
+                continue
+            try:
+                item = gis.content.get(agol_item_id)
+            except Exception as exc:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="skipped",
+                    note=f"AGOL contact failed: {exc.__class__.__name__}",
+                ))
+                continue
+            if item is None:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="skipped",
+                    note="AGOL item missing — manual triage required",
+                ))
+                continue
+
+            modified_iso = _agol_modified_iso(item)
+            last_synced = row.get("last_synced_at")
+            if (
+                modified_iso is not None
+                and last_synced is not None
+                and modified_iso > last_synced
+            ):
+                if not dry_run:
+                    inventory_manager.update_dataset(
+                        db_path, did, {"sync_status": "pending_pull"},
+                    )
+                    inventory_manager.append_changelog(
+                        db_path,
+                        timestamp=utc_now_iso(),
+                        action="metadata",
+                        dataset_id=did,
+                        actor=actor,
+                        path=row.get("file_path"),
+                        detail=(
+                            f"reconcile flagged AGOL drift: AGOL.modified"
+                            f"={modified_iso} > last_synced_at={last_synced}. "
+                            f"Steward resolves via `y2y agol-sync pull "
+                            f"{did}`."
+                        ),
+                        field_changed="sync_status",
+                        old_value=status,
+                        new_value="pending_pull",
+                    )
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status,
+                    sync_status_after="pending_pull" if not dry_run else status,
+                    bucket="pulled_flag",
+                    note=(
+                        f"AGOL.modified={modified_iso} > "
+                        f"last_synced_at={last_synced}"
+                    ),
+                ))
+            else:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="clean_confirmed",
+                    note=(
+                        f"AGOL.modified={modified_iso!r}; "
+                        f"last_synced_at={last_synced!r}"
+                    ),
+                ))
+            continue
+
+        if status == "error":
+            if dry_run:
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after=status,
+                    bucket="skipped",
+                    note="dry-run: would retry push",
+                ))
+                continue
+            # Retry once. Push refuses 'error' status by default so
+            # we flip it to 'pending_push' first; this also reflects
+            # what the steward would have done manually.
+            inventory_manager.update_dataset(
+                db_path, did, {"sync_status": "pending_push"},
+            )
+            try:
+                result = push(
+                    db_path, did, gis, config,
+                    library_root=library_root, actor=actor,
+                )
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status,
+                    sync_status_after=result.sync_status_after,
+                    bucket="error_retry_ok",
+                    note=result.note,
+                ))
+            except AgolError as exc:
+                inventory_manager.update_dataset(
+                    db_path, did, {"sync_status": "error"},
+                )
+                inventory_manager.append_changelog(
+                    db_path,
+                    timestamp=utc_now_iso(),
+                    action="metadata",
+                    dataset_id=did,
+                    actor=actor,
+                    path=row.get("file_path"),
+                    detail=f"reconcile retry failed: {exc}",
+                    field_changed="sync_status",
+                    old_value="pending_push",
+                    new_value="error",
+                )
+                _record(ReconcileOutcome(
+                    dataset_id=did, title=title,
+                    sync_status_before=status, sync_status_after="error",
+                    bucket="error_retry_failed",
+                    note=str(exc),
+                ))
+            continue
+
+        # Anything else: skip with an audit-only outcome.
+        _record(ReconcileOutcome(
+            dataset_id=did, title=title,
+            sync_status_before=status, sync_status_after=status,
+            bucket="skipped",
+            note=f"sync_status={status!r} not reconcile's territory",
+        ))
+
+    # --- write markdown report ---------------------------------------
+    timestamp_iso = utc_now_iso()
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    from .utils import utc_now_compact
+    report_path = reports_dir / f"agol_reconcile_{utc_now_compact()}.md"
+    _write_agol_reconcile_report(
+        report_path=report_path,
+        timestamp_iso=timestamp_iso,
+        outcomes=outcomes,
+        buckets=buckets,
+        dry_run=dry_run,
+    )
+
+    return ReconcileReport(
+        timestamp_iso=timestamp_iso,
+        report_path=report_path,
+        outcomes=outcomes,
+        counts_by_bucket=buckets,
+    )
+
+
+# Bucket ordering for the report (most-action-required first).
+_RECONCILE_BUCKET_ORDER: tuple[str, ...] = (
+    "push_failed",
+    "error_retry_failed",
+    "pulled_flag",
+    "pushed",
+    "error_retry_ok",
+    "clean_confirmed",
+    "skipped",
+)
+
+_RECONCILE_BUCKET_HEADINGS: dict[str, str] = {
+    "push_failed":
+        "Push failed (pending_push → error)",
+    "error_retry_failed":
+        "Error retry failed (still error)",
+    "pulled_flag":
+        "AGOL drift detected (clean → pending_pull) — needs `pull`",
+    "pushed":
+        "Pushed successfully (pending_push → clean)",
+    "error_retry_ok":
+        "Error retry succeeded (error → clean)",
+    "clean_confirmed":
+        "Clean rows confirmed unchanged on AGOL",
+    "skipped":
+        "Skipped (unpublished / pending_pull / conflict / state-inconsistent)",
+}
+
+
+def _write_agol_reconcile_report(
+    *,
+    report_path: Path,
+    timestamp_iso: str,
+    outcomes: list[ReconcileOutcome],
+    buckets: dict[str, int],
+    dry_run: bool,
+) -> None:
+    """Render the bidirectional-reconcile outcome to markdown."""
+    mode = "dry-run" if dry_run else "applied"
+    lines: list[str] = [
+        f"# AGOL bidirectional reconcile — {timestamp_iso} ({mode})",
+        "",
+        "## Summary",
+        "",
+    ]
+    if not outcomes:
+        lines.extend(["_(no active rows — nothing to reconcile)_", ""])
+    else:
+        for bucket in _RECONCILE_BUCKET_ORDER:
+            n = buckets.get(bucket, 0)
+            if n:
+                lines.append(
+                    f"- {n:3d}  {_RECONCILE_BUCKET_HEADINGS[bucket]}"
+                )
+        lines.append("")
+
+    by_bucket: dict[str, list[ReconcileOutcome]] = {}
+    for o in outcomes:
+        by_bucket.setdefault(o.bucket, []).append(o)
+
+    for bucket in _RECONCILE_BUCKET_ORDER:
+        items = by_bucket.get(bucket, [])
+        if not items:
+            continue
+        lines.extend([
+            f"## {_RECONCILE_BUCKET_HEADINGS[bucket]}",
+            "",
+        ])
+        for o in items:
+            lines.append(
+                f"- `{o.dataset_id}` {o.title!r} — "
+                f"{o.sync_status_before} → {o.sync_status_after}: {o.note}"
+            )
+        lines.append("")
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

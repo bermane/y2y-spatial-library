@@ -998,5 +998,74 @@ def agol_sync_adopt(
     _auto_export_xlsx(ctx)
 
 
+@agol_sync_group.command("reconcile")
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Compute outcomes + write report without mutating the catalogue "
+         "or attempting AGOL pushes.",
+)
+@click.option(
+    "--actor", default=None,
+    help="Name to record as the changelog actor. Defaults to $USER "
+         "(use 'reconcile-cron' from scheduled runs).",
+)
+@click.pass_context
+def agol_sync_reconcile(
+    ctx: click.Context, dry_run: bool, actor: str | None,
+) -> None:
+    """Bidirectional catalogue ↔ AGOL reconcile.
+
+    For every active row this command:
+
+    * Pushes ``pending_push`` rows (failures mark ``error``).
+    * Checks ``clean`` rows for AGOL-side drift via the item's
+      ``modified`` timestamp; flags drifted rows ``pending_pull``
+      for Phase-D resolution.
+    * Retries ``error`` rows once.
+    * Skips ``unpublished`` / ``pending_pull`` / ``conflict``.
+
+    Writes a markdown report to ``reports/agol_reconcile_<ts>.md``.
+    Intended for a weekly cron / launchd schedule (see DESIGN.md
+    §15 for sample configs).
+    """
+    from . import agol_config, agol_sync
+
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
+    reports_dir = ctx.obj["root"] / "reports"
+
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    report = agol_sync.reconcile_bidirectional(
+        db_path, gis, cfg,
+        library_root=library,
+        actor=actor or _default_actor(),
+        reports_dir=reports_dir,
+        dry_run=dry_run,
+    )
+
+    mode = "dry-run" if dry_run else "applied"
+    console.print(
+        f"[green]agol-sync reconcile complete ({mode})[/green] — "
+        f"[bold]{len(report.outcomes)}[/bold] rows processed"
+    )
+    for bucket in (
+        "pushed", "pulled_flag", "error_retry_ok", "clean_confirmed",
+        "push_failed", "error_retry_failed", "skipped",
+    ):
+        n = report.counts_by_bucket.get(bucket, 0)
+        if n:
+            colour = "red" if "failed" in bucket else (
+                "yellow" if bucket == "pulled_flag" else "cyan"
+            )
+            console.print(f"  [{colour}]{n:3d}[/{colour}]  {bucket}")
+    console.print(f"  report: [cyan]{report.report_path}[/cyan]")
+    if not dry_run:
+        _auto_export_xlsx(ctx)
+
+
 if __name__ == "__main__":
     cli()
