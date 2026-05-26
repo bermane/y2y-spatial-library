@@ -140,7 +140,7 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
                 console.print(
                     f"    Build VTPK in ArcGIS Pro from this GPKG, save as "
                     f"`{rem.expected_vtpk_path.name}`, drop in "
-                    f"`queue/incoming/`, then run `y2y ingest scan`."
+                    f"`queue/incoming/`, then run `y2y ingest`."
                 )
         return
 

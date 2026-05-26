@@ -226,7 +226,7 @@ def reconcile(
                 f"row is targeted for VTL but {rel_vtpk} is missing. "
                 f"Build VTPK in ArcGIS Pro from this GPKG, drop the "
                 f"resulting file in queue/incoming/, then run "
-                f"`y2y ingest scan`."
+                f"`y2y ingest`."
             ))
         elif agol_vtpk.vtpk_stale(row, library_root):
             vtpk_stale.append(Finding(

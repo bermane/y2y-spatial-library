@@ -842,7 +842,7 @@ def push(
                 f"{vtpk_path.relative_to(library_root.parent)}). "
                 f"Build the VTPK in ArcGIS Pro from {source_path}, "
                 f"drop the resulting `.vtpk` in queue/incoming/, "
-                f"then run `y2y ingest scan`. After that, re-run "
+                f"then run `y2y ingest`. After that, re-run "
                 f"this push."
             )
         item = _publish_vector_tile_layer(
