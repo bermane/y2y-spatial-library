@@ -210,3 +210,64 @@ def test_scan_skips_unrecognized_extensions(project_tree) -> None:
     assert result.rejected == 0
     # The files stay where they were — we don't rename or remove them
     assert (project_tree["incoming"] / "notes.txt").exists()
+    assert (project_tree["incoming"] / "report.pdf").exists()
+
+
+def test_scan_pairs_gpkg_with_matching_vtpk(project_tree, valid_gpkg_factory) -> None:
+    """When a .gpkg and a same-stem .vtpk are both in queue/incoming/,
+    scan moves both into queue/processing/<dataset_id>/ as a paired
+    bundle and pre-fills agol_format='vector-tile-layer' in the
+    pending row (instead of the default feature-layer for vectors).
+    """
+    from pipeline import pending_sheet
+
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["incoming"])
+    (project_tree["incoming"] / "parks.vtpk").write_bytes(b"PK\x03\x04fake-vtpk")
+
+    result = ingest.scan(
+        project_tree["incoming"],
+        project_tree["processing"],
+        project_tree["rejected"],
+    )
+    assert result.accepted == 1
+    # The VTPK did NOT generate an unmatched ingest result — it was
+    # paired with the GPKG instead.
+    assert all(r.status != "unmatched" for r in result.vtpk_results)
+
+    rows = pending_sheet.load_pending(result.pending_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["agol_format"] == "vector-tile-layer"
+
+    # Both .gpkg and .vtpk now live in processing/<dataset_id>/.
+    staging = project_tree["processing"] / row["dataset_id"]
+    assert (staging / "parks.gpkg").exists()
+    assert (staging / "parks.vtpk").exists()
+    # queue/incoming/ was drained.
+    assert not (project_tree["incoming"] / "parks.gpkg").exists()
+    assert not (project_tree["incoming"] / "parks.vtpk").exists()
+
+
+def test_scan_unpaired_vtpk_still_falls_through_to_existing_row_match(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """A .vtpk whose stem doesn't match any GPKG being scanned still
+    falls through to agol_vtpk.ingest_one_vtpk for matching against
+    the existing catalogue. The pair-detection logic doesn't change
+    the existing rev 3 unmatched-VTPK behaviour."""
+    # Drop a lone .vtpk (no matching GPKG in this scan).
+    (project_tree["incoming"] / "loner.vtpk").write_bytes(b"PK\x03\x04fake-vtpk")
+
+    result = ingest.scan(
+        project_tree["incoming"],
+        project_tree["processing"],
+        project_tree["rejected"],
+        library_root=project_tree["library"],
+        db_path=project_tree["db"],
+    )
+    assert result.accepted == 0
+    # No catalogue row exists for 'loner', so unmatched.
+    assert len(result.vtpk_results) == 1
+    assert result.vtpk_results[0].status == "unmatched"
+    # File stays in queue (not consumed by pairing).
+    assert (project_tree["incoming"] / "loner.vtpk").exists()

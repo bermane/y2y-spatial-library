@@ -254,3 +254,88 @@ def test_approve_detects_missing_source_file(project_tree, valid_gpkg_factory) -
 def test_approve_with_no_pending_sheet_is_a_noop(project_tree) -> None:
     result = _approve(project_tree)
     assert (result.promoted, result.failed, result.skipped) == (0, 0, 0)
+
+
+def test_approve_promotes_paired_vtpk_to_library_vtpk(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """When scan pairs a .vtpk with a .gpkg, approve promotes BOTH:
+    the canonical .gpkg to library/spatial/<Category>/, and the
+    .vtpk to library/vtpk/<target_stem>.vtpk with sidecar +
+    ingest-vtpk changelog. No second `y2y ingest` call required."""
+    # Drop the GPKG + matching VTPK in queue/incoming/ together.
+    valid_gpkg_factory("streams_2024.gpkg", dest_dir=project_tree["incoming"])
+    (project_tree["incoming"] / "streams_2024.vtpk").write_bytes(
+        b"PK\x03\x04fake-vtpk-payload"
+    )
+
+    pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    # scan auto-detected the pair → agol_format='vector-tile-layer'.
+    assert row["agol_format"] == "vector-tile-layer"
+
+    _fill_required(row)
+    pending_sheet.save_pending(pending_path, [row])
+
+    result = _approve(project_tree)
+    assert result.promoted == 1
+
+    # GPKG landed at library/spatial/<Category>/<target_filename>.gpkg.
+    target_filename = row["target_filename"]
+    target_stem = Path(target_filename).stem
+    library_gpkg = project_tree["library"] / "Water" / target_filename
+    assert library_gpkg.exists()
+
+    # VTPK landed at library/vtpk/<target_stem>.vtpk (NOT the
+    # source stem — uses the target_filename's stem so a renamed
+    # target lands correctly).
+    library_vtpk = project_tree["library"].parent / "vtpk" / f"{target_stem}.vtpk"
+    assert library_vtpk.exists()
+    # Sidecar written.
+    assert library_vtpk.with_suffix(".vtpk.sha256").exists()
+
+    # No VTPK reminder fires for this row — the VTPK is already in
+    # place.
+    assert len(result.vtpk_reminders) == 0
+
+    # Changelog records the paired-VTPK ingest.
+    log = inventory_manager.load_changelog(project_tree["db"])
+    vtpk_entries = [
+        r for r in log
+        if r["dataset_id"] == row["dataset_id"]
+        and r["field_changed"] == "vtpk"
+    ]
+    assert len(vtpk_entries) == 1
+    assert "paired VTPK" in (vtpk_entries[0]["note"] or "")
+
+
+def test_approve_paired_vtpk_uses_target_stem_when_renamed(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """Steward renames target_filename in pending.xlsx → the VTPK
+    lands at library/vtpk/<NEW_stem>.vtpk, matching what
+    agol_vtpk.resolve_vtpk_path() expects from the catalogue row."""
+    valid_gpkg_factory("source_name.gpkg", dest_dir=project_tree["incoming"])
+    (project_tree["incoming"] / "source_name.vtpk").write_bytes(
+        b"PK\x03\x04fake-vtpk-payload"
+    )
+
+    pending_path, row = _scan_then_load_row(
+        project_tree, valid_gpkg_factory, filename="source_name.gpkg",
+    )
+    _fill_required(row)
+    # Override the target filename — the canonical file in library/
+    # will use this name.
+    row["target_filename"] = "renamed_target.gpkg"
+    pending_sheet.save_pending(pending_path, [row])
+
+    result = _approve(project_tree)
+    assert result.promoted == 1
+
+    # VTPK at library/vtpk/renamed_target.vtpk (not source_name.vtpk).
+    library_vtpk = (
+        project_tree["library"].parent / "vtpk" / "renamed_target.vtpk"
+    )
+    assert library_vtpk.exists()
+    assert not (
+        project_tree["library"].parent / "vtpk" / "source_name.vtpk"
+    ).exists()

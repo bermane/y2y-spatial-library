@@ -175,6 +175,24 @@ def scan(
     accepted = 0
     rejected = 0
 
+    # Pre-scan: which .vtpk stems are currently in queue/incoming/?
+    # If a GPKG's stem matches a VTPK in the queue, scan treats them
+    # as a pair — the VTPK travels with the GPKG bundle into
+    # processing/<dataset_id>/, and the pending row's agol_format
+    # pre-fill flips from feature-layer to vector-tile-layer. The
+    # VTPK then lands at library/vtpk/<target_stem>.vtpk as part of
+    # approve, so the steward doesn't need a second `y2y ingest`
+    # call to attach it. See agol_vtpk.ingest_one_vtpk for the
+    # match-against-existing-catalogue-row path (used for VTPKs
+    # whose paired GPKG isn't in this scan).
+    vtpk_paths_by_stem: dict[str, Path] = {}
+    for entry in sorted(incoming_dir.iterdir()):
+        if not entry.is_file() or entry.name.startswith("."):
+            continue
+        if entry.suffix.lower() == ".vtpk":
+            vtpk_paths_by_stem[entry.stem] = entry
+    paired_vtpk_stems: set[str] = set()
+
     for entry in candidate_paths(incoming_dir):
         try:
             metadata = source_formats.inspect(entry)
@@ -189,6 +207,16 @@ def scan(
             bundle = raster_bundle(entry)
         else:
             bundle = [entry]
+
+        # GPKG + matching-stem VTPK pair detection.
+        paired_vtpk = (
+            vtpk_paths_by_stem.get(entry.stem)
+            if metadata.source_format == "GeoPackage"
+            else None
+        )
+        if paired_vtpk is not None:
+            bundle = list(bundle) + [paired_vtpk]
+            paired_vtpk_stems.add(entry.stem)
 
         dataset_id = utils.new_dataset_id()
         dataset_staging = processing_dir / dataset_id
@@ -206,18 +234,23 @@ def scan(
             member.rename(dataset_staging / member.name)
 
         primary_in_staging = dataset_staging / entry.name
-        new_rows.append(_build_row(primary_in_staging, metadata, dataset_id=dataset_id))
+        new_rows.append(_build_row(
+            primary_in_staging, metadata,
+            dataset_id=dataset_id,
+            paired_with_vtpk=bool(paired_vtpk),
+        ))
         accepted += 1
 
     if new_rows:
         pending_sheet.append_pending(pending_path, new_rows)
 
-    # --- VTPK dispatch ---
+    # --- VTPK dispatch (for unpaired VTPKs only) ---
     # candidate_paths above only yields recognised source-data
     # extensions (.gpkg / .tif / .shp / .geojson / .kml / .kmz);
-    # .vtpk falls through. We walk the queue separately for VTPKs
-    # and hand each to agol_vtpk.ingest_one_vtpk for matching to an
-    # existing catalogue row.
+    # .vtpk falls through. VTPKs that paired with an in-scan GPKG
+    # were already moved into processing/<dataset_id>/ above and
+    # are handled by approve. The remaining .vtpks (no matching
+    # GPKG in this scan) attach to existing active catalogue rows.
     vtpk_results: list[agol_vtpk.IngestVtpkResult] = []
     if library_root is not None and db_path is not None:
         for entry in sorted(incoming_dir.iterdir()):
@@ -226,6 +259,10 @@ def scan(
             if entry.name.startswith("."):
                 continue
             if entry.suffix.lower() != ".vtpk":
+                continue
+            if entry.stem in paired_vtpk_stems:
+                # Already staged with its paired GPKG; approve()
+                # will promote it to library/vtpk/.
                 continue
             vtpk_results.append(
                 agol_vtpk.ingest_one_vtpk(
@@ -328,6 +365,17 @@ def approve(
 
         try:
             _promote(row, target_path, library_root, db_path, actor=actor)
+            # If a VTPK was paired with this GPKG at scan time, it's
+            # now in processing/<dataset_id>/. Promote it to
+            # library/vtpk/ BEFORE _archive_source moves the staging
+            # contents to archived/. Uses the TARGET stem
+            # (target_path.stem) so a steward rename via
+            # target_filename pairs cleanly with the catalogue
+            # row's file_path stem at push time.
+            _maybe_promote_paired_vtpk(
+                row, processing_dir, library_root, db_path,
+                target_stem=target_path.stem, actor=actor,
+            )
             _archive_source(row, processing_dir, archived_dir)
             promoted += 1
             # Rev 3: if this row is targeted for VTL but doesn't
@@ -336,7 +384,8 @@ def approve(
             # so the check sees the canonical file_path that
             # _promote wrote to the DB (the pending-sheet row dict's
             # file_path is None until _promote sets it on the DB
-            # copy).
+            # copy). Pair-promoted VTPKs land at the canonical path
+            # before this check runs, so no reminder fires for them.
             fresh_row = inventory_manager.get_dataset(
                 db_path, str(row["dataset_id"]),
             )
@@ -360,6 +409,109 @@ def approve(
         skipped=skipped,
         pending_deleted=deleted,
         vtpk_reminders=tuple(vtpk_reminders),
+    )
+
+
+def _maybe_promote_paired_vtpk(
+    row: dict[str, Any],
+    processing_dir: Path,
+    library_root: Path,
+    db_path: Path,
+    *,
+    target_stem: str,
+    actor: str,
+) -> None:
+    """Move a paired VTPK from staging to ``library/vtpk/`` if present.
+
+    If scan() detected a ``<stem>.vtpk`` alongside a GPKG in
+    ``queue/incoming/``, the VTPK was moved into
+    ``queue/processing/<dataset_id>/`` together with the GPKG
+    bundle. After ``_promote`` has landed the canonical GPKG in
+    ``library/spatial/``, this helper finishes the pair by moving
+    the VTPK to ``library/vtpk/<target_stem>.vtpk`` and writing
+    the matching ``.sha256`` sidecar + an ``ingest-vtpk``
+    changelog entry.
+
+    The target stem comes from the catalogue row's ``file_path``
+    (set on the row dict by ``_promote``), so a steward who
+    renamed via ``target_filename`` in pending.xlsx still ends up
+    with a correctly-paired VTPK at the canonical location.
+
+    No-op if no ``.vtpk`` is in the staging dir — the common case
+    for non-VTL rows or VTL rows whose VTPK comes in a later
+    ``y2y ingest`` call.
+
+    Failures are surfaced as exceptions so the caller can route
+    the row to the failed bucket. (Doing this AFTER _promote
+    succeeded means we've already mutated the catalogue; a failure
+    here means the catalogue row exists but its VTPK didn't make
+    it to the canonical location. Reconcile's vtpk_missing finding
+    will then surface the steward action.)
+    """
+    dataset_id = str(row["dataset_id"])
+    staging_dir = processing_dir / dataset_id
+    if not staging_dir.exists():
+        return
+    candidate_vtpks = list(staging_dir.glob("*.vtpk"))
+    if not candidate_vtpks:
+        return
+    if len(candidate_vtpks) > 1:
+        # Surface as a warning via changelog but don't fail. The
+        # pair-detection logic only adds one VTPK per scan; >1
+        # implies an out-of-band edit.
+        names = ", ".join(p.name for p in candidate_vtpks)
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=utils.utc_now_iso(),
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="vtpk",
+            old_value=None,
+            new_value=None,
+            detail=(
+                f"multiple .vtpk files found in staging dir "
+                f"({names}); skipped paired-VTPK promotion. "
+                f"Steward must `y2y ingest` after approval."
+            ),
+        )
+        return
+
+    src_vtpk = candidate_vtpks[0]
+    # target_stem is passed in by the caller (approve loop) from
+    # target_path.stem — i.e., the post-transformation canonical
+    # filename's stem. Steward renames via target_filename in
+    # pending.xlsx are honored: the VTPK lands under the renamed
+    # stem so it pairs with the catalogue row's file_path stem at
+    # push time.
+    target_dir = library_root.parent / "vtpk"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / f"{target_stem}.vtpk"
+    # Replace any prior file at dest cleanly (a re-ingest scenario).
+    if dest.exists():
+        dest.unlink()
+    sidecar = dest.with_suffix(dest.suffix + ".sha256")
+    if sidecar.exists():
+        sidecar.unlink()
+    digest = utils.sha256_file(src_vtpk)
+    src_vtpk.rename(dest)
+    sidecar.write_text(digest, encoding="utf-8")
+
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=utils.utc_now_iso(),
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=row.get("file_path"),
+        field_changed="vtpk",
+        old_value=None,
+        new_value=digest,
+        detail=(
+            f"ingested paired VTPK to "
+            f"{dest.relative_to(library_root.parent)} (sha256={digest})"
+        ),
     )
 
 
@@ -437,8 +589,16 @@ def _build_row(
     meta: SourceMetadata,
     *,
     dataset_id: str,
+    paired_with_vtpk: bool = False,
 ) -> dict[str, Any]:
-    """Compose a fresh pending row at scan time. No intrinsic snapshot yet."""
+    """Compose a fresh pending row at scan time. No intrinsic snapshot yet.
+
+    ``paired_with_vtpk`` flips the agol_format pre-fill from the
+    format-default (feature-layer for vectors / imagery-layer for
+    rasters) to ``vector-tile-layer`` when scan detected a matching
+    ``.vtpk`` in queue/incoming/ alongside this source. Steward
+    still overrides freely in pending.xlsx.
+    """
     target_ext = _TARGET_EXT_BY_FORMAT[meta.source_format]
     target_filename = utils.slugify_title(primary_in_processing.stem) + target_ext
     today = utils.utc_now_iso()
@@ -492,8 +652,13 @@ def _build_row(
         # (vector → feature-layer; raster → imagery-layer). Steward
         # can override to vector-tile-layer in the pending sheet for
         # vector data they want delivered as a cached tile service.
-        # See DESIGN.md §15.
-        "agol_format": "feature-layer" if meta.is_vector else "imagery-layer",
+        # If a matching .vtpk was paired during scan
+        # (paired_with_vtpk=True), the default flips to
+        # vector-tile-layer up front. See DESIGN.md §15.
+        "agol_format": (
+            "vector-tile-layer" if paired_with_vtpk
+            else ("feature-layer" if meta.is_vector else "imagery-layer")
+        ),
         # error sink
         pending_sheet.ERROR_COLUMN: None,
     }
