@@ -66,9 +66,12 @@ class AgolAuthError(AgolError):
 class AgolToolingError(AgolError):
     """A required local tool isn't available.
 
-    Currently surfaces only when a ``vector-tile-layer`` push needs
-    ``arcpy`` (ArcGIS Pro's bundled Python) and the current
-    interpreter can't import it. See ``pipeline/agol_vtpk.py``.
+    Reserved for future use. Rev 3 (2026-05-27) retired the arcpy
+    auto-build path that previously raised this — the new manual-
+    VTPK + ingest workflow runs without arcpy. Kept in the
+    exception hierarchy in case a future capability (e.g., direct
+    AGOL REST-call helpers requiring extra deps) needs a similar
+    "local environment isn't ready" signal.
     """
 
 
@@ -782,6 +785,32 @@ def push(
         thumb_path = None
         _record_warning(properties, f"thumbnail generation failed: {exc}")
 
+    # ----- target-switch detection --------------------------------------
+    # If the catalogue's agol_item_id points to an AGOL item whose
+    # type doesn't match the catalogue's current agol_target, the
+    # steward has changed their mind about how this dataset should
+    # be published (e.g., FL → VTL). Unpublish the old AGOL items
+    # before proceeding with the create path for the new target.
+    #
+    # AGOL-missing-out-of-band is also handled here: if the item is
+    # gone, we clear the catalogue link silently and create fresh.
+    existing_item_id_before = row.get("agol_item_id")
+    if existing_item_id_before:
+        switch_result = _handle_target_switch(
+            gis=gis,
+            dataset_id=dataset_id,
+            existing_item_id=existing_item_id_before,
+            target=target,
+            actor=actor,
+            properties=properties,
+        )
+        if switch_result is not None:
+            # A target switch (or missing-out-of-band) was handled.
+            # Mutate the row dict's agol_item_id so the per-target
+            # helper below takes the create path with no prior ID.
+            row = dict(row)
+            row["agol_item_id"] = None
+
     # ----- per-target publish path -------------------------------------
     source_path = library_root / row["file_path"]
     if not source_path.exists():
@@ -800,15 +829,29 @@ def push(
             checksum_changed=_checksum_changed(row),
         )
     elif target == "vector-tile-layer":
+        # Rev 3: VTPK is a manually-built artifact at the canonical
+        # library/vtpk/ location. Push requires it to be present
+        # (ingested via `y2y ingest scan`). If absent, error with
+        # actionable guidance; the catalogue row stays unchanged
+        # and the steward can retry after ingesting the VTPK.
+        from . import agol_vtpk as _agol_vtpk
+        vtpk_path = _agol_vtpk.resolve_vtpk_path(row, library_root)
+        if not vtpk_path.exists():
+            raise AgolError(
+                f"No VTPK ingested for {dataset_id!r} (expected at "
+                f"{vtpk_path.relative_to(library_root.parent)}). "
+                f"Build the VTPK in ArcGIS Pro from {source_path}, "
+                f"drop the resulting `.vtpk` in queue/incoming/, "
+                f"then run `y2y ingest scan`. After that, re-run "
+                f"this push."
+            )
         item = _publish_vector_tile_layer(
-            gis=gis, source_path=source_path,
+            gis=gis, vtpk_path=vtpk_path,
             properties=properties,
             folder=folder, source_folder=source_folder,
             folder_obj=folder_obj, source_folder_obj=source_folder_obj,
             existing_item_id=row.get("agol_item_id"),
-            dataset_id=dataset_id, checksum=row["checksum_sha256"],
-            cache_dir=cache_dir,
-            checksum_changed=_checksum_changed(row),
+            dataset_id=dataset_id,
         )
     elif target == "imagery-layer":
         item = _publish_imagery_layer(
@@ -1061,6 +1104,7 @@ def _reconcile_source_item(
     source_type: str,
     service_properties: dict[str, Any],
     properties: dict[str, Any],
+    extra_type_keywords: tuple[str, ...] = (),
 ) -> None:
     """Enforce the minimal-source policy on an existing source item.
 
@@ -1100,6 +1144,24 @@ def _reconcile_source_item(
         "accessInformation": "",
         "licenseInfo": "",
     })
+    # Rev 3: callers (e.g. the VTL update path) can attach extra
+    # bookkeeping typeKeywords to the minimal-source policy props.
+    # The VTL helper uses this to stamp/refresh ``Y2Y:vtpk_sha256:<hex>``
+    # so subsequent pushes can detect VTPK changes without
+    # re-downloading the package.
+    if extra_type_keywords:
+        existing = list(target_props.get("typeKeywords") or [])
+        # Drop any prior values that share the same key prefix
+        # (e.g. an old vtpk_sha256 from a stale push) so the new
+        # one replaces them cleanly.
+        prefixes = {kw.split(":")[0] + ":" + kw.split(":")[1] + ":"
+                    for kw in extra_type_keywords if kw.count(":") >= 2}
+        existing = [
+            kw for kw in existing
+            if not any(kw.startswith(p) for p in prefixes)
+        ]
+        existing.extend(extra_type_keywords)
+        target_props["typeKeywords"] = existing
 
     # Move first (if needed) so subsequent property updates land on
     # the item at its new location. Prefer the Folder instance (more
@@ -1181,6 +1243,134 @@ def _resolve_service_item(gis, agol_item_id: str) -> Any:
             f"clear the catalogue link, then re-push."
         )
     return item
+
+
+# AGOL item types corresponding to each agol_target. push()'s
+# target-switch detection compares the catalogue's intent against
+# the AGOL item's actual type to decide whether to unpublish + re-
+# publish under the new target.
+_TARGET_TO_AGOL_TYPE: dict[str, str] = {
+    "feature-layer": "Feature Service",
+    "vector-tile-layer": "Vector Tile Service",
+    "imagery-layer": "Image Service",
+}
+
+
+def _handle_target_switch(
+    *,
+    gis,
+    dataset_id: str,
+    existing_item_id: str,
+    target: str,
+    actor: str,
+    properties: dict[str, Any],
+) -> str | None:
+    """If the catalogue's agol_target no longer matches the AGOL item, unpublish.
+
+    Steward-confirmed (2026-05-27): when an existing row's
+    ``agol_target`` is changed (e.g. ``feature-layer`` →
+    ``vector-tile-layer``), the next push should delete the old
+    AGOL representation before publishing the new one. AGOL credit
+    cost is one of the reasons the steward chose VTL — keeping the
+    old FS around would defeat that.
+
+    This function is called by ``push()`` before the per-target
+    publish dispatch. It compares the catalogue's intended
+    ``target`` against the actual AGOL item's ``.type`` and, on
+    mismatch, deletes the service + any Service2Data-linked source
+    items, then returns a short note (which the caller uses to
+    update changelog metadata and to clear the catalogue's
+    ``agol_item_id`` so the create path takes over).
+
+    Also handles the case where the AGOL item is missing entirely
+    (deleted out-of-band): returns a note about that and the
+    caller clears the link the same way.
+
+    Returns ``None`` when no switch is needed (the item exists and
+    its type matches the target).
+    """
+    item = gis.content.get(existing_item_id)
+    if item is None:
+        msg = (
+            f"agol_item_id {existing_item_id!r} no longer exists on "
+            f"AGOL (deleted out-of-band). Clearing catalogue link; "
+            f"create-path will fire."
+        )
+        _record_warning(properties, msg)
+        return msg
+
+    expected_type = _TARGET_TO_AGOL_TYPE.get(target)
+    actual_type = getattr(item, "type", None)
+    if expected_type is not None and actual_type == expected_type:
+        return None  # No switch needed.
+
+    # Target switch detected. Delete the old service + its linked
+    # sources to free credits before publishing the new target.
+    note = (
+        f"agol_target switched (AGOL item is {actual_type!r}, "
+        f"catalogue wants {expected_type!r}). Unpublishing the "
+        f"existing AGOL items before publishing the new target."
+    )
+    _record_warning(properties, note)
+    _unpublish_agol_items(
+        gis=gis, service_item=item, dataset_id=dataset_id,
+        properties=properties,
+    )
+    return note
+
+
+def _unpublish_agol_items(
+    *,
+    gis,
+    service_item: Any,
+    dataset_id: str,
+    properties: dict[str, Any],
+) -> None:
+    """Delete a service item and any Service2Data-linked source items.
+
+    Used by the target-switch path. Phase E's ``unpublish()``
+    command will share this helper for the explicit
+    ``y2y agol-sync unpublish`` workflow.
+
+    Failures are recorded as ``[agol]`` warnings rather than
+    aborting — partial cleanup is better than leaving the catalogue
+    in an inconsistent state with no remediation message. The
+    catalogue's ``agol_item_id`` is cleared by the caller after
+    this returns; subsequent reconcile / push runs will surface
+    any orphans on the AGOL side.
+    """
+    # Find and delete linked source(s) first. Walking Service2Data
+    # before deleting the service preserves the relationship while
+    # we still have a valid handle.
+    try:
+        linked = service_item.related_items(
+            rel_type="Service2Data", direction="forward",
+        ) or []
+    except Exception as exc:
+        _record_warning(properties, (
+            f"could not enumerate source items linked to "
+            f"{getattr(service_item, 'id', '?')!r}: {exc}"
+        ))
+        linked = []
+
+    for src in linked:
+        try:
+            src.delete()
+        except Exception as exc:
+            _record_warning(properties, (
+                f"failed to delete linked source item "
+                f"{getattr(src, 'id', '?')!r} during target switch: {exc}"
+            ))
+
+    # Now delete the service itself.
+    try:
+        service_item.delete()
+    except Exception as exc:
+        _record_warning(properties, (
+            f"failed to delete service item "
+            f"{getattr(service_item, 'id', '?')!r} during target "
+            f"switch: {exc}"
+        ))
 
 
 def _find_source_item(service_item: Any) -> Any | None:
@@ -1473,7 +1663,7 @@ def _publish_imagery_layer(
 def _publish_vector_tile_layer(
     *,
     gis,
-    source_path: Path,
+    vtpk_path: Path,
     properties: dict[str, Any],
     folder: str,
     source_folder: str,
@@ -1481,62 +1671,98 @@ def _publish_vector_tile_layer(
     source_folder_obj: Any = None,
     existing_item_id: str | None,
     dataset_id: str,
-    checksum: str,
-    cache_dir: Path,
-    checksum_changed: bool,
 ) -> Any:
-    """Publish (or update) a Hosted Vector Tile Service from a locally-built VTPK.
+    """Publish (or update) a Hosted Vector Tile Service from a pre-built VTPK.
 
-    Steward-confirmed design (DESIGN.md §15 + plan): we never let AGOL
-    create an intermediate Hosted Feature Layer. Instead, we use
-    arcpy on the local machine to build a VTPK, upload that VTPK as
-    an item, and publish the VTPK item to a Hosted Vector Tile
-    Service.
+    Rev 3 design (steward-confirmed 2026-05-27): the steward builds
+    the ``.vtpk`` manually in ArcGIS Pro's UI ("Share As Vector Tile
+    Package"), drops it in ``queue/incoming/``, and ``y2y ingest
+    scan`` moves it to ``library/vtpk/<stem>.vtpk``. The push call
+    then uploads that file to AGOL and publishes a Vector Tile
+    Service from it. **No arcpy in the pipeline runtime, no
+    intermediate Feature Service on AGOL.** End state: VTPK source
+    item in ``_sources/`` + Vector Tile Service in ``<Category>/``.
 
-    The arcpy import is detected lazily inside
-    ``agol_vtpk.build_vtpk``; missing-arcpy errors surface as
-    ``AgolToolingError``.
+    Push refresh detection compares the local VTPK's SHA-256 to a
+    ``Y2Y:vtpk_sha256:<hex>`` typeKeyword written onto the AGOL
+    source item at the previous push. If they differ (steward
+    rebuilt the VTPK and re-ran ``ingest scan``), the source item's
+    data is replaced via ``source.update(data=...) +
+    source.publish(overwrite=True)``, then the typeKeyword is
+    updated. AGOL preserves the VTS item ID through this refresh,
+    so the service's URL is stable across source data changes.
 
-    Returns the **service** item (Vector Tile Service).
+    Args:
+        gis: Active ``arcgis.gis.GIS`` connection.
+        vtpk_path: Local path to the canonical VTPK at
+            ``library/vtpk/<stem>.vtpk``. Caller (push()) is
+            responsible for verifying the file exists and surfacing
+            the actionable "no VTPK ingested" error if it doesn't.
+        properties, folder, source_folder, folder_obj, source_folder_obj:
+            Standard AGOL push plumbing — see _publish_feature_layer
+            for the shared semantics.
+        existing_item_id: Catalogue's recorded ``agol_item_id``, or
+            ``None`` for a create.
+        dataset_id: Used in changelog notes and source-item
+            typeKeywords (``Y2Y:dataset_id:<id>``).
+
+    Returns:
+        The Vector Tile Service Item.
     """
-    from . import agol_vtpk
-
-    vtpk_path = agol_vtpk.build_vtpk(
-        gpkg_path=source_path,
-        dataset_id=dataset_id,
-        checksum=checksum,
-        cache_dir=cache_dir,
-    )
-
     item_props = _strip_internal(properties)
+    vtpk_sha = _read_vtpk_sidecar_or_compute(vtpk_path)
 
     if existing_item_id is None:
-        # Create path: minimal source VTPK + full-metadata service.
+        # ----- create path -----
+        # Source VTPK gets minimal-source-policy props plus a
+        # checksum typeKeyword so future pushes can detect "VTPK
+        # changed on disk" without re-downloading the package from
+        # AGOL.
         source_props = _compute_source_item_properties(
             item_props, dataset_id, source_type="Vector Tile Package",
+        )
+        source_props.setdefault("typeKeywords", []).append(
+            f"Y2Y:vtpk_sha256:{vtpk_sha}"
         )
         vtpk_item = gis.content.add(
             item_properties=source_props,
             data=str(vtpk_path),
             folder=source_folder,
         )
-        service_item = vtpk_item.publish(file_type="Vector Tile Package")
+        try:
+            service_item = vtpk_item.publish(file_type="Vector Tile Package")
+        except Exception as exc:
+            raise AgolError(
+                f"hosted vector tile publish failed for "
+                f"{dataset_id!r}: {exc}"
+            ) from exc
+
         _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
         return service_item
 
-    # Update path: data refresh via source VTPK (if checksum changed),
-    # then re-apply service metadata, then reconcile source.
+    # ----- update path -----
     service = _resolve_service_item(gis, existing_item_id)
     source = _find_source_item(service)
 
-    if checksum_changed:
-        if source is None:
-            _record_warning(properties, (
-                "vector-tile data refresh skipped: no Service2Data "
-                "link back to a source VTPK. Re-publish manually."
-            ))
-        else:
+    if source is None:
+        # No Service2Data link — the VTS was published outside our
+        # integration, or the source item was deleted out-of-band.
+        # We can't refresh tile data without the source; record a
+        # warning and continue with metadata-only reconcile.
+        _record_warning(properties, (
+            "vector-tile data refresh skipped: no Service2Data link "
+            "to a source VTPK. Existing tiles continue serving but "
+            "won't reflect any recent VTPK changes. To re-link, "
+            "unpublish this row and re-push."
+        ))
+    else:
+        # Compare local VTPK SHA against the one stored on the AGOL
+        # source item's typeKeywords. Mismatch → refresh.
+        agol_sha = _extract_vtpk_sha_from_keywords(
+            getattr(source, "typeKeywords", None) or []
+        )
+        if agol_sha != vtpk_sha:
             try:
                 source.update(data=str(vtpk_path))
                 source.publish(
@@ -1545,14 +1771,20 @@ def _publish_vector_tile_layer(
             except Exception as exc:
                 _record_warning(properties, (
                     f"VTPK re-publish failed; metadata updated but "
-                    f"service may be stale. Underlying: {exc}"
+                    f"tile cache may be stale. Underlying: {exc}"
                 ))
 
+    # Apply / re-apply the full steward-authored metadata to the
+    # service. Idempotent.
     service.update(item_properties=item_props)
 
-    # Enforce folder placement on every push (idempotent).
+    # Enforce folder placement on every push (idempotent — same
+    # rationale as in _publish_feature_layer's update path).
     _safe_move(service, folder_obj or folder, properties)
 
+    # Reconcile source on every push, refreshing the
+    # Y2Y:vtpk_sha256 typeKeyword so future pushes see the current
+    # disk checksum.
     if source is not None:
         _reconcile_source_item(
             source, dataset_id,
@@ -1561,8 +1793,29 @@ def _publish_vector_tile_layer(
             source_type="Vector Tile Package",
             service_properties=item_props,
             properties=properties,
+            extra_type_keywords=(f"Y2Y:vtpk_sha256:{vtpk_sha}",),
         )
     return service
+
+
+def _read_vtpk_sidecar_or_compute(vtpk_path: Path) -> str:
+    """Wrapper around ``agol_vtpk.read_vtpk_checksum`` used only here.
+
+    Kept as a local helper so the import stays lazy (agol_vtpk
+    pulls in sqlite3 + inventory_manager); agol_sync.py itself
+    doesn't need those at module load.
+    """
+    from . import agol_vtpk
+    return agol_vtpk.read_vtpk_checksum(vtpk_path)
+
+
+def _extract_vtpk_sha_from_keywords(keywords: list[str]) -> str | None:
+    """Return the ``Y2Y:vtpk_sha256:<hex>`` value from typeKeywords."""
+    prefix = "Y2Y:vtpk_sha256:"
+    for kw in keywords:
+        if isinstance(kw, str) and kw.startswith(prefix):
+            return kw[len(prefix):]
+    return None
 
 
 # --- sharing -----------------------------------------------------------

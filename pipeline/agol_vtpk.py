@@ -1,401 +1,376 @@
-"""Local Vector Tile Package (VTPK) build via arcpy.
+"""Vector Tile Package (VTPK) ingest + path resolution.
 
-When a dataset's ``agol_target='vector-tile-layer'``, the AGOL push
-path needs a ``.vtpk`` file to upload — and the steward asked that
-this file be built **locally** rather than by triggering AGOL's
-server-side tile generation (which would create an intermediate
-hosted feature layer, consuming AGOL credits, contrary to the whole
-point of the VTL path).
+Y2Y's Vector Tile Layer (VTL) publishing model splits the work
+between the steward (who manually builds a ``.vtpk`` in ArcGIS
+Pro's UI) and this pipeline (which ingests the resulting file
+from ``queue/incoming/`` into a canonical library location, then
+uploads + publishes it to AGOL).
 
-This module's single public function, :func:`build_vtpk`, drives
-``arcpy.management.CreateVectorTilePackage`` to produce a local
-``.vtpk`` from a GeoPackage. Cached at ``.y2y/vtpk_cache/<dataset_id>.vtpk``,
-keyed by ``checksum_sha256`` so the (expensive) tile-pyramid build
-only runs when the source actually changes.
+The arcpy-driven automatic-VTPK-build path was tried in earlier
+revisions but proved fragile across ArcGIS Pro upgrades (Python
+ABI mismatches, license-init issues, COM file-handle locking, the
+absence of a usable in-process Map context, etc.). Rev 3 (this
+revision) drops arcpy entirely from the pipeline: Pro is only used
+manually by the steward to produce the ``.vtpk``; everything that
+follows runs from pure Python with the ``arcgis`` SDK.
 
-Runtime environment requirement
--------------------------------
-``arcpy`` ships with ArcGIS Pro; it is **not** a pip-installable
-package. The Mac-side Python that runs the rest of the Y2Y pipeline
-cannot import arcpy. To publish Vector Tile Layers, the steward
-must run ``y2y agol-sync push <id>`` (with ``agol_target=
-'vector-tile-layer'``) under the **ArcGIS Pro bundled Python**
-(typically ``C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\envs\\arcgispro-py3\\python.exe``
-on Windows).
+Module responsibilities:
 
-This module detects arcpy at runtime. If absent, it raises
-:class:`AgolToolingError` with a clear message — the catalogue row
-stays ``sync_status='pending_push'`` (or ``error``) and the steward
-re-runs from the right environment later. The other publish paths
-(``feature-layer``, ``imagery-layer``) are unaffected by arcpy's
-absence.
+* :func:`resolve_vtpk_path` — given a catalogue row and the spatial
+  library root, return the canonical VTPK location under
+  ``library/vtpk/``.
+* :func:`vtpk_present` / :func:`vtpk_stale` — quick boolean probes
+  used by the push pre-flight and by ``reconcile`` to surface
+  missing or out-of-date VTPKs as steward action items.
+* :func:`ingest_one_vtpk` — handles a single ``.vtpk`` file in
+  ``queue/incoming/``: validates it's a real VTPK (ZIP container
+  signature), matches by file stem to a ``vector-tile-layer`` row
+  in the catalogue, moves to ``library/vtpk/``, writes a
+  ``.sha256`` sidecar, appends an ``ingest-vtpk`` changelog entry.
+* :func:`read_vtpk_checksum` — reads from the sidecar if present,
+  computes if not.
+
+This module is called by :func:`pipeline.ingest.scan` for every
+``.vtpk`` discovered in the queue (the scan dispatches on file
+extension), and by :func:`pipeline.agol_sync._publish_vector_tile_layer`
+during a VTL push. There is no dedicated CLI entry point — VTPK
+ingest piggy-backs on the existing ``y2y ingest scan``.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-from .agol_sync import AgolToolingError
+from . import inventory_manager, utils
 
-
-# Scale-range defaults — intentionally None.
-#
-# arcpy.management.CreateVectorTilePackage rejects any min/max scale
-# value that doesn't match the active tiling scheme's level scales
-# *exactly* (ERROR 001856). With service_type="ONLINE" the scheme is
-# fixed to ArcGIS Online's pyramid; the only safe match is the
-# precise float values it expects, and "precise" here means 18-digit
-# decimals like 591657527.59155178 — not 591657527.591555. Even tiny
-# rounding makes the comparison fail.
-#
-# When these are None, we don't pass min_cached_scale /
-# max_cached_scale to arcpy at all, and the tool uses the scheme's
-# full default range. Tile generation is still bounded by the data
-# extent (via index_polygons=None, which means "use the data
-# extent"), so a "full pyramid" build doesn't generate tiles where
-# there's no data. Result: correct VTPK without scale-precision
-# pitfalls.
-#
-# A future caller who needs to cap levels can pass exact float values
-# via the kwargs.
-_DEFAULT_MIN_CACHED_SCALE: float | None = None
-_DEFAULT_MAX_CACHED_SCALE: float | None = None
-
-_CACHE_DIR_NAME = "vtpk_cache"
+# Sidecar suffix appended to the .vtpk filename for the checksum
+# file (matches the existing pattern used by agol_thumbnails.py).
 _CHECKSUM_SIDECAR_SUFFIX = ".sha256"
 
+# Subdirectory under ``library/`` where ingested VTPKs live, sibling
+# to ``library/spatial/``. Created on first ingest if absent.
+_VTPK_LIBRARY_SUBDIR = "vtpk"
 
-def build_vtpk(
-    gpkg_path: Path,
-    dataset_id: str,
-    checksum: str,
-    cache_dir: Path,
-    *,
-    min_cached_scale: float | None = _DEFAULT_MIN_CACHED_SCALE,
-    max_cached_scale: float | None = _DEFAULT_MAX_CACHED_SCALE,
-    tile_format: str = "INDEXED",
-) -> Path:
-    """Build (or fetch from cache) a Vector Tile Package for one dataset.
+# ZIP local file header magic. VTPK is a .zip container; we sniff
+# the first four bytes during ingest to reject anything that
+# doesn't look like a real package before we touch the catalogue.
+_ZIP_MAGIC = b"PK\x03\x04"
+
+
+class IngestVtpkResult(NamedTuple):
+    """Outcome of attempting to ingest a single ``.vtpk`` file.
+
+    Returned by :func:`ingest_one_vtpk` so callers (currently
+    :func:`pipeline.ingest.scan`) can aggregate results across the
+    queue without losing per-file context.
+
+    Fields:
+        status: One of ``"moved"`` (success), ``"unmatched"`` (no
+            catalogue row), ``"ambiguous"`` (multiple matches),
+            ``"target_mismatch"`` (match found but its
+            ``agol_target`` is not ``"vector-tile-layer"``), or
+            ``"invalid"`` (the file is not a valid VTPK).
+        vtpk_path: Path the file occupied at ingest time. For
+            ``"moved"`` this is the source path in ``queue/``; the
+            destination is in ``destination``.
+        dataset_id: The matched row's ``dataset_id`` if status is
+            ``"moved"`` or ``"target_mismatch"``; otherwise ``None``.
+        destination: Where the file was moved to. Only populated
+            for status ``"moved"``.
+        message: Human-readable explanation, suitable for inclusion
+            in the scan summary output.
+    """
+
+    status: str
+    vtpk_path: Path
+    dataset_id: str | None
+    destination: Path | None
+    message: str
+
+
+# ----------------------------------------------------------------------------
+# Path resolution + invariant probes
+# ----------------------------------------------------------------------------
+
+def resolve_vtpk_path(row: dict[str, Any], library_root: Path) -> Path:
+    """Return the canonical VTPK path for ``row``.
+
+    The catalogue row's ``file_path`` is relative to
+    ``library_root`` (the spatial subtree), e.g.
+    ``"Land_Designations_Tenure/parks.gpkg"``. The corresponding
+    VTPK lives under a sibling ``vtpk/`` subtree, flat (no category
+    folders), keyed by the GPKG's file stem:
+
+        library/spatial/Land_Designations_Tenure/parks.gpkg
+        library/vtpk/parks.vtpk
 
     Args:
-        gpkg_path: Path to the canonical GeoPackage source.
-        dataset_id: Catalogue dataset_id; used as the VTPK filename
-            stem so a row's package is recoverable later.
-        checksum: ``checksum_sha256`` from the catalogue row. The
-            cache-validity guard compares against a sidecar file.
-        cache_dir: Root cache directory (typically ``.y2y/`` in the
-            project root). The VTPK lands at
-            ``cache_dir/vtpk_cache/<dataset_id>.vtpk``.
-        min_cached_scale, max_cached_scale: passed straight to
-            arcpy's CreateVectorTilePackage. Lower max → smaller
-            VTPK but coarser at high zoom. Override the defaults
-            for datasets where the tile pyramid is overkill.
-        tile_format: ``INDEXED`` (default) or ``FLAT``. Indexed is
-            the modern default and what AGOL prefers for hosted
-            Vector Tile Services.
+        row: A catalogue row dict carrying ``file_path``.
+        library_root: The spatial-typed library root
+            (``library/spatial``). The VTPK subtree is at
+            ``library_root.parent / "vtpk"``.
 
     Returns:
-        Path to the .vtpk file.
+        Absolute path to where the VTPK should live. **Whether the
+        file actually exists is the caller's concern** — use
+        :func:`vtpk_present` to check.
 
     Raises:
-        AgolToolingError: arcpy isn't importable from the current
-            Python environment. The catalogue should preserve
-            ``sync_status='pending_push'`` so the steward can
-            retry under the ArcGIS Pro Python.
-        RuntimeError: arcpy is present but the package build
-            failed (e.g., GPKG layer can't be opened, output
-            directory not writable, license check failed).
+        ValueError: ``row`` has no ``file_path``.
     """
-    cache_dir = Path(cache_dir)
-    vtpk_dir = cache_dir / _CACHE_DIR_NAME
-    vtpk_dir.mkdir(parents=True, exist_ok=True)
-    out_path = vtpk_dir / f"{dataset_id}.vtpk"
-    sidecar = out_path.with_suffix(out_path.suffix + _CHECKSUM_SIDECAR_SUFFIX)
-
-    # Cache hit: same checksum, .vtpk on disk → return without rebuilding.
-    if out_path.exists() and sidecar.exists():
-        if sidecar.read_text(encoding="utf-8").strip() == checksum:
-            return out_path
-
-    # Cache miss — need to actually build.
-    arcpy = _require_arcpy()
-
-    if not gpkg_path.exists():
-        raise RuntimeError(
-            f"source GeoPackage not found: {gpkg_path}"
+    file_path = row.get("file_path")
+    if not file_path:
+        raise ValueError(
+            f"row has no file_path; cannot resolve VTPK path: "
+            f"dataset_id={row.get('dataset_id')!r}"
         )
-
-    # arcpy.management.CreateVectorTilePackage REQUIRES a Pro Map
-    # object as in_map — there's no feature-class-direct shortcut
-    # in ArcGIS Pro 3.x ("ERROR 000735: Input Map: Value is
-    # required" surfaces if you try to pass a feature class path).
-    # So we build a throwaway ArcGIS Pro project in a temp dir,
-    # add the GPKG layer to its default Map, then run the tool.
-    #
-    # The .aprx + map are scoped to a TemporaryDirectory so the
-    # filesystem stays clean even on tool-side failures. Pro's
-    # bundled blank template is the seed; arcpy.mp.ArcGISProject
-    # opens it, .saveACopy() forks it to our temp location, and
-    # we mutate the copy freely.
-    layer_name = _resolve_gpkg_layer_name(arcpy, gpkg_path)
-
-    # arcpy.ListFeatureClasses() on a GeoPackage returns names already
-    # prefixed with "main." (the GPKG default schema). Joining with
-    # an additional "main." prefix produces a bogus path like
-    # "<gpkg>/main.main.<layer>" which arcpy can't open ("Failed to
-    # add data. Possible credentials issue." — misleading, it's
-    # really "dataset not found"). Strip the prefix if present.
-    bare_layer_name = (
-        layer_name[len("main."):] if layer_name.startswith("main.")
-        else layer_name
-    )
-    layer_ref = f"{gpkg_path}\\main.{bare_layer_name}"
-
-    # Delete any stale .vtpk at the target path — arcpy refuses to
-    # overwrite by default.
-    if out_path.exists():
-        out_path.unlink()
-
-    import tempfile
-    # ignore_cleanup_errors=True: arcpy / Pro holds COM-level handles
-    # on the .aprx that aren't released by `del aprx` alone (release
-    # only happens at process exit). Without the flag, TemporaryDirectory
-    # raises a secondary PermissionError on cleanup that masks the
-    # real underlying error (or, on a successful build, makes the
-    # caller think the build failed). Orphaned files in %TEMP% are
-    # harmless — Windows cleans the dir periodically.
-    with tempfile.TemporaryDirectory(
-        prefix="y2y_vtpk_", ignore_cleanup_errors=True,
-    ) as tmpdir:
-        staging_aprx = Path(tmpdir) / "vtpk_staging.aprx"
-        try:
-            aprx = _open_blank_pro_project(
-                arcpy, staging_aprx, cache_dir=cache_dir,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to create staging ArcGIS Pro project for VTPK "
-                f"build: {exc}. Confirm ArcGIS Pro is installed and the "
-                f"current Python is the Pro bundled environment."
-            ) from exc
-
-        # Wrap everything from project-open through tool invocation in
-        # a try/finally so the aprx handle is ALWAYS released — even
-        # when an intermediate step (addDataFromPath, etc.) raises.
-        # Otherwise Windows holds the .aprx file open and
-        # TemporaryDirectory.__exit__ fails its own cleanup with a
-        # PermissionError, masking the real underlying error.
-        try:
-            maps = aprx.listMaps()
-            if not maps:
-                # createMap signature varies across SDK versions: try
-                # the modern 'map_type' kwarg first then fall back.
-                try:
-                    map_obj = aprx.createMap("Y2Y_VTPK_Staging", "Map")
-                except TypeError:
-                    map_obj = aprx.createMap("Y2Y_VTPK_Staging")
-            else:
-                map_obj = maps[0]
-
-            # Add the GPKG layer to the map.
-            try:
-                map_obj.addDataFromPath(layer_ref)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"arcpy could not add GPKG layer to staging map "
-                    f"({layer_ref!r}): {exc}"
-                ) from exc
-
-            # Persist so CreateVectorTilePackage can see the map
-            # contents.
-            aprx.save()
-
-            # Build the arcpy kwargs conditionally so we only pass
-            # scale arguments when the caller explicitly provided
-            # them. arcpy validates min/max scales against the active
-            # tiling scheme; passing None or rounded values triggers
-            # ERROR 001856.
-            create_kwargs: dict[str, Any] = {
-                "in_map": map_obj,
-                "output_file": str(out_path),
-                "service_type": "ONLINE",
-                "tile_structure": "INDEXED",
-                "index_polygons": None,
-                "summary": f"Vector Tile Package for {dataset_id}",
-                "tags": "Y2Y",
-            }
-            if min_cached_scale is not None:
-                create_kwargs["min_cached_scale"] = min_cached_scale
-            if max_cached_scale is not None:
-                create_kwargs["max_cached_scale"] = max_cached_scale
-
-            try:
-                arcpy.management.CreateVectorTilePackage(**create_kwargs)
-            except Exception as exc:  # pragma: no cover — arcpy-only path
-                raise RuntimeError(
-                    f"arcpy.management.CreateVectorTilePackage failed for "
-                    f"{gpkg_path}: {exc}"
-                ) from exc
-        finally:
-            # Release file handles so the TemporaryDirectory can clean
-            # itself up without 'file in use' errors on Windows. Must
-            # run regardless of where in the block above we errored.
-            try:
-                del aprx
-            except NameError:
-                pass
-
-    if not out_path.exists():
-        raise RuntimeError(
-            f"arcpy reported success but no .vtpk was produced at {out_path}"
-        )
-
-    sidecar.write_text(checksum, encoding="utf-8")
-    return out_path
+    stem = Path(file_path).stem
+    return library_root.parent / _VTPK_LIBRARY_SUBDIR / f"{stem}.vtpk"
 
 
-def _open_blank_pro_project(
-    arcpy: Any, dest_aprx: Path, *, cache_dir: Path | None = None,
-) -> Any:
-    """Open an ArcGIS Pro project at ``dest_aprx``, seeded from a blank
-    template.
-
-    arcpy.mp.ArcGISProject only opens existing .aprx files — there's
-    no in-memory or 'create new' constructor. So we locate a blank
-    template, saveACopy() it to ``dest_aprx``, then reopen the copy
-    (which is what the caller mutates).
-
-    Template lookup order:
-
-    1. **Steward override** at ``<cache_dir>/vtpk_template.aprx``.
-       If you have a custom template (e.g., with project-level
-       defaults like a spatial reference), drop it here and the
-       pipeline uses it instead of Pro's bundled one. Stable across
-       Pro upgrades, so this is the recommended setup if Pro's
-       bundled template location moves in a future release.
-    2. **Pro's bundled blank.** Pro 3.x ships ``Blank.aprx`` under
-       ``Resources\\ArcToolBox\\Services\\routingservices\\data\\``
-       (unusual location, but works). We also probe a few other
-       historical paths in case Esri moves it again.
-
-    If none exist, raise with a clear remediation hint pointing at
-    the cache_dir override.
-    """
-    candidates: list[Path] = []
-    if cache_dir is not None:
-        candidates.append(Path(cache_dir) / "vtpk_template.aprx")
-
-    install_dir = Path(arcpy.GetInstallInfo()["InstallDir"])
-    candidates.extend([
-        # Pro 3.x — the routing services toolbox happens to ship a
-        # blank .aprx; not officially documented as a template but
-        # arcpy treats it like one.
-        install_dir / "Resources" / "ArcToolBox" / "Services" / "routingservices" / "data" / "Blank.aprx",
-        # Historical / version-specific candidate locations.
-        install_dir / "Resources" / "ProjectTemplates" / "BlankTemplate.aprx",
-        install_dir / "Resources" / "ArcCatalog" / "Templates" / "BlankTemplate.aprx",
-        install_dir / "Resources" / "ApplicationTemplates" / "BlankTemplate.aprx",
-    ])
-
-    template: Path | None = next((c for c in candidates if c.exists()), None)
-    if template is None:
-        override_hint = (
-            Path(cache_dir) / "vtpk_template.aprx"
-            if cache_dir is not None
-            else Path(".y2y") / "vtpk_template.aprx"
-        )
-        raise RuntimeError(
-            f"Could not locate a blank ArcGIS Pro project template "
-            f"under {install_dir!r}. Checked: "
-            f"{[str(c) for c in candidates]}. "
-            f"Fix: open ArcGIS Pro → File → New Project → "
-            f"choose any 'Map' template, then save the project as "
-            f"{str(override_hint)!r}. After that the pipeline picks "
-            f"it up automatically on every VTPK build."
-        )
-
-    src = arcpy.mp.ArcGISProject(str(template))
-    src.saveACopy(str(dest_aprx))
-    # Release the source handle.
-    del src
-    return arcpy.mp.ArcGISProject(str(dest_aprx))
-
-
-# ----------------------------------------------------------------------------
-# arcpy detection
-# ----------------------------------------------------------------------------
-
-def _require_arcpy() -> Any:
-    """Return the arcpy module, or raise ``AgolToolingError`` if absent.
-
-    Kept as a function (not module-level) so importing
-    ``pipeline.agol_vtpk`` works on every environment, including the
-    Mac-side Python that can't import arcpy. The Mac runs everything
-    *except* the VTL publish path; we only need arcpy when a
-    vector-tile-layer row is actually being pushed.
-    """
+def vtpk_present(row: dict[str, Any], library_root: Path) -> bool:
+    """Quick probe: does the row's expected VTPK exist on disk?"""
     try:
-        import arcpy  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise AgolToolingError(
-            "Vector Tile Layer publishing requires the ArcGIS Pro "
-            "Python environment. Run this command under Pro's "
-            "bundled Python (typically "
-            "`C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\envs\\arcgispro-py3\\python.exe` "
-            "on Windows), or change this dataset's `agol_target` to "
-            "`feature-layer` to use the SDK-only publish path."
-        ) from exc
-    return arcpy
-
-
-def is_arcpy_available() -> bool:
-    """Quick boolean probe for tests / status messages.
-
-    Doesn't raise — useful in CLI / status reporting where we want to
-    show 'arcpy: available' or 'arcpy: not available (VTL pushes
-    will fail)' without forcing the steward to attempt a push.
-    """
-    try:
-        import arcpy  # noqa: F401  — import-side-effect only
-        return True
-    except ImportError:
+        return resolve_vtpk_path(row, library_root).exists()
+    except ValueError:
         return False
 
 
-# ----------------------------------------------------------------------------
-# GPKG layer-name resolution
-# ----------------------------------------------------------------------------
+def vtpk_stale(row: dict[str, Any], library_root: Path) -> bool:
+    """Probe: is the row's VTPK older than its source GPKG?
 
-def _resolve_gpkg_layer_name(arcpy: Any, gpkg_path: Path) -> str:
-    """Find the single feature layer inside a Y2Y canonical GeoPackage.
-
-    Y2Y's ingestion pipeline writes single-layer GPKGs (multi-layer
-    sources are rejected at scan). The layer name typically matches
-    the file stem, but we don't assume that — we ask arcpy to list
-    feature classes inside the GPKG and pick the single one.
-
-    Raises ``RuntimeError`` if the GPKG has zero or multiple feature
-    classes (shouldn't happen for catalogue rows, but defensive).
+    Returns ``False`` when the VTPK doesn't exist (the
+    ``vtpk_present`` check covers that case separately) and also
+    when there's no source GPKG to compare against. Returns
+    ``True`` only when both files exist and the GPKG's mtime is
+    strictly newer than the VTPK's. Stewards rebuild the VTPK in
+    Pro after source changes; this probe is how reconcile catches
+    forgotten rebuilds.
     """
-    workspace = str(gpkg_path)
-    # arcpy.da.Walk / ListFeatureClasses requires setting the
-    # workspace. Save + restore in case the caller's arcpy session
-    # had a different workspace.
-    prior = arcpy.env.workspace
     try:
-        arcpy.env.workspace = workspace
-        fcs = list(arcpy.ListFeatureClasses() or [])
-    finally:
-        arcpy.env.workspace = prior
+        vtpk_path = resolve_vtpk_path(row, library_root)
+    except ValueError:
+        return False
+    if not vtpk_path.exists():
+        return False
+    gpkg_path = library_root / (row.get("file_path") or "")
+    if not gpkg_path.exists():
+        return False
+    return gpkg_path.stat().st_mtime > vtpk_path.stat().st_mtime
 
-    if not fcs:
-        raise RuntimeError(
-            f"GPKG has no feature classes: {gpkg_path}"
+
+def read_vtpk_checksum(vtpk_path: Path) -> str:
+    """Return the VTPK's SHA-256, reading the sidecar if present.
+
+    On first call (or whenever the sidecar is missing) the
+    checksum is computed by streaming the file, then written to
+    the sidecar for future calls. Keeps push() and reconcile fast
+    even for multi-MB VTPKs.
+    """
+    sidecar = vtpk_path.with_suffix(vtpk_path.suffix + _CHECKSUM_SIDECAR_SUFFIX)
+    if sidecar.exists():
+        cached = sidecar.read_text(encoding="utf-8").strip()
+        if cached:
+            return cached
+    digest = utils.sha256_file(vtpk_path)
+    sidecar.write_text(digest, encoding="utf-8")
+    return digest
+
+
+# ----------------------------------------------------------------------------
+# Ingest
+# ----------------------------------------------------------------------------
+
+def ingest_one_vtpk(
+    vtpk_path: Path,
+    library_root: Path,
+    db_path: Path,
+    *,
+    actor: str,
+) -> IngestVtpkResult:
+    """Move one queued VTPK into the canonical library location.
+
+    The pipeline's ``y2y ingest scan`` walks ``queue/incoming/``
+    and calls this function for every file whose extension is
+    ``.vtpk``. The expected steward workflow is:
+
+    1. Steward builds the VTPK in ArcGIS Pro's "Share As Vector
+       Tile Package" dialog, saves it with the same stem as the
+       source GPKG (e.g., ``parks.vtpk`` for ``parks.gpkg``).
+    2. Steward drops the file in ``queue/incoming/``.
+    3. ``y2y ingest scan`` discovers it and calls this function.
+
+    This function:
+
+    * Validates the file is a real VTPK (ZIP container) by sniffing
+      the first four bytes. A spurious file with a ``.vtpk``
+      extension is rejected without touching the catalogue.
+    * Matches the file to a catalogue row by file stem:
+      ``status='active'`` AND ``agol_target='vector-tile-layer'``
+      AND ``file_path`` ends with ``<stem>.gpkg``.
+    * On a single clean match: computes SHA-256, moves the file to
+      ``library/vtpk/<stem>.vtpk``, writes the ``.sha256`` sidecar,
+      appends an ``ingest-vtpk`` changelog entry capturing the
+      checksum.
+    * On 0 / >1 / wrong-target matches: leaves the file in the
+      queue and returns a non-``moved`` status. The scan summary
+      surfaces these so the steward can fix the filename or the
+      catalogue's ``agol_target`` and re-run.
+
+    Args:
+        vtpk_path: Absolute path to the queued ``.vtpk`` file.
+        library_root: ``<project>/library/spatial/`` — the typed
+            library root. The VTPK subtree is a sibling at
+            ``library_root.parent / "vtpk"``.
+        db_path: Path to ``inventory.db``.
+        actor: Recorded as the changelog actor.
+
+    Returns:
+        :class:`IngestVtpkResult` describing the outcome.
+    """
+    # --- validation: file actually exists ---
+    if not vtpk_path.exists() or not vtpk_path.is_file():
+        return IngestVtpkResult(
+            status="invalid", vtpk_path=vtpk_path,
+            dataset_id=None, destination=None,
+            message=f"file does not exist or is not a regular file",
         )
-    if len(fcs) > 1:
-        raise RuntimeError(
-            f"GPKG has {len(fcs)} feature classes; Y2Y expects "
-            f"single-layer canonical: {gpkg_path}"
+
+    # --- validation: looks like a real VTPK (ZIP) ---
+    try:
+        with vtpk_path.open("rb") as f:
+            magic = f.read(4)
+    except OSError as exc:
+        return IngestVtpkResult(
+            status="invalid", vtpk_path=vtpk_path,
+            dataset_id=None, destination=None,
+            message=f"could not read header: {exc}",
         )
-    return fcs[0]
+    if magic != _ZIP_MAGIC:
+        return IngestVtpkResult(
+            status="invalid", vtpk_path=vtpk_path,
+            dataset_id=None, destination=None,
+            message=(
+                f"not a valid VTPK (ZIP signature missing; got "
+                f"{magic!r}). VTPKs are zip containers."
+            ),
+        )
+
+    # --- match by file stem ---
+    stem = vtpk_path.stem
+    matches = _find_rows_by_gpkg_stem(db_path, stem)
+    if not matches:
+        return IngestVtpkResult(
+            status="unmatched", vtpk_path=vtpk_path,
+            dataset_id=None, destination=None,
+            message=(
+                f"no active catalogue row found with a .gpkg "
+                f"file_path matching stem {stem!r}. The VTPK "
+                f"filename must match the GPKG filename "
+                f"(e.g., {stem}.vtpk pairs with {stem}.gpkg)."
+            ),
+        )
+    if len(matches) > 1:
+        ids = ", ".join(r["dataset_id"] for r in matches)
+        return IngestVtpkResult(
+            status="ambiguous", vtpk_path=vtpk_path,
+            dataset_id=None, destination=None,
+            message=(
+                f"multiple active rows share GPKG stem {stem!r}: "
+                f"{ids}. Cannot infer which one this VTPK belongs "
+                f"to. Use unique filenames or drop the VTPK only "
+                f"after the duplicate is resolved."
+            ),
+        )
+
+    row = matches[0]
+    if row.get("agol_target") != "vector-tile-layer":
+        return IngestVtpkResult(
+            status="target_mismatch", vtpk_path=vtpk_path,
+            dataset_id=row["dataset_id"], destination=None,
+            message=(
+                f"row {row['dataset_id']!r} matched by stem but its "
+                f"agol_target is {row.get('agol_target')!r}, not "
+                f"'vector-tile-layer'. To accept this VTPK, run "
+                f"`y2y update {row['dataset_id']} "
+                f"--set agol_target=vector-tile-layer` first."
+            ),
+        )
+
+    # --- move + sidecar + changelog ---
+    dest = resolve_vtpk_path(row, library_root)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    digest = utils.sha256_file(vtpk_path)
+    # Replace any prior VTPK at the destination (re-ingest is a
+    # refresh; the prior file's checksum is captured in the
+    # previous changelog entry, so we don't need to preserve it).
+    if dest.exists():
+        dest.unlink()
+    sidecar = dest.with_suffix(dest.suffix + _CHECKSUM_SIDECAR_SUFFIX)
+    if sidecar.exists():
+        sidecar.unlink()
+    vtpk_path.rename(dest)
+    sidecar.write_text(digest, encoding="utf-8")
+
+    # Audit entry. Using action='metadata' for the changelog because
+    # it captures the steward-visible state change ("a VTPK now
+    # exists for this row") without inventing a new action type —
+    # the structured note + field_changed='vtpk' is what makes it
+    # identifiable.
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=utils.utc_now_iso(),
+        action="metadata",
+        dataset_id=row["dataset_id"],
+        actor=actor,
+        path=row.get("file_path"),
+        field_changed="vtpk",
+        old_value=None,
+        new_value=digest,
+        detail=(
+            f"ingested VTPK to {dest.relative_to(library_root.parent)} "
+            f"(sha256={digest})"
+        ),
+    )
+
+    return IngestVtpkResult(
+        status="moved", vtpk_path=vtpk_path,
+        dataset_id=row["dataset_id"], destination=dest,
+        message=(
+            f"moved to library/vtpk/{dest.name} for dataset "
+            f"{row['dataset_id']} (sha256={digest[:12]}…)"
+        ),
+    )
+
+
+# ----------------------------------------------------------------------------
+# Internal helpers
+# ----------------------------------------------------------------------------
+
+def _find_rows_by_gpkg_stem(
+    db_path: Path, stem: str,
+) -> list[dict[str, Any]]:
+    """Return active rows whose ``file_path`` ends with ``<stem>.gpkg``.
+
+    Used by the VTPK ingest to find the catalogue row a queued
+    file belongs to. The match is a SQL LIKE on the file_path
+    suffix; the row's ``agol_target`` is checked by the caller
+    (we report a clear ``target_mismatch`` rather than silently
+    ignoring rows that aren't VTL targets).
+
+    Uses ``pipeline.db.connect`` rather than a raw sqlite3 call so
+    a brand-new DB file gets the schema applied lazily. (Production
+    catalogues always have the schema in place; tests sometimes
+    don't, and we don't want to crash with "no such table".)
+    """
+    from . import db as _db
+    with _db.connect(db_path) as con:
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT * FROM datasets "
+            "WHERE status = 'active' AND file_path LIKE ?",
+            (f"%{stem}.gpkg",),
+        ).fetchall()
+    return [dict(r) for r in rows]

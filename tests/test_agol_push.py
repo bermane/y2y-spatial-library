@@ -99,6 +99,7 @@ def _make_gis(
     *,
     new_item_id: str = "new_item_id_xyz",
     existing_item: MagicMock | None = None,
+    existing_item_type: str = "Feature Service",
     group_id: str = "group_abc",
     publish_raises: Exception | None = None,
 ) -> MagicMock:
@@ -113,6 +114,15 @@ def _make_gis(
 
     Tests reach the source via ``gis.content.add.return_value`` and the
     service via ``gis.content.add.return_value.publish.return_value``.
+
+    ``existing_item_type`` controls what AGOL type the existing item
+    reports via ``.type`` — push()'s target-switch detection compares
+    this against the catalogue's agol_target. Defaults to
+    "Feature Service" since most tests exercise the feature-layer
+    path. Pass "Vector Tile Service" / "Image Service" for the
+    other paths. Tests that don't already set ``.type`` on the
+    provided ``existing_item`` get this default applied so the
+    switch detector doesn't fire spuriously.
     """
     gis = MagicMock()
 
@@ -135,6 +145,7 @@ def _make_gis(
         # The service item — what source.publish() returns.
         service = MagicMock()
         service.id = new_item_id  # stored as agol_item_id on the catalogue
+        service.type = existing_item_type  # for target-switch detection
         service.sharing = MagicMock()
         service.sharing.sharing_level = "PRIVATE"
         service.sharing.groups = MagicMock()
@@ -143,6 +154,12 @@ def _make_gis(
     gis.content.add.return_value = source
 
     if existing_item is not None:
+        # Default the AGOL type so push()'s target-switch detector
+        # doesn't fire on tests that don't explicitly set it.
+        # Tests that need a specific type to drive the switch logic
+        # can override before/after calling _make_gis.
+        if not isinstance(getattr(existing_item, "type", None), str):
+            existing_item.type = existing_item_type
         gis.content.get.return_value = existing_item
     else:
         gis.content.get.return_value = None
@@ -1261,6 +1278,7 @@ def test_push_imagery_update_refreshes_via_output_name(
 
     existing = MagicMock()
     existing.id = "preexisting_imagery_id"
+    existing.type = "Image Service"
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
 
@@ -1277,7 +1295,7 @@ def test_push_imagery_update_refreshes_via_output_name(
     row["date_modified"] = "2026-04-29T00:00:00Z"
     inventory_manager.insert_dataset(db, row)
 
-    gis = _make_gis(existing_item=existing)
+    gis = _make_gis(existing_item=existing, existing_item_type="Image Service")
     fake_publish = _patch_publish_hosted_imagery_layer(
         monkeypatch, existing,
     )
@@ -1317,6 +1335,7 @@ def test_push_imagery_update_skips_refresh_when_checksum_unchanged(
 
     existing = MagicMock()
     existing.id = "preexisting_imagery_id"
+    existing.type = "Image Service"
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
 
@@ -1333,7 +1352,7 @@ def test_push_imagery_update_skips_refresh_when_checksum_unchanged(
     row["date_modified"] = "2026-04-29T00:00:00Z"
     inventory_manager.insert_dataset(db, row)
 
-    gis = _make_gis(existing_item=existing)
+    gis = _make_gis(existing_item=existing, existing_item_type="Image Service")
     fake_publish = _patch_publish_hosted_imagery_layer(monkeypatch, existing)
 
     agol_sync.push(
@@ -1362,6 +1381,7 @@ def test_push_imagery_records_warning_when_refresh_raises(
 
     existing = MagicMock()
     existing.id = "preexisting_imagery_id"
+    existing.type = "Image Service"
     existing.sharing = MagicMock()
     existing.sharing.sharing_level = "ORGANIZATION"
 
@@ -1377,7 +1397,7 @@ def test_push_imagery_records_warning_when_refresh_raises(
     row["date_modified"] = "2026-04-29T00:00:00Z"
     inventory_manager.insert_dataset(db, row)
 
-    gis = _make_gis(existing_item=existing)
+    gis = _make_gis(existing_item=existing, existing_item_type="Image Service")
     import arcgis.raster
     monkeypatch.setattr(
         arcgis.raster, "publish_hosted_imagery_layer",
@@ -1436,35 +1456,46 @@ def test_push_imagery_create_failure_raises_agol_error(
 
 
 # ----------------------------------------------------------------------------
-# Vector tile layer — arcpy-stub path
+# Vector tile layer — manual-VTPK rev 3 path
 # ----------------------------------------------------------------------------
+#
+# The arcpy path was retired in rev 3 (2026-05-27) after a session
+# of Pro-upgrade fragility failures. Now the steward builds the
+# VTPK in Pro's UI manually, drops it in queue/incoming/, runs
+# `y2y ingest scan` to move it to library/vtpk/<stem>.vtpk, and
+# push() uploads the pre-built file. These tests fake the VTPK by
+# writing valid ZIP-signature bytes at the canonical library path
+# before exercising push().
 
-def test_push_vector_tile_layer_invokes_local_vtpk_build(
+def _plant_vtpk(project_tree, file_stem: str) -> Path:
+    """Drop a fake-but-valid VTPK file at library/vtpk/<stem>.vtpk."""
+    vtpk_dir = project_tree["library"].parent / "vtpk"
+    vtpk_dir.mkdir(parents=True, exist_ok=True)
+    vtpk_path = vtpk_dir / f"{file_stem}.vtpk"
+    # Real VTPK files are zip containers; we sniff the ZIP local
+    # file header magic in agol_vtpk.ingest_one_vtpk. For push()
+    # tests the magic isn't required — but we use it for realism.
+    vtpk_path.write_bytes(b"PK\x03\x04fake-vtpk-payload-for-testing")
+    return vtpk_path
+
+
+def test_push_vtl_create_uploads_vtpk_publishes_vts(
     project_tree, _config_no_cache, valid_gpkg_factory,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """vector-tile-layer push calls agol_vtpk.build_vtpk to produce a
-    local .vtpk, then gis.content.add the VTPK + Item.publish() it.
-    No hosted-feature-layer intermediate is ever created."""
+    """Create-path push for a VTL row: VTPK exists at library/vtpk/,
+    push uploads it as a source item + publishes the VTS. No arcpy
+    invocation anywhere; no intermediate Feature Service."""
     db = project_tree["db"]
-    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    vtpk_path = _plant_vtpk(project_tree, "parks")
+
     row = _full_row(
-        dataset_id="ds_vtl", file_path="Water/v.gpkg",
+        dataset_id="ds_vtl",
+        file_path="Land_Designations_Tenure/parks.gpkg",
         agol_target="vector-tile-layer",
+        category="Land Designations & Tenure",
     )
     inventory_manager.insert_dataset(db, row)
-
-    # Stub arcpy via sys.modules + monkeypatch build_vtpk to return a
-    # fake .vtpk path (so we don't actually try to run arcpy).
-    from pipeline import agol_vtpk
-    fake_vtpk = project_tree["root"] / ".y2y" / "vtpk_cache" / "ds_vtl.vtpk"
-    fake_vtpk.parent.mkdir(parents=True, exist_ok=True)
-    fake_vtpk.write_bytes(b"\x50\x4b\x03\x04fake-vtpk-payload")
-
-    monkeypatch.setattr(
-        agol_vtpk, "build_vtpk",
-        lambda gpkg_path, dataset_id, checksum, cache_dir, **kw: fake_vtpk,
-    )
 
     gis = _make_gis(new_item_id="vtl_item_id")
     result = agol_sync.push(
@@ -1473,13 +1504,287 @@ def test_push_vector_tile_layer_invokes_local_vtpk_build(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # gis.content.add called with the .vtpk path, not the .gpkg path.
+    # gis.content.add called with the .vtpk path (not the GPKG).
     call = gis.content.add.call_args
-    assert str(fake_vtpk) == call.kwargs["data"]
+    assert str(vtpk_path) == call.kwargs["data"]
     assert call.kwargs["item_properties"]["type"] == "Vector Tile Package"
+
+    # source.publish called with file_type='Vector Tile Package' to
+    # produce the Vector Tile Service.
+    source = gis.content.add.return_value
+    source.publish.assert_called_once()
+    publish_kwargs = source.publish.call_args.kwargs
+    assert publish_kwargs.get("file_type") == "Vector Tile Package"
 
     assert result.agol_item_id == "vtl_item_id"
     assert result.sync_status_after == "clean"
+
+
+def test_push_vtl_create_errors_when_vtpk_not_ingested(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """If no VTPK exists at library/vtpk/<stem>.vtpk, push() raises
+    AgolError with an actionable message before any AGOL contact.
+    This is the rev 3 pre-flight check; reconcile also surfaces
+    this case via the missing-VTPK invariant.
+    """
+    db = project_tree["db"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    # NB: no VTPK planted.
+    row = _full_row(
+        dataset_id="ds_vtl",
+        file_path="Land_Designations_Tenure/parks.gpkg",
+        agol_target="vector-tile-layer",
+        category="Land Designations & Tenure",
+    )
+    inventory_manager.insert_dataset(db, row)
+    gis = _make_gis(new_item_id="vtl_item_id")
+
+    with pytest.raises(agol_sync.AgolError, match="No VTPK ingested"):
+        agol_sync.push(
+            db, "ds_vtl", gis, _config_no_cache,
+            library_root=project_tree["library"], actor="tester",
+            cache_dir=project_tree["root"] / ".y2y",
+        )
+
+    # No AGOL contact happened — pre-flight bailed before content.add.
+    gis.content.add.assert_not_called()
+
+
+def test_push_vtl_update_refreshes_when_vtpk_checksum_changed(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Update-path push for a VTL row: if the on-disk VTPK's sha256
+    differs from the Y2Y:vtpk_sha256 typeKeyword on the AGOL
+    source item, refresh via source.update(data) + source.publish(
+    file_type='Vector Tile Package', overwrite=True)."""
+    db = project_tree["db"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    vtpk_path = _plant_vtpk(project_tree, "parks")
+
+    # The AGOL source item — has a stale checksum typeKeyword.
+    source_item = MagicMock()
+    source_item.id = "source_vtpk_id"
+    source_item.typeKeywords = [
+        "Y2Y", "Y2Y:source", "Y2Y:dataset_id:ds_vtl",
+        "Y2Y:vtpk_sha256:STALE_HASH",
+    ]
+    source_item.sharing = MagicMock()
+    source_item.sharing.sharing_level = "PRIVATE"
+    source_item.related_items.return_value = []
+
+    # The existing service.
+    existing = MagicMock()
+    existing.id = "vtl_item_id"
+    existing.type = "Vector Tile Service"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.related_items.return_value = [source_item]
+
+    row = _full_row(
+        dataset_id="ds_vtl",
+        file_path="Land_Designations_Tenure/parks.gpkg",
+        agol_target="vector-tile-layer",
+        category="Land Designations & Tenure",
+        sync_status="pending_push",
+        agol_item_id="vtl_item_id",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(
+        existing_item=existing,
+        existing_item_type="Vector Tile Service",
+    )
+
+    agol_sync.push(
+        db, "ds_vtl", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # source.update(data=<vtpk>) was called.
+    source_update_data_calls = [
+        c for c in source_item.update.call_args_list
+        if "data" in c.kwargs
+    ]
+    assert source_update_data_calls, (
+        "expected source.update(data=<vtpk_path>) when VTPK checksum "
+        "differs from the AGOL Y2Y:vtpk_sha256 typeKeyword"
+    )
+
+    # source.publish(file_type='Vector Tile Package', overwrite=True)
+    # was called.
+    source_item.publish.assert_called_once()
+    pub_kwargs = source_item.publish.call_args.kwargs
+    assert pub_kwargs.get("file_type") == "Vector Tile Package"
+    assert pub_kwargs.get("overwrite") is True
+
+    # service.publish must NEVER be called on update (would create a
+    # duplicate VTS, just like the FL regression guard).
+    existing.publish.assert_not_called()
+
+
+def test_push_vtl_update_skips_refresh_when_vtpk_checksum_matches(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """If the on-disk VTPK's sha256 matches the AGOL source item's
+    Y2Y:vtpk_sha256 typeKeyword, skip the refresh — only metadata
+    + move + sharing happen. Avoids re-uploading multi-MB packages
+    unnecessarily."""
+    db = project_tree["db"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    vtpk_path = _plant_vtpk(project_tree, "parks")
+
+    # Compute the actual sha to plant on the AGOL source mock.
+    from pipeline import agol_vtpk as _av
+    real_sha = _av.read_vtpk_checksum(vtpk_path)
+
+    source_item = MagicMock()
+    source_item.id = "source_vtpk_id"
+    source_item.typeKeywords = [
+        "Y2Y", "Y2Y:source", "Y2Y:dataset_id:ds_vtl",
+        f"Y2Y:vtpk_sha256:{real_sha}",
+    ]
+    source_item.sharing = MagicMock()
+    source_item.sharing.sharing_level = "PRIVATE"
+    source_item.related_items.return_value = []
+
+    existing = MagicMock()
+    existing.id = "vtl_item_id"
+    existing.type = "Vector Tile Service"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.related_items.return_value = [source_item]
+
+    row = _full_row(
+        dataset_id="ds_vtl",
+        file_path="Land_Designations_Tenure/parks.gpkg",
+        agol_target="vector-tile-layer",
+        category="Land Designations & Tenure",
+        sync_status="clean",
+        agol_item_id="vtl_item_id",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(
+        existing_item=existing,
+        existing_item_type="Vector Tile Service",
+    )
+
+    agol_sync.push(
+        db, "ds_vtl", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # No data refresh — source.publish wasn't called.
+    source_item.publish.assert_not_called()
+    # No source.update(data=...) either.
+    update_data_calls = [
+        c for c in source_item.update.call_args_list
+        if "data" in c.kwargs
+    ]
+    assert not update_data_calls
+
+
+# ----------------------------------------------------------------------------
+# Target-switch tests (rev 3.6)
+# ----------------------------------------------------------------------------
+
+def test_push_target_switch_FL_to_VTL_unpublishes_old(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """When agol_target was changed from feature-layer to
+    vector-tile-layer on a previously-published row, push detects
+    the type mismatch and unpublishes the old Feature Service +
+    linked source GPKG before creating the new VTS."""
+    db = project_tree["db"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    _plant_vtpk(project_tree, "parks")
+
+    # Existing AGOL item is a Feature Service (the catalogue was
+    # previously feature-layer). The steward has since switched
+    # agol_target to vector-tile-layer; push must detect the
+    # mismatch and unpublish.
+    linked_source = MagicMock()
+    linked_source.id = "old_gpkg_source_id"
+
+    existing = MagicMock()
+    existing.id = "old_fs_id"
+    existing.type = "Feature Service"  # ← mismatched against target=VTL
+    existing.related_items.return_value = [linked_source]
+
+    row = _full_row(
+        dataset_id="ds_vtl",
+        file_path="Land_Designations_Tenure/parks.gpkg",
+        agol_target="vector-tile-layer",
+        category="Land Designations & Tenure",
+        sync_status="pending_push",
+        agol_item_id="old_fs_id",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(
+        new_item_id="new_vtl_id",
+        existing_item=existing,
+        existing_item_type="Feature Service",
+    )
+
+    result = agol_sync.push(
+        db, "ds_vtl", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Both the existing Feature Service AND its linked source were
+    # deleted before the new VTS was created.
+    existing.delete.assert_called_once()
+    linked_source.delete.assert_called_once()
+
+    # The catalogue's agol_item_id is now the NEW VTS id.
+    assert result.agol_item_id == "new_vtl_id"
+
+    # Internal notes records the target switch.
+    after = inventory_manager.get_dataset(db, "ds_vtl")
+    notes = after["internal_notes"] or ""
+    assert "agol_target switched" in notes
+
+
+def test_push_target_switch_handles_missing_agol_item(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """If the catalogue has agol_item_id set but the AGOL item is
+    gone (deleted out-of-band), push() proceeds as if it were a
+    create — records a warning and creates fresh."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push",
+        agol_item_id="phantom_id",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    # gis.content.get returns None (item missing) — set via _make_gis
+    # passing existing_item=None.
+    gis = _make_gis(new_item_id="new_fl_id")
+    # But we DO need to flag agol_item_id as set — push() reads from
+    # the catalogue row, so we just rely on the row having
+    # agol_item_id='phantom_id' and gis.content.get returning None.
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # New FS was created (push took the create path despite the
+    # phantom agol_item_id).
+    assert result.agol_item_id == "new_fl_id"
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    assert "deleted out-of-band" in notes or "no longer exists" in notes
 
 
 # ----------------------------------------------------------------------------

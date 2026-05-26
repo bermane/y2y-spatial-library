@@ -1,350 +1,305 @@
-"""Tests for pipeline.agol_vtpk.
+"""Tests for pipeline.agol_vtpk (rev 3 — manual VTPK + queue ingest).
 
-arcpy isn't pip-installable and isn't present in this test
-environment. The tests stub it via ``sys.modules['arcpy']`` for the
-build-path tests, and exercise the no-arcpy path by ensuring the
-fallback raises a clean AgolToolingError.
+The arcpy-driven path tested here in earlier revisions has been
+retired (it proved fragile across ArcGIS Pro upgrades). These
+tests cover the new responsibilities:
 
-Cache-hit tests don't need arcpy at all — they just write a
-pre-existing .vtpk + sidecar into the cache and confirm the
-function short-circuits.
+* path resolution (catalogue row → ``library/vtpk/<stem>.vtpk``)
+* presence + staleness probes used by push pre-flight + reconcile
+* the per-file ingest flow that ``y2y ingest scan`` dispatches for
+  every ``.vtpk`` discovered in ``queue/incoming/``
+* the SHA-256 sidecar pattern (cache the hash, recompute if missing)
 """
 
 from __future__ import annotations
 
-import sys
-import types
+import os
+import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from pipeline import agol_vtpk
-from pipeline.agol_sync import AgolToolingError
+from pipeline import agol_vtpk, inventory_manager
 
 
-def _install_fake_arcpy(monkeypatch: pytest.MonkeyPatch, fake) -> None:
-    """Inject a fake arcpy into sys.modules so `import arcpy` succeeds."""
-    monkeypatch.setitem(sys.modules, "arcpy", fake)
+# A minimal valid VTPK starts with the ZIP local file header magic.
+# agol_vtpk.ingest_one_vtpk sniffs the first four bytes; the rest
+# of the file is opaque to it (AGOL handles unpacking, not us).
+_ZIP_MAGIC = b"PK\x03\x04"
 
 
-def _stub_pro_project_plumbing(
-    fake_arcpy: types.ModuleType, tmp_path: Path,
-) -> tuple[MagicMock, MagicMock]:
-    """Wire the fake arcpy with a working .mp.ArcGISProject + GetInstallInfo.
+# ----------------------------------------------------------------------------
+# Path resolution + probes
+# ----------------------------------------------------------------------------
 
-    build_vtpk needs:
-
-    * ``arcpy.GetInstallInfo()['InstallDir']`` → an install dir we
-      can plant a fake BlankTemplate.aprx under.
-    * ``arcpy.mp.ArcGISProject(template_path)`` → returns a project
-      with a saveACopy method that creates the destination file.
-    * ``arcpy.mp.ArcGISProject(dest_path)`` → returns a project
-      with listMaps/createMap/save/addDataFromPath methods.
-
-    Returns the (project, map) mocks so individual tests can assert
-    against them.
-    """
-    install_dir = tmp_path / "fake_pro_install"
-    # Plant the template at Pro 3.x's actual bundled location (the
-    # routing-services data folder, an unusual but real location).
-    template_dir = install_dir / "Resources" / "ArcToolBox" / "Services" / "routingservices" / "data"
-    template_dir.mkdir(parents=True)
-    template_path = template_dir / "Blank.aprx"
-    template_path.write_bytes(b"fake-template")
-
-    fake_arcpy.GetInstallInfo = MagicMock(
-        return_value={"InstallDir": str(install_dir)}
-    )
-
-    map_mock = MagicMock()
-    map_mock.addDataFromPath = MagicMock()
-    project_mock = MagicMock()
-    project_mock.listMaps = MagicMock(return_value=[map_mock])
-    project_mock.save = MagicMock()
-    # saveACopy must actually create the destination so subsequent
-    # ArcGISProject(dest) calls in production code don't crash on
-    # missing-file. Our build_vtpk calls saveACopy then re-opens
-    # the same path.
-    def _save_a_copy(dest):
-        Path(dest).write_bytes(b"fake-staging-aprx")
-    project_mock.saveACopy = MagicMock(side_effect=_save_a_copy)
-
-    fake_arcpy.mp = types.SimpleNamespace(
-        ArcGISProject=MagicMock(return_value=project_mock)
-    )
-    return project_mock, map_mock
+def test_resolve_vtpk_path_for_typical_row(tmp_path: Path) -> None:
+    """A row's GPKG at library/spatial/<Category>/<stem>.gpkg maps
+    to library/vtpk/<stem>.vtpk."""
+    library_root = tmp_path / "library" / "spatial"
+    library_root.mkdir(parents=True)
+    row = {
+        "dataset_id": "ds_X",
+        "file_path": "Land_Designations_Tenure/parks_protected_areas_alberta.gpkg",
+    }
+    out = agol_vtpk.resolve_vtpk_path(row, library_root)
+    assert out == library_root.parent / "vtpk" / "parks_protected_areas_alberta.vtpk"
 
 
-# --- arcpy availability ------------------------------------------------
-
-def test_is_arcpy_available_when_absent() -> None:
-    """In this environment, arcpy is genuinely not installed."""
-    assert agol_vtpk.is_arcpy_available() is False
-
-
-def test_is_arcpy_available_when_stubbed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stub module makes the probe return True."""
-    fake = types.ModuleType("arcpy")
-    _install_fake_arcpy(monkeypatch, fake)
-    assert agol_vtpk.is_arcpy_available() is True
+def test_resolve_vtpk_path_raises_when_file_path_missing(tmp_path: Path) -> None:
+    library_root = tmp_path / "library" / "spatial"
+    library_root.mkdir(parents=True)
+    with pytest.raises(ValueError, match="no file_path"):
+        agol_vtpk.resolve_vtpk_path({"dataset_id": "ds_X"}, library_root)
 
 
-def test_require_arcpy_raises_tooling_error_when_absent(tmp_path: Path) -> None:
-    """build_vtpk's underlying import fail → AgolToolingError."""
-    with pytest.raises(AgolToolingError, match="ArcGIS Pro"):
-        agol_vtpk.build_vtpk(
-            gpkg_path=tmp_path / "missing.gpkg",
-            dataset_id="ds_test",
-            checksum="abc",
-            cache_dir=tmp_path / ".y2y",
-        )
+def test_vtpk_present_false_when_missing(tmp_path: Path) -> None:
+    library_root = tmp_path / "library" / "spatial"
+    library_root.mkdir(parents=True)
+    row = {"dataset_id": "ds_X", "file_path": "Water/v.gpkg"}
+    assert agol_vtpk.vtpk_present(row, library_root) is False
 
 
-# --- cache hit ---------------------------------------------------------
-
-def test_build_vtpk_cache_hit_skips_arcpy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pre-existing .vtpk + matching checksum sidecar → return without arcpy."""
-    cache = tmp_path / ".y2y"
-    vtpk_dir = cache / "vtpk_cache"
-    vtpk_dir.mkdir(parents=True)
-    vtpk = vtpk_dir / "ds_cached.vtpk"
-    vtpk.write_bytes(b"fake-vtpk")
-    vtpk.with_suffix(".vtpk.sha256").write_text("hash_v1", encoding="utf-8")
-
-    # Stub arcpy as None — the cache hit should never reach the
-    # arcpy import. We assert by NOT installing a fake arcpy: if the
-    # function tries to import arcpy, AgolToolingError fires.
-    out = agol_vtpk.build_vtpk(
-        gpkg_path=tmp_path / "irrelevant.gpkg",   # not opened on cache hit
-        dataset_id="ds_cached",
-        checksum="hash_v1",
-        cache_dir=cache,
-    )
-    assert out == vtpk
-    assert out.read_bytes() == b"fake-vtpk"
+def test_vtpk_present_true_when_file_exists(tmp_path: Path) -> None:
+    library_root = tmp_path / "library" / "spatial"
+    library_root.mkdir(parents=True)
+    vtpk_dir = library_root.parent / "vtpk"
+    vtpk_dir.mkdir()
+    (vtpk_dir / "v.vtpk").write_bytes(_ZIP_MAGIC + b"payload")
+    row = {"dataset_id": "ds_X", "file_path": "Water/v.gpkg"}
+    assert agol_vtpk.vtpk_present(row, library_root) is True
 
 
-def test_build_vtpk_cache_miss_when_checksum_differs(
+def test_vtpk_stale_when_gpkg_newer_than_vtpk(tmp_path: Path) -> None:
+    library_root = tmp_path / "library" / "spatial"
+    (library_root / "Water").mkdir(parents=True)
+    gpkg = library_root / "Water" / "v.gpkg"
+    gpkg.write_bytes(b"gpkg-bytes")
+
+    vtpk_dir = library_root.parent / "vtpk"
+    vtpk_dir.mkdir()
+    vtpk = vtpk_dir / "v.vtpk"
+    vtpk.write_bytes(_ZIP_MAGIC + b"payload")
+
+    # Set the GPKG mtime to be 60 seconds NEWER than the VTPK.
+    vtpk_mtime = vtpk.stat().st_mtime
+    new_gpkg_mtime = vtpk_mtime + 60
+    os.utime(gpkg, (new_gpkg_mtime, new_gpkg_mtime))
+
+    row = {"dataset_id": "ds_X", "file_path": "Water/v.gpkg"}
+    assert agol_vtpk.vtpk_stale(row, library_root) is True
+
+
+def test_vtpk_stale_false_when_vtpk_newer(tmp_path: Path) -> None:
+    library_root = tmp_path / "library" / "spatial"
+    (library_root / "Water").mkdir(parents=True)
+    gpkg = library_root / "Water" / "v.gpkg"
+    gpkg.write_bytes(b"gpkg-bytes")
+    # Sleep a tick so the VTPK we write next is genuinely newer.
+    time.sleep(0.01)
+    vtpk_dir = library_root.parent / "vtpk"
+    vtpk_dir.mkdir()
+    (vtpk_dir / "v.vtpk").write_bytes(_ZIP_MAGIC + b"payload")
+
+    row = {"dataset_id": "ds_X", "file_path": "Water/v.gpkg"}
+    assert agol_vtpk.vtpk_stale(row, library_root) is False
+
+
+def test_vtpk_stale_false_when_vtpk_missing(tmp_path: Path) -> None:
+    """vtpk_stale should return False (not True) when the VTPK
+    doesn't exist — the missing case is handled by vtpk_present."""
+    library_root = tmp_path / "library" / "spatial"
+    (library_root / "Water").mkdir(parents=True)
+    (library_root / "Water" / "v.gpkg").write_bytes(b"gpkg")
+    row = {"dataset_id": "ds_X", "file_path": "Water/v.gpkg"}
+    assert agol_vtpk.vtpk_stale(row, library_root) is False
+
+
+# ----------------------------------------------------------------------------
+# Sidecar checksum caching
+# ----------------------------------------------------------------------------
+
+def test_read_vtpk_checksum_writes_sidecar_first_call(tmp_path: Path) -> None:
+    vtpk = tmp_path / "v.vtpk"
+    vtpk.write_bytes(_ZIP_MAGIC + b"abc")
+    digest = agol_vtpk.read_vtpk_checksum(vtpk)
+    assert len(digest) == 64  # hex sha256
+    sidecar = vtpk.with_suffix(".vtpk.sha256")
+    assert sidecar.exists()
+    assert sidecar.read_text() == digest
+
+
+def test_read_vtpk_checksum_reads_from_sidecar_subsequent_calls(
     tmp_path: Path,
 ) -> None:
-    """Pre-existing .vtpk but mismatched checksum → rebuild required.
-
-    Without arcpy stubbed, this should raise AgolToolingError
-    (proving the cache validity guard correctly detected the miss).
-    """
-    cache = tmp_path / ".y2y"
-    vtpk_dir = cache / "vtpk_cache"
-    vtpk_dir.mkdir(parents=True)
-    vtpk = vtpk_dir / "ds_stale.vtpk"
-    vtpk.write_bytes(b"stale")
-    vtpk.with_suffix(".vtpk.sha256").write_text("hash_v1", encoding="utf-8")
-
-    with pytest.raises(AgolToolingError):
-        agol_vtpk.build_vtpk(
-            gpkg_path=tmp_path / "irrelevant.gpkg",
-            dataset_id="ds_stale",
-            checksum="hash_v2_new",   # different from cached
-            cache_dir=cache,
-        )
+    """When the sidecar already records a hash, we trust it (the
+    file may be huge; re-streaming on every push is wasteful)."""
+    vtpk = tmp_path / "v.vtpk"
+    vtpk.write_bytes(_ZIP_MAGIC + b"abc")
+    sidecar = vtpk.with_suffix(".vtpk.sha256")
+    sidecar.write_text("preset_hash_from_disk")
+    assert agol_vtpk.read_vtpk_checksum(vtpk) == "preset_hash_from_disk"
 
 
-# --- build path (arcpy stubbed) ----------------------------------------
+# ----------------------------------------------------------------------------
+# Ingest happy + sad paths
+# ----------------------------------------------------------------------------
 
-def test_build_vtpk_invokes_arcpy_create_vtpk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def _setup_catalogue_row(
+    db_path: Path, *, agol_target: str, file_stem: str = "parks",
+) -> str:
+    """Insert one catalogue row whose file_path is
+    ``Land_Designations_Tenure/<stem>.gpkg`` with the given
+    ``agol_target``. Returns the dataset_id. Reuses
+    test_agol_push._full_row to stay in sync with the schema's
+    NOT NULL set as it evolves."""
+    from tests.test_agol_push import _full_row
+    row = _full_row(
+        dataset_id="ds_test_vtl",
+        file_path=f"Land_Designations_Tenure/{file_stem}.gpkg",
+        category="Land Designations & Tenure",
+        agol_target=agol_target,
+    )
+    inventory_manager.insert_dataset(db_path, row)
+    return row["dataset_id"]
+
+
+def test_ingest_one_vtpk_happy_path(
+    project_tree, valid_gpkg_factory,
 ) -> None:
-    """With arcpy stubbed, build_vtpk drives the expected arcpy calls and
-    writes a sidecar."""
-    cache = tmp_path / ".y2y"
-    gpkg = tmp_path / "src.gpkg"
-    gpkg.write_bytes(b"fake-gpkg")  # build_vtpk only checks .exists()
+    """Single matched .vtpk in queue → moved to library/vtpk/,
+    sidecar written, changelog entry appended."""
+    db_path = project_tree["db"]
+    library_root = project_tree["library"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
 
-    # The fake arcpy:
-    #  - env.workspace setter accepts arbitrary path
-    #  - ListFeatureClasses returns ['src'] (single layer)
-    #  - management.CreateVectorTilePackage actually writes the
-    #    .vtpk file (so the post-call existence check passes)
-    fake = types.ModuleType("arcpy")
-    fake.env = types.SimpleNamespace(workspace=None)
-    fake.ListFeatureClasses = MagicMock(return_value=["src"])
+    queue_incoming = project_tree["root"] / "queue" / "incoming"
+    queue_incoming.mkdir(parents=True, exist_ok=True)
+    vtpk_in_queue = queue_incoming / "parks.vtpk"
+    vtpk_in_queue.write_bytes(_ZIP_MAGIC + b"payload-bytes")
 
-    create_calls = []
-
-    def _fake_create(**kwargs):
-        # build_vtpk now passes scale arguments only when explicitly
-        # provided (default omits them so arcpy uses the tiling
-        # scheme's natural range). Accept any kwargs.
-        create_calls.append(kwargs)
-        Path(kwargs["output_file"]).write_bytes(
-            b"\x50\x4b\x03\x04fake-vtpk-payload"  # ZIP magic header
-        )
-
-    fake.management = types.SimpleNamespace(
-        CreateVectorTilePackage=_fake_create
-    )
-    project_mock, map_mock = _stub_pro_project_plumbing(fake, tmp_path)
-    _install_fake_arcpy(monkeypatch, fake)
-
-    out = agol_vtpk.build_vtpk(
-        gpkg_path=gpkg,
-        dataset_id="ds_built",
-        checksum="hash_v1",
-        cache_dir=cache,
+    result = agol_vtpk.ingest_one_vtpk(
+        vtpk_in_queue, library_root, db_path, actor="tester",
     )
 
-    # File landed at the expected path.
-    assert out.exists()
-    assert out == cache / "vtpk_cache" / "ds_built.vtpk"
-
-    # Sidecar records the checksum.
-    sidecar = out.with_suffix(".vtpk.sha256")
-    assert sidecar.read_text(encoding="utf-8") == "hash_v1"
-
-    # arcpy was driven with the right inputs.
-    assert len(create_calls) == 1
-    call = create_calls[0]
-    # in_map is now the Map object from the staging project, NOT a
-    # feature class path (arcpy 3.x requires a real Map).
-    assert call["in_map"] is map_mock
-    assert call["output_file"] == str(out)
-    assert call["service_type"] == "ONLINE"
-    assert call["tile_structure"] == "INDEXED"
-    assert call["tags"] == "Y2Y"
-
-    # REGRESSION GUARD (Test 3 ERROR 001856): by default build_vtpk
-    # must NOT pass min_cached_scale or max_cached_scale to arcpy.
-    # arcpy validates these against the active tiling scheme with
-    # exact-float comparison and rounding to 6 decimals fails.
-    # Omitting them lets arcpy use the scheme's natural range.
-    assert "min_cached_scale" not in call
-    assert "max_cached_scale" not in call
-
-    # The GPKG layer was added to the staging map and the project
-    # was saved before CreateVectorTilePackage ran.
-    map_mock.addDataFromPath.assert_called_once_with(f"{gpkg}\\main.src")
-    project_mock.save.assert_called_once()
+    assert result.status == "moved"
+    assert result.dataset_id == "ds_test_vtl"
+    assert result.destination is not None
+    assert result.destination.exists()
+    assert result.destination == library_root.parent / "vtpk" / "parks.vtpk"
+    # Source removed from queue.
+    assert not vtpk_in_queue.exists()
+    # Sidecar created.
+    assert result.destination.with_suffix(".vtpk.sha256").exists()
 
 
-def test_build_vtpk_strips_doubled_main_prefix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_ingest_one_vtpk_rejects_invalid_zip_signature(
+    project_tree, valid_gpkg_factory,
 ) -> None:
-    """Regression guard: arcpy.ListFeatureClasses() on a GeoPackage
-    returns names already prefixed with 'main.' (the GPKG default
-    schema). The previous build_vtpk code concatenated another
-    'main.' on top, producing '<gpkg>/main.main.<layer>' which
-    arcpy can't open ('Failed to add data. Possible credentials
-    issue.' — Test 3's actual failure)."""
-    cache = tmp_path / ".y2y"
-    gpkg = tmp_path / "src.gpkg"
-    gpkg.write_bytes(b"fake-gpkg")
+    """Files not starting with PK\\x03\\x04 are rejected without
+    touching the catalogue or moving anything."""
+    db_path = project_tree["db"]
+    library_root = project_tree["library"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
 
-    fake = types.ModuleType("arcpy")
-    fake.env = types.SimpleNamespace(workspace=None)
-    # ListFeatureClasses returns the 'main.'-prefixed name (as it
-    # genuinely does on a GeoPackage workspace).
-    fake.ListFeatureClasses = MagicMock(return_value=["main.parks_alberta"])
+    queue_incoming = project_tree["root"] / "queue" / "incoming"
+    queue_incoming.mkdir(parents=True, exist_ok=True)
+    bogus = queue_incoming / "parks.vtpk"
+    bogus.write_bytes(b"NOT-A-ZIP-FILE")
 
-    captured_layer_ref: list[str] = []
-    def _fake_create(in_map, output_file, **_):
-        Path(output_file).write_bytes(b"fake-vtpk")
-    fake.management = types.SimpleNamespace(
-        CreateVectorTilePackage=_fake_create,
-    )
-    project_mock, map_mock = _stub_pro_project_plumbing(fake, tmp_path)
-    map_mock.addDataFromPath = MagicMock(
-        side_effect=lambda ref: captured_layer_ref.append(ref),
-    )
-    _install_fake_arcpy(monkeypatch, fake)
-
-    agol_vtpk.build_vtpk(
-        gpkg_path=gpkg, dataset_id="ds_alberta",
-        checksum="hash_v1", cache_dir=cache,
+    result = agol_vtpk.ingest_one_vtpk(
+        bogus, library_root, db_path, actor="tester",
     )
 
-    assert len(captured_layer_ref) == 1
-    ref = captured_layer_ref[0]
-    # The right form is '<gpkg>\main.parks_alberta' — exactly ONE
-    # 'main.' prefix.
-    assert ref == f"{gpkg}\\main.parks_alberta", (
-        f"layer_ref was {ref!r} — expected exactly one 'main.' prefix"
-    )
-    # Most importantly: NEVER doubled.
-    assert "main.main." not in ref
+    assert result.status == "invalid"
+    assert "ZIP signature" in result.message
+    # File stayed in queue.
+    assert bogus.exists()
 
 
-def test_build_vtpk_rejects_multi_layer_gpkg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_ingest_one_vtpk_unmatched_when_no_row(
+    project_tree,
 ) -> None:
-    """Y2Y canonical convention is single-layer GPKG; multi-layer is rejected."""
-    gpkg = tmp_path / "multi.gpkg"
-    gpkg.write_bytes(b"fake-gpkg")
-    cache = tmp_path / ".y2y"
+    """A .vtpk whose stem doesn't match any active catalogue row
+    is reported as unmatched, left in the queue."""
+    db_path = project_tree["db"]
+    library_root = project_tree["library"]
 
-    fake = types.ModuleType("arcpy")
-    fake.env = types.SimpleNamespace(workspace=None)
-    fake.ListFeatureClasses = MagicMock(return_value=["layer_a", "layer_b"])
-    fake.management = types.SimpleNamespace(
-        CreateVectorTilePackage=MagicMock()
+    queue_incoming = project_tree["root"] / "queue" / "incoming"
+    queue_incoming.mkdir(parents=True, exist_ok=True)
+    orphan = queue_incoming / "no_matching_row.vtpk"
+    orphan.write_bytes(_ZIP_MAGIC + b"payload")
+
+    result = agol_vtpk.ingest_one_vtpk(
+        orphan, library_root, db_path, actor="tester",
     )
-    _install_fake_arcpy(monkeypatch, fake)
 
-    with pytest.raises(RuntimeError, match="single-layer"):
-        agol_vtpk.build_vtpk(
-            gpkg_path=gpkg,
-            dataset_id="ds_multi",
-            checksum="x",
-            cache_dir=cache,
-        )
-    # arcpy.management.CreateVectorTilePackage was not called.
-    fake.management.CreateVectorTilePackage.assert_not_called()
+    assert result.status == "unmatched"
+    assert "no active catalogue row" in result.message
+    assert orphan.exists()  # not moved
 
 
-def test_build_vtpk_rejects_empty_gpkg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_ingest_one_vtpk_target_mismatch_rejects(
+    project_tree, valid_gpkg_factory,
 ) -> None:
-    """GPKG with no feature classes → RuntimeError."""
-    gpkg = tmp_path / "empty.gpkg"
-    gpkg.write_bytes(b"fake-gpkg")
-    cache = tmp_path / ".y2y"
+    """A .vtpk whose matched row has agol_target='feature-layer'
+    is rejected with an actionable message — the steward needs to
+    flip the target first via `y2y update`."""
+    db_path = project_tree["db"]
+    library_root = project_tree["library"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    _setup_catalogue_row(db_path, agol_target="feature-layer")
 
-    fake = types.ModuleType("arcpy")
-    fake.env = types.SimpleNamespace(workspace=None)
-    fake.ListFeatureClasses = MagicMock(return_value=[])
-    fake.management = types.SimpleNamespace(
-        CreateVectorTilePackage=MagicMock()
+    queue_incoming = project_tree["root"] / "queue" / "incoming"
+    queue_incoming.mkdir(parents=True, exist_ok=True)
+    vtpk = queue_incoming / "parks.vtpk"
+    vtpk.write_bytes(_ZIP_MAGIC + b"payload")
+
+    result = agol_vtpk.ingest_one_vtpk(
+        vtpk, library_root, db_path, actor="tester",
     )
-    _install_fake_arcpy(monkeypatch, fake)
 
-    with pytest.raises(RuntimeError, match="no feature classes"):
-        agol_vtpk.build_vtpk(
-            gpkg_path=gpkg,
-            dataset_id="ds_empty",
-            checksum="x",
-            cache_dir=cache,
-        )
+    assert result.status == "target_mismatch"
+    assert result.dataset_id == "ds_test_vtl"
+    assert "agol_target" in result.message
+    assert "vector-tile-layer" in result.message
+    assert vtpk.exists()  # not moved
 
 
-def test_build_vtpk_rejects_missing_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_ingest_one_vtpk_replaces_existing_at_destination(
+    project_tree, valid_gpkg_factory,
 ) -> None:
-    """Nonexistent GPKG → RuntimeError before arcpy is touched."""
-    cache = tmp_path / ".y2y"
-    # arcpy stubbed so the cache-miss path proceeds past the import.
-    fake = types.ModuleType("arcpy")
-    fake.env = types.SimpleNamespace(workspace=None)
-    fake.ListFeatureClasses = MagicMock()
-    fake.management = types.SimpleNamespace(
-        CreateVectorTilePackage=MagicMock()
-    )
-    _install_fake_arcpy(monkeypatch, fake)
+    """A subsequent re-ingest of the same row's VTPK replaces the
+    prior one at library/vtpk/, updates the sidecar checksum."""
+    db_path = project_tree["db"]
+    library_root = project_tree["library"]
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
 
-    with pytest.raises(RuntimeError, match="source GeoPackage not found"):
-        agol_vtpk.build_vtpk(
-            gpkg_path=tmp_path / "missing.gpkg",
-            dataset_id="ds_ghost",
-            checksum="x",
-            cache_dir=cache,
-        )
+    # Plant an old VTPK at the canonical location.
+    vtpk_dir = library_root.parent / "vtpk"
+    vtpk_dir.mkdir(parents=True, exist_ok=True)
+    old_vtpk = vtpk_dir / "parks.vtpk"
+    old_vtpk.write_bytes(_ZIP_MAGIC + b"OLD-PAYLOAD")
+    old_sidecar = old_vtpk.with_suffix(".vtpk.sha256")
+    old_sidecar.write_text("old_hash")
+
+    # New VTPK in queue.
+    queue_incoming = project_tree["root"] / "queue" / "incoming"
+    queue_incoming.mkdir(parents=True, exist_ok=True)
+    new_vtpk = queue_incoming / "parks.vtpk"
+    new_vtpk.write_bytes(_ZIP_MAGIC + b"NEW-PAYLOAD")
+
+    result = agol_vtpk.ingest_one_vtpk(
+        new_vtpk, library_root, db_path, actor="tester",
+    )
+
+    assert result.status == "moved"
+    assert result.destination is not None
+    # Destination now has the new bytes.
+    assert b"NEW-PAYLOAD" in result.destination.read_bytes()
+    # Sidecar updated to the new checksum (not "old_hash").
+    new_sidecar = result.destination.with_suffix(".vtpk.sha256")
+    assert new_sidecar.read_text() != "old_hash"
+    assert len(new_sidecar.read_text()) == 64

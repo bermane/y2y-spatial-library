@@ -285,3 +285,77 @@ def test_reconcile_report_filename_includes_mode(project_tree) -> None:
     deep = _reconcile(project_tree, deep=True)
     assert "_fast" in fast.report_path.name
     assert "_deep" in deep.report_path.name
+
+
+# --- VTPK invariants (rev 3) -------------------------------------------
+
+def test_reconcile_flags_missing_vtpk_for_vtl_row(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """An active row whose ``agol_target='vector-tile-layer'`` but
+    whose canonical ``library/vtpk/<stem>.vtpk`` is absent is
+    reported as a missing-VTPK issue. Reconcile exits non-zero (via
+    total_findings > 0) so the steward sees it."""
+    dataset_id, _ = _populate_one_dataset(project_tree, valid_gpkg_factory)
+
+    # Switch the row's agol_target to vector-tile-layer; no VTPK
+    # exists on disk for it yet.
+    inventory_manager.update_dataset(
+        project_tree["db"], dataset_id,
+        {"agol_target": "vector-tile-layer"},
+    )
+
+    result = _reconcile(project_tree)
+    assert len(result.vtpk_missing) == 1
+    finding = result.vtpk_missing[0]
+    assert finding.dataset_id == dataset_id
+    assert "missing" in finding.reason
+    assert "Build VTPK in ArcGIS Pro" in finding.reason
+
+
+def test_reconcile_flags_stale_vtpk_when_gpkg_newer(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """An ingested VTPK whose mtime is older than the source GPKG
+    is reported as stale. Stewards see this when they've updated
+    the GPKG via lifecycle.refresh but forgotten to rebuild the
+    VTPK in Pro."""
+    dataset_id, rel = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    inventory_manager.update_dataset(
+        project_tree["db"], dataset_id,
+        {"agol_target": "vector-tile-layer"},
+    )
+
+    # Plant a VTPK at the canonical location.
+    vtpk_dir = project_tree["library"].parent / "vtpk"
+    vtpk_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(rel).stem
+    vtpk_path = vtpk_dir / f"{stem}.vtpk"
+    vtpk_path.write_bytes(b"PK\x03\x04fake-vtpk")
+
+    # Make the GPKG mtime newer than the VTPK by 60 seconds.
+    gpkg_path = project_tree["library"] / rel
+    vtpk_mtime = vtpk_path.stat().st_mtime
+    new_mtime = vtpk_mtime + 60
+    os.utime(gpkg_path, (new_mtime, new_mtime))
+
+    result = _reconcile(project_tree)
+    assert len(result.vtpk_missing) == 0
+    assert len(result.vtpk_stale) == 1
+    finding = result.vtpk_stale[0]
+    assert finding.dataset_id == dataset_id
+    assert "stale" not in finding.reason.lower() or "modified after" in finding.reason
+
+
+def test_reconcile_does_not_flag_vtpk_for_non_vtl_rows(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """Rows whose ``agol_target`` is not 'vector-tile-layer' are
+    not subject to the VTPK invariants — no false positives for
+    feature-layer / imagery-layer rows."""
+    dataset_id, _ = _populate_one_dataset(project_tree, valid_gpkg_factory)
+    # Default agol_target for a vector is 'feature-layer'. Verify
+    # reconcile doesn't fire VTPK findings.
+    result = _reconcile(project_tree)
+    assert len(result.vtpk_missing) == 0
+    assert len(result.vtpk_stale) == 0

@@ -124,9 +124,31 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             console.print("  pending sheet drained and deleted")
         elif result.pending_path.exists():
             console.print(f"  remaining in: [cyan]{result.pending_path}[/cyan]")
+        # Rev 3: surface VTPK reminders for newly-approved VTL rows
+        # that don't yet have a VTPK on disk. Non-blocking; reconcile
+        # will keep flagging them until the steward acts.
+        if result.vtpk_reminders:
+            console.print(
+                f"[yellow]VTPK needed[/yellow] for "
+                f"[bold]{len(result.vtpk_reminders)}[/bold] approved "
+                f"row(s) targeted as vector-tile-layer:"
+            )
+            for rem in result.vtpk_reminders:
+                console.print(
+                    f"  · {rem.dataset_id}  (from {rem.gpkg_relative_path})"
+                )
+                console.print(
+                    f"    Build VTPK in ArcGIS Pro from this GPKG, save as "
+                    f"`{rem.expected_vtpk_path.name}`, drop in "
+                    f"`queue/incoming/`, then run `y2y ingest scan`."
+                )
         return
 
-    scan_result = ingest_mod.scan(incoming, processing, rejected)
+    scan_result = ingest_mod.scan(
+        incoming, processing, rejected,
+        library_root=library, db_path=db_path,
+        actor=actor or _default_actor(),
+    )
 
     console.print(
         f"[green]scan complete[/green] — "
@@ -137,6 +159,24 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
         console.print(f"  review sheet: [cyan]{scan_result.pending_path}[/cyan]")
     if scan_result.rejected:
         console.print(f"  rejections:   [cyan]{rejected}[/cyan] (see .rejected.yaml sidecars)")
+
+    # --- VTPK ingest results (rev 3) ---
+    if scan_result.vtpk_results:
+        moved = [r for r in scan_result.vtpk_results if r.status == "moved"]
+        problems = [r for r in scan_result.vtpk_results if r.status != "moved"]
+        if moved:
+            console.print(
+                f"[green]VTPKs ingested[/green]: [bold]{len(moved)}[/bold]"
+            )
+            for r in moved:
+                console.print(f"  · {r.message}")
+        if problems:
+            console.print(
+                f"[yellow]VTPKs needing attention[/yellow]: "
+                f"[bold]{len(problems)}[/bold]"
+            )
+            for r in problems:
+                console.print(f"  · [{r.status}] {r.vtpk_path.name}: {r.message}")
 
 
 # --- lifecycle: update / rename / refresh / tombstone -----------------
@@ -329,6 +369,12 @@ def reconcile(
         f"schema violations: [bold]{len(result.schema_violations)}[/bold], "
         f"renames: [bold]{len(result.renames)}[/bold]"
     )
+    # Rev 3: VTPK invariants for vector-tile-layer rows.
+    if result.vtpk_missing or result.vtpk_stale:
+        console.print(
+            f"  VTPK missing: [bold]{len(result.vtpk_missing)}[/bold], "
+            f"VTPK stale: [bold]{len(result.vtpk_stale)}[/bold]"
+        )
     if result.auto_resolved:
         console.print(
             f"  [dim]auto-resolved drift: {len(result.auto_resolved)} "

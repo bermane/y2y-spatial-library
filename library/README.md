@@ -10,25 +10,47 @@ it lives in `queue/` until it does.
 
 ```
 library/
-└── spatial/                       # dataset_type = 'spatial'
-    ├── Biodiversity_Ecosystems/
-    ├── Climate_Resilience/
-    ├── Connectivity_Wildlife_Movement/
-    ├── Human_Dimensions/           # new in 2026 typology revision
-    ├── Juris_Political_Boundaries/
-    ├── Land_Cover_Use_Disturbance/
-    ├── Land_Designations_Tenure/
-    ├── Species/                    # only category with subcategory folders
-    │   ├── Caribou/
-    │   ├── Elk/
-    │   ├── Goat/
-    │   ├── Grizzly_Bear/
-    │   ├── Multi_Species/
-    │   ├── Other/
-    │   └── Wolverine/
-    ├── Threats_Infrastructure/
-    └── Water/
+├── spatial/                       # dataset_type = 'spatial'
+│   ├── Biodiversity_Ecosystems/
+│   ├── Climate_Resilience/
+│   ├── Connectivity_Wildlife_Movement/
+│   ├── Human_Dimensions/           # new in 2026 typology revision
+│   ├── Juris_Political_Boundaries/
+│   ├── Land_Cover_Use_Disturbance/
+│   ├── Land_Designations_Tenure/
+│   ├── Species/                    # only category with subcategory folders
+│   │   ├── Caribou/
+│   │   ├── Elk/
+│   │   ├── Goat/
+│   │   ├── Grizzly_Bear/
+│   │   ├── Multi_Species/
+│   │   ├── Other/
+│   │   └── Wolverine/
+│   ├── Threats_Infrastructure/
+│   └── Water/
+└── vtpk/                          # derived publish artifacts (Vector Tile Packages)
+    └── <gpkg_file_stem>.vtpk      # one per active row with
+                                   # agol_target='vector-tile-layer'
 ```
+
+### `vtpk/` — derived publish artifacts
+
+For datasets the steward wants published to AGOL as Vector Tile
+Layers (rather than Feature Layers), the canonical `.gpkg` lives
+in `spatial/<Category>/` as usual, AND a manually-built `.vtpk`
+lives here as a sibling, flat (no category subfolders). The VTPK
+filename matches the GPKG stem — e.g. `library/spatial/Land_Designations_Tenure/parks.gpkg`
+pairs with `library/vtpk/parks.vtpk`.
+
+The pipeline never writes VTPKs directly. Stewards build them
+manually in ArcGIS Pro's "Share As Vector Tile Package" workflow,
+drop the resulting file in `queue/incoming/`, and `y2y ingest scan`
+moves it here + writes a `.sha256` sidecar. Reconcile flags VTL
+rows whose VTPK is missing or stale (source GPKG newer than the
+VTPK). Push uses the file here to upload + publish to AGOL.
+
+See `DESIGN.md §15` for the full rationale (Pro upgrade fragility
+made the original arcpy auto-build path untenable).
 
 ## Why `spatial/` is a level of its own
 

@@ -42,7 +42,7 @@ import yaml
 from pyproj import Transformer
 
 from . import (
-    inventory_manager, pending_sheet, source_formats, taxonomy,
+    agol_vtpk, inventory_manager, pending_sheet, source_formats, taxonomy,
     transformations, utils,
 )
 from .source_formats import (
@@ -60,6 +60,30 @@ class ScanResult(NamedTuple):
     pending_path: Path
     accepted: int
     rejected: int
+    # VTPK files (manually built by the steward in ArcGIS Pro and
+    # dropped in queue/incoming/) follow a separate path: they don't
+    # create new catalogue rows, they attach to an existing
+    # vector-tile-layer row by file stem. Each .vtpk yields one
+    # IngestVtpkResult so the scan summary can distinguish
+    # successful-moves from leftovers in the queue (unmatched /
+    # ambiguous / invalid). See pipeline/agol_vtpk.py.
+    vtpk_results: tuple["agol_vtpk.IngestVtpkResult", ...] = ()
+
+
+class VtpkReminder(NamedTuple):
+    """A newly-approved VTL row that doesn't yet have a VTPK.
+
+    Surfaced by :func:`approve` so the CLI can print an actionable
+    reminder ("build the VTPK in Pro, drop in queue/incoming/"). The
+    row is still successfully approved and lands in the catalogue —
+    this reminder is informational, not blocking. The pipeline's
+    other guards (reconcile's missing-VTPK issue + push's pre-flight
+    error) ensure a forgotten VTPK can't be silently shipped to AGOL.
+    """
+
+    dataset_id: str
+    gpkg_relative_path: str  # the row's file_path
+    expected_vtpk_path: Path  # canonical destination
 
 
 class ApproveResult(NamedTuple):
@@ -68,6 +92,10 @@ class ApproveResult(NamedTuple):
     failed: int
     skipped: int  # rows where ready != TRUE
     pending_deleted: bool
+    # Rev 3: rows promoted with agol_target='vector-tile-layer' that
+    # don't have a corresponding library/vtpk/<stem>.vtpk yet.
+    # Default is empty so existing callers/tests don't break.
+    vtpk_reminders: tuple[VtpkReminder, ...] = ()
 
 
 # Map source format → canonical (target) extension.
@@ -111,7 +139,15 @@ _CANONICAL_CRS = "ESRI:102008"
 
 # === Phase 1: scan ====================================================
 
-def scan(incoming_dir: Path, processing_dir: Path, rejected_dir: Path) -> ScanResult:
+def scan(
+    incoming_dir: Path,
+    processing_dir: Path,
+    rejected_dir: Path,
+    *,
+    library_root: Path | None = None,
+    db_path: Path | None = None,
+    actor: str = "scan",
+) -> ScanResult:
     """Phase 1: lenient acceptance + source-metadata capture.
 
     Each accepted source bundle is moved into its own per-dataset
@@ -120,6 +156,15 @@ def scan(incoming_dir: Path, processing_dir: Path, rejected_dir: Path) -> ScanRe
     clobbering the source. The source bundle stays in that subdirectory
     until approve() promotes it (then the whole subdirectory moves to
     ``queue/archived/<dataset_id>/``).
+
+    **VTPK dispatch:** ``.vtpk`` files in ``queue/incoming/`` follow a
+    separate path — they don't create new catalogue rows, they attach
+    to an existing ``vector-tile-layer`` row by file stem (matching
+    ``parks.vtpk`` to ``parks.gpkg``'s row). The actual ingest is
+    handled by :func:`pipeline.agol_vtpk.ingest_one_vtpk`. To enable
+    VTPK ingest, callers must supply ``library_root`` and ``db_path``;
+    without them, ``.vtpk`` files are left in the queue and the scan
+    summary will surface no VTPK results. CLI always passes both.
     """
     incoming_dir.mkdir(parents=True, exist_ok=True)
     processing_dir.mkdir(parents=True, exist_ok=True)
@@ -167,7 +212,33 @@ def scan(incoming_dir: Path, processing_dir: Path, rejected_dir: Path) -> ScanRe
     if new_rows:
         pending_sheet.append_pending(pending_path, new_rows)
 
-    return ScanResult(pending_path=pending_path, accepted=accepted, rejected=rejected)
+    # --- VTPK dispatch ---
+    # candidate_paths above only yields recognised source-data
+    # extensions (.gpkg / .tif / .shp / .geojson / .kml / .kmz);
+    # .vtpk falls through. We walk the queue separately for VTPKs
+    # and hand each to agol_vtpk.ingest_one_vtpk for matching to an
+    # existing catalogue row.
+    vtpk_results: list[agol_vtpk.IngestVtpkResult] = []
+    if library_root is not None and db_path is not None:
+        for entry in sorted(incoming_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            if entry.name.startswith("."):
+                continue
+            if entry.suffix.lower() != ".vtpk":
+                continue
+            vtpk_results.append(
+                agol_vtpk.ingest_one_vtpk(
+                    entry, library_root, db_path, actor=actor,
+                )
+            )
+
+    return ScanResult(
+        pending_path=pending_path,
+        accepted=accepted,
+        rejected=rejected,
+        vtpk_results=tuple(vtpk_results),
+    )
 
 
 # === Phase 3: approve =================================================
@@ -202,6 +273,11 @@ def approve(
     rows = pending_sheet.load_pending(pending_path)
     promoted = failed = skipped = 0
     next_pending: list[dict[str, Any]] = []
+    # Rev 3: track newly-approved VTL rows that don't yet have a
+    # VTPK on disk so the CLI can print a reminder block. We append
+    # AFTER successful promotion so failed/skipped rows aren't
+    # spuriously flagged.
+    vtpk_reminders: list[VtpkReminder] = []
 
     for row in rows:
         if not _is_ready(row):
@@ -254,6 +330,20 @@ def approve(
             _promote(row, target_path, library_root, db_path, actor=actor)
             _archive_source(row, processing_dir, archived_dir)
             promoted += 1
+            # Rev 3: if this row is targeted for VTL but doesn't
+            # have a VTPK yet at the canonical location, flag it for
+            # the steward. We re-query the catalogue after promotion
+            # so the check sees the canonical file_path that
+            # _promote wrote to the DB (the pending-sheet row dict's
+            # file_path is None until _promote sets it on the DB
+            # copy).
+            fresh_row = inventory_manager.get_dataset(
+                db_path, str(row["dataset_id"]),
+            )
+            if fresh_row is not None:
+                reminder = _vtpk_reminder_for_row(fresh_row, library_root)
+                if reminder is not None:
+                    vtpk_reminders.append(reminder)
         except Exception as exc:  # pragma: no cover — defensive
             row[pending_sheet.READY_COLUMN] = False
             row[pending_sheet.ERROR_COLUMN] = f"promotion failed: {exc}"
@@ -269,6 +359,29 @@ def approve(
         failed=failed,
         skipped=skipped,
         pending_deleted=deleted,
+        vtpk_reminders=tuple(vtpk_reminders),
+    )
+
+
+def _vtpk_reminder_for_row(
+    row: dict[str, Any], library_root: Path,
+) -> VtpkReminder | None:
+    """Return a VtpkReminder when ``row`` needs a VTPK and lacks one.
+
+    Conditions: ``agol_target == 'vector-tile-layer'`` AND the
+    expected VTPK isn't present at the canonical location.
+    Otherwise returns ``None``.
+    """
+    if (row.get("agol_target") or "") != "vector-tile-layer":
+        return None
+    if not row.get("file_path"):
+        return None
+    if agol_vtpk.vtpk_present(row, library_root):
+        return None
+    return VtpkReminder(
+        dataset_id=str(row.get("dataset_id", "?")),
+        gpkg_relative_path=str(row["file_path"]),
+        expected_vtpk_path=agol_vtpk.resolve_vtpk_path(row, library_root),
     )
 
 

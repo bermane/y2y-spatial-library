@@ -37,7 +37,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import inventory_manager, utils
+from . import agol_vtpk, inventory_manager, utils
 from .validators import validate_all
 
 _SPATIAL_SUFFIXES: tuple[str, ...] = (".gpkg", ".tif", ".tiff")
@@ -59,6 +59,11 @@ class ReconcileResult(NamedTuple):
     schema_violations: list[Finding]
     renames: list[Finding]
     auto_resolved: list[Finding]
+    # Rev 3: VTPK invariants for vector-tile-layer rows.
+    # ``vtpk_missing``: row targeted for VTL but no .vtpk on disk.
+    # ``vtpk_stale``: VTPK exists but is older than the source GPKG.
+    vtpk_missing: list[Finding]
+    vtpk_stale: list[Finding]
     deep: bool
 
     @property
@@ -70,6 +75,8 @@ class ReconcileResult(NamedTuple):
             + len(self.drift)
             + len(self.schema_violations)
             + len(self.renames)
+            + len(self.vtpk_missing)
+            + len(self.vtpk_stale)
         )
 
 
@@ -185,6 +192,42 @@ def reconcile(
     if deep and ghosts and orphans:
         renames, ghosts, orphans = _detect_renames(library_root, ghosts, orphans, by_path)
 
+    # Rev 3: VTPK invariants. Every active row whose agol_target is
+    # 'vector-tile-layer' must have a corresponding VTPK at
+    # library/vtpk/<gpkg_stem>.vtpk; if it's there but older than
+    # the source GPKG, the steward needs to rebuild. Both are
+    # steward-action items, surfaced as separate finding buckets so
+    # the report distinguishes "no VTPK ever built" from "VTPK is
+    # stale". See pipeline/agol_vtpk.py for the path convention.
+    vtpk_missing: list[Finding] = []
+    vtpk_stale: list[Finding] = []
+    for row in inventory_rows:
+        if row.get("status") != "active":
+            continue
+        if (row.get("agol_target") or "") != "vector-tile-layer":
+            continue
+        fp = str(row.get("file_path") or "")
+        did = str(row.get("dataset_id") or "") or None
+        if not fp:
+            continue  # already in schema_violations from the main loop
+        expected_vtpk = agol_vtpk.resolve_vtpk_path(row, library_root)
+        rel_vtpk = str(expected_vtpk.relative_to(library_root.parent))
+        if not agol_vtpk.vtpk_present(row, library_root):
+            vtpk_missing.append(Finding(
+                did, fp,
+                f"row is targeted for VTL but {rel_vtpk} is missing. "
+                f"Build VTPK in ArcGIS Pro from this GPKG, drop the "
+                f"resulting file in queue/incoming/, then run "
+                f"`y2y ingest scan`."
+            ))
+        elif agol_vtpk.vtpk_stale(row, library_root):
+            vtpk_stale.append(Finding(
+                did, fp,
+                f"source GPKG was modified after the VTPK at "
+                f"{rel_vtpk} was last ingested. Rebuild VTPK in "
+                f"Pro so the next push refreshes the tile cache."
+            ))
+
     report_path = _write_report(
         reports_dir=reports_dir,
         library_root=library_root,
@@ -197,6 +240,8 @@ def reconcile(
         schema_violations=schema_violations,
         renames=renames,
         auto_resolved=auto_resolved,
+        vtpk_missing=vtpk_missing,
+        vtpk_stale=vtpk_stale,
         deep=deep,
     )
 
@@ -210,6 +255,8 @@ def reconcile(
         schema_violations=schema_violations,
         renames=renames,
         auto_resolved=auto_resolved,
+        vtpk_missing=vtpk_missing,
+        vtpk_stale=vtpk_stale,
         deep=deep,
     )
 
@@ -306,6 +353,8 @@ def _write_report(
     schema_violations: list[Finding],
     renames: list[Finding],
     auto_resolved: list[Finding],
+    vtpk_missing: list[Finding],
+    vtpk_stale: list[Finding],
     deep: bool,
 ) -> Path:
     mode = "deep" if deep else "fast"
@@ -329,6 +378,8 @@ def _write_report(
         f"- Schema violations: {len(schema_violations)}",
         f"- Renames detected: {len(renames)}",
         f"- Auto-resolved drift (informational): {len(auto_resolved)}",
+        f"- VTL rows missing a VTPK: {len(vtpk_missing)}",
+        f"- VTL rows with a stale VTPK: {len(vtpk_stale)}",
         "",
     ]
 
@@ -351,6 +402,14 @@ def _write_report(
     section(
         "Auto-resolved drift (file changed but still canonical — snapshot refreshed)",
         auto_resolved,
+    )
+    section(
+        "VTL rows missing a VTPK (steward must build + ingest)",
+        vtpk_missing,
+    )
+    section(
+        "VTL rows with a stale VTPK (steward should rebuild)",
+        vtpk_stale,
     )
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
