@@ -143,8 +143,9 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             )
         except inventory_manager.InventoryLockedError as exc:
             raise click.ClickException(str(exc))
+        headline = "yellow" if result.failed else "green"
         console.print(
-            f"[green]approve complete[/green] — "
+            f"[{headline}]approve complete[/{headline}] — "
             f"promoted: [bold]{result.promoted}[/bold], "
             f"failed: [bold]{result.failed}[/bold], "
             f"skipped: [bold]{result.skipped}[/bold] (ready=FALSE)"
@@ -155,6 +156,18 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
             console.print("  pending sheet drained and deleted")
         elif result.pending_path.exists():
             console.print(f"  remaining in: [cyan]{result.pending_path}[/cyan]")
+        # When rows failed validation, point the steward at the
+        # _validation_error column + remind them that ready was
+        # flipped back to FALSE (so the row won't auto-retry on the
+        # next approve until they re-check the box).
+        if result.failed:
+            console.print(
+                f"  [yellow]→ See the [bold]_validation_error[/bold] "
+                f"column in pending.xlsx for the failure reason. Fix "
+                f"the underlying issue, set [bold]ready[/bold] back to "
+                f"[bold]TRUE[/bold], and run `y2y ingest --approve` "
+                f"to try again.[/yellow]"
+            )
         # Rev 3: surface VTPK reminders for newly-approved VTL rows
         # that don't yet have a VTPK on disk. Non-blocking; reconcile
         # will keep flagging them until the steward acts.
