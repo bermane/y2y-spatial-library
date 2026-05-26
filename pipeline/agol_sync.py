@@ -1421,10 +1421,15 @@ def _publish_feature_layer(
         source_props = _compute_source_item_properties(
             item_props, dataset_id, source_type="GeoPackage",
         )
-        gpkg_item = gis.content.add(
-            item_properties=source_props,
-            data=str(source_path),
-            folder=source_folder,
+        # Use Folder.add() (new SDK API) rather than the deprecated
+        # gis.content.add() to sidestep the arcgis 2.4.x lazy-loader
+        # bug — same fix as the VTL path. See _add_item_to_folder.
+        gpkg_item = _add_item_to_folder(
+            gis=gis,
+            source_props=source_props,
+            file_path=source_path,
+            source_folder=source_folder,
+            source_folder_obj=source_folder_obj,
         )
         try:
             service_item = gpkg_item.publish(file_type="GeoPackage")

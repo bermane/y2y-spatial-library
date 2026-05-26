@@ -351,12 +351,14 @@ def test_push_creates_feature_layer_for_new_vector(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # gis.content.add was called for the SOURCE GPKG item — that lands
-    # in the dedicated _sources folder with minimal properties.
+    # Rev 3: source GPKG upload goes through Folder.add() (new SDK
+    # API) rather than the deprecated gis.content.add(). The call
+    # lives on the Folder instance returned by _ensure_folder.
     # The service item (Feature Service) is created by source.publish()
     # and then moved to the category folder. See the per-contract
     # tests below for finer assertions on each step.
-    assert gis.content.add.called
+    folder_add = gis.content.folders.create.return_value.add
+    assert folder_add.called
 
     # Result reflects the new item id (the service, not the source).
     assert result.agol_item_id == "new_fl_id"
@@ -383,7 +385,40 @@ def test_push_creates_feature_layer_for_new_vector(
 # ----------------------------------------------------------------------------
 
 def _last_content_add_kwargs(gis):
-    """Return the kwargs of the most recent gis.content.add(...) call."""
+    """Return the kwargs of the most recent source-upload call.
+
+    Rev 3 migrated the create paths off the deprecated
+    gis.content.add() onto Folder.add() (new SDK API). The call site
+    now lives on the Folder instance returned by _ensure_folder
+    (which is gis.content.folders.create.return_value in our mock).
+
+    For backwards compatibility with assertions written against the
+    old shape, this helper transparently returns equivalent kwargs:
+    {'item_properties': <dict>, 'data': <path-string>, 'folder': str}.
+    The new Folder.add() takes an ItemProperties dataclass and
+    file= (not data=); we translate so existing assertions keep
+    working without retroactive churn.
+    """
+    folder_add = gis.content.folders.create.return_value.add
+    if folder_add.call_args is not None:
+        kwargs = dict(folder_add.call_args.kwargs)
+        # Translate ItemProperties dataclass → dict-equivalent so
+        # legacy tests can still inspect kwargs["item_properties"]
+        # using dict access patterns.
+        ip = kwargs.get("item_properties")
+        if ip is not None and not isinstance(ip, dict):
+            kwargs["item_properties"] = {
+                "type": getattr(ip.item_type, "value", ip.item_type),
+                "title": ip.title,
+                "description": ip.description,
+                "typeKeywords": ip.type_keywords,
+            }
+        # Translate file= → data= for legacy tests.
+        if "file" in kwargs:
+            kwargs["data"] = kwargs.pop("file")
+        return kwargs
+    # Last-resort fallback to the deprecated call (legacy code
+    # paths that bypass _add_item_to_folder).
     return gis.content.add.call_args.kwargs
 
 
@@ -406,9 +441,21 @@ def test_push_creates_source_with_minimal_properties_in_sources_folder(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # Source GPKG was added with minimal props in _sources folder.
+    # Source GPKG was added with minimal props. Folder targeting is
+    # done by calling Folder.add() on the live _sources Folder
+    # instance — verify via the folders.create() call list that
+    # _sources was created (and that the live Folder's add() was
+    # invoked).
     source_call_kwargs = _last_content_add_kwargs(gis)
-    assert source_call_kwargs["folder"] == "_sources"
+    sources_create_calls = [
+        c for c in gis.content.folders.create.call_args_list
+        if c.kwargs.get("folder") == "_sources"
+        and c.kwargs.get("exist_ok") is True
+    ]
+    assert sources_create_calls, (
+        "expected folders.create(folder='_sources', exist_ok=True)"
+    )
+    assert gis.content.folders.create.return_value.add.called
 
     source_props = source_call_kwargs["item_properties"]
     # Minimal allowed keys
@@ -1890,15 +1937,21 @@ def test_push_all_dirty_iterates_pending_push_rows(
         sync_status="clean", agol_item_id="clean_id",
     ))
 
+    # Rev 3: previously this test used gis.content.add.side_effect to
+    # generate unique-ID source mocks per call. With the Folder.add()
+    # migration, the side_effect needs to live on the result of
+    # Folder.add() (which is a Job; .result() yields the source
+    # Item). Per-call uniqueness still matters because the
+    # catalogue's agol_item_id column is UNIQUE.
     new_ids = ["item_a", "item_b"]
-    def make_with_id(**kwargs):
+    def make_source_item(*args, **kwargs):
         item = MagicMock()
         item.id = new_ids.pop(0)
         item.sharing = MagicMock()
         item.sharing.sharing_level = "PRIVATE"
         item.sharing.groups = MagicMock()
         published = MagicMock()
-        published.id = item.id
+        published.id = item.id  # source.publish() → service has same id for asserts
         published.sharing = MagicMock()
         published.sharing.sharing_level = "PRIVATE"
         published.sharing.groups = MagicMock()
@@ -1906,7 +1959,8 @@ def test_push_all_dirty_iterates_pending_push_rows(
         return item
 
     gis = _make_gis()
-    gis.content.add.side_effect = make_with_id
+    # Override the default Folder.add().result() to yield unique mocks.
+    gis.content.folders.create.return_value.add.return_value.result.side_effect = make_source_item
 
     results = agol_sync.push_all_dirty(
         db, gis, _config_no_cache,
