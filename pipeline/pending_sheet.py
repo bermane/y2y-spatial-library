@@ -69,11 +69,6 @@ COLUMNS: list[tuple[str, str]] = [
     # 3. transform inputs
     (TARGET_FILENAME_COLUMN, "transform"),
     ("classification", "overridable"),
-    # AGOL publish target — auto-prefilled from format (feature-layer
-    # for vectors, imagery-layer for rasters). Steward overrides to
-    # vector-tile-layer for large vectors that should be delivered as
-    # cached tiles. See DESIGN.md §15.
-    ("agol_target", "overridable"),
     # 4. categorisation (auto-prefilled where possible)
     ("category", "overridable"),
     ("subcategory", "overridable"),
@@ -85,6 +80,13 @@ COLUMNS: list[tuple[str, str]] = [
     ("tags", "required"),
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
+    # AGOL publish target sits with the steward-authored metadata
+    # block (immediately after acknowledgements, per steward
+    # preference 2026-05-27). Auto-prefilled from format:
+    # ``feature-layer`` for vectors, ``imagery-layer`` for rasters.
+    # Steward overrides to ``vector-tile-layer`` for large vectors
+    # that should be delivered as cached tiles. See DESIGN.md §15.
+    ("agol_target", "overridable"),
     ("data_steward", "required"),
     # 6. optional
     ("agol_item_id", "optional"),
