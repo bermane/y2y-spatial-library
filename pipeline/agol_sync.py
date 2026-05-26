@@ -1724,10 +1724,19 @@ def _publish_vector_tile_layer(
         source_props.setdefault("typeKeywords", []).append(
             f"Y2Y:vtpk_sha256:{vtpk_sha}"
         )
-        vtpk_item = gis.content.add(
-            item_properties=source_props,
-            data=str(vtpk_path),
-            folder=source_folder,
+        # Use Folder.add() rather than the deprecated gis.content.add()
+        # to sidestep the arcgis 2.4.x lazy-loader bug that fires
+        # 'AttributeError: module arcgis.features.geo has no attribute
+        # _is_geoenabled' depending on import order. _ensure_folder
+        # returns the live Folder instance; if it failed we fall back
+        # to gis.content.add() with the string folder name (best-
+        # effort under the same caveat).
+        vtpk_item = _add_item_to_folder(
+            gis=gis,
+            source_props=source_props,
+            file_path=vtpk_path,
+            source_folder=source_folder,
+            source_folder_obj=source_folder_obj,
         )
         try:
             service_item = vtpk_item.publish(file_type="Vector Tile Package")
@@ -1796,6 +1805,80 @@ def _publish_vector_tile_layer(
             extra_type_keywords=(f"Y2Y:vtpk_sha256:{vtpk_sha}",),
         )
     return service
+
+
+def _add_item_to_folder(
+    *,
+    gis,
+    source_props: dict[str, Any],
+    file_path: Path,
+    source_folder: str,
+    source_folder_obj: Any,
+) -> Any:
+    """Add a file as a new item to a folder, preferring Folder.add().
+
+    The legacy ``gis.content.add()`` is deprecated in arcgis 2.3+
+    and exhibits a non-deterministic lazy-loader bug in 2.4.x where
+    ``arcgis.features.geo._is_geoenabled`` raises AttributeError
+    mid-call. The new ``Folder.add()`` API bypasses that path
+    entirely.
+
+    The new API takes ``ItemProperties`` (a dataclass) instead of a
+    dict, and ``file=`` instead of ``data=``, and returns a ``Job``
+    rather than an ``Item``. We translate our existing dict-based
+    property shape into ItemProperties and wait on the Job for the
+    Item.
+
+    Falls back to the deprecated ``gis.content.add()`` if the
+    ``source_folder_obj`` isn't a Folder instance (e.g., the
+    ``_ensure_folder`` call earlier returned the string fallback
+    because the SDK didn't expose a Folder for that name). The
+    fallback may still hit the lazy-loader bug; report failure
+    clearly.
+    """
+    from arcgis.gis import ItemProperties, ItemTypeEnum
+
+    # Map our string ``type`` to ItemTypeEnum.
+    _TYPE_MAP = {
+        "Vector Tile Package": ItemTypeEnum.VECTOR_TILE_PACKAGE,
+        "GeoPackage": ItemTypeEnum.GEOPACKAGE,
+        "Image": ItemTypeEnum.IMAGE,
+    }
+    item_type = _TYPE_MAP.get(source_props.get("type", ""))
+    if item_type is None:
+        # Fallback — pass the string straight through; ItemTypeEnum
+        # accepts strings too per its annotation.
+        item_type = source_props.get("type") or ""
+
+    ip = ItemProperties(
+        title=source_props.get("title") or "",
+        item_type=item_type,
+        description=source_props.get("description"),
+        type_keywords=source_props.get("typeKeywords") or None,
+    )
+
+    # Prefer the live Folder instance. If we only have a string,
+    # try to resolve the folder via gis.content.folders.get().
+    folder = source_folder_obj
+    if not hasattr(folder, "add"):
+        try:
+            folder = gis.content.folders.get(folder=source_folder)
+        except Exception:
+            folder = None
+
+    if folder is not None and hasattr(folder, "add"):
+        job = folder.add(item_properties=ip, file=str(file_path))
+        # Job.result() blocks until the upload completes + returns
+        # the resulting Item.
+        return job.result()
+
+    # Last-resort fallback to the deprecated API (likely to hit the
+    # lazy-loader bug, but we have nothing else).
+    return gis.content.add(
+        item_properties=source_props,
+        data=str(file_path),
+        folder=source_folder,
+    )
 
 
 def _read_vtpk_sidecar_or_compute(vtpk_path: Path) -> str:

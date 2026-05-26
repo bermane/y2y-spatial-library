@@ -153,6 +153,25 @@ def _make_gis(
 
     gis.content.add.return_value = source
 
+    # Rev 3: VTL path uses Folder.add() (new SDK API) instead of the
+    # deprecated gis.content.add(). _publish_vector_tile_layer's
+    # _add_item_to_folder helper calls either:
+    #   - source_folder_obj.add(item_properties=, file=) directly
+    #     when source_folder_obj is a Folder instance, OR
+    #   - gis.content.folders.get(folder=name).add(...) when only a
+    #     string name is available.
+    # Both return a Job whose .result() is the source Item. Wire
+    # the chain so VTL tests get the same `source` Item regardless
+    # of which code path runs.
+    job_mock = MagicMock()
+    job_mock.result.return_value = source
+    folders_get_mock = gis.content.folders.get.return_value
+    folders_get_mock.add.return_value = job_mock
+    # Also wire _ensure_folder's create() return value (the live
+    # Folder instance) so its .add() works too — push() prefers the
+    # instance over the name-lookup path.
+    gis.content.folders.create.return_value.add.return_value = job_mock
+
     if existing_item is not None:
         # Default the AGOL type so push()'s target-switch detector
         # doesn't fire on tests that don't explicitly set it.
@@ -1504,13 +1523,23 @@ def test_push_vtl_create_uploads_vtpk_publishes_vts(
         cache_dir=project_tree["root"] / ".y2y",
     )
 
-    # gis.content.add called with the .vtpk path (not the GPKG).
-    call = gis.content.add.call_args
-    assert str(vtpk_path) == call.kwargs["data"]
-    assert call.kwargs["item_properties"]["type"] == "Vector Tile Package"
+    # Rev 3: VTL push uses Folder.add() (new SDK API) rather than
+    # the deprecated gis.content.add(). The Folder.add() call lives
+    # on the Folder instance returned by _ensure_folder (which is
+    # gis.content.folders.create.return_value in the mock).
+    folder_obj = gis.content.folders.create.return_value
+    folder_obj.add.assert_called_once()
+    add_kwargs = folder_obj.add.call_args.kwargs
+    assert str(vtpk_path) == add_kwargs["file"]
+    # item_properties is now an ItemProperties dataclass, not a dict.
+    from arcgis.gis import ItemProperties, ItemTypeEnum
+    ip = add_kwargs["item_properties"]
+    assert isinstance(ip, ItemProperties)
+    assert ip.item_type == ItemTypeEnum.VECTOR_TILE_PACKAGE
 
     # source.publish called with file_type='Vector Tile Package' to
-    # produce the Vector Tile Service.
+    # produce the Vector Tile Service. source is what Folder.add()'s
+    # Job.result() returns; _make_gis wires both to the same mock.
     source = gis.content.add.return_value
     source.publish.assert_called_once()
     publish_kwargs = source.publish.call_args.kwargs
