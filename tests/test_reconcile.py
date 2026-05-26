@@ -359,3 +359,55 @@ def test_reconcile_does_not_flag_vtpk_for_non_vtl_rows(
     result = _reconcile(project_tree)
     assert len(result.vtpk_missing) == 0
     assert len(result.vtpk_stale) == 0
+    assert len(result.vtpk_orphan) == 0
+
+
+def test_reconcile_flags_vtpk_orphan_when_target_switched_away(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    """A .vtpk on disk for a row whose agol_target was switched
+    away from 'vector-tile-layer' is flagged as orphaned. The
+    pipeline never auto-deletes; the steward decides whether to
+    rm or switch the target back. This is the FL → VTL → FL
+    workflow seen in Test 3b Phase A."""
+    dataset_id, rel = _populate_one_dataset(project_tree, valid_gpkg_factory)
+
+    # Plant a VTPK at the canonical location.
+    vtpk_dir = project_tree["library"].parent / "vtpk"
+    vtpk_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(rel).stem
+    (vtpk_dir / f"{stem}.vtpk").write_bytes(b"PK\x03\x04fake-vtpk")
+
+    # The row's default agol_target is 'feature-layer'. No
+    # explicit switch needed — just having the VTPK present while
+    # the row isn't VTL-targeted is enough for the orphan.
+
+    result = _reconcile(project_tree)
+    assert len(result.vtpk_missing) == 0
+    assert len(result.vtpk_stale) == 0
+    assert len(result.vtpk_orphan) == 1
+
+    finding = result.vtpk_orphan[0]
+    assert finding.dataset_id == dataset_id
+    assert "agol_target" in finding.reason
+    assert "'feature-layer'" in finding.reason
+
+
+def test_reconcile_flags_vtpk_orphan_when_no_matching_row(
+    project_tree,
+) -> None:
+    """A .vtpk whose stem doesn't match any active row at all
+    (the dataset was tombstoned, or the steward dropped a VTPK
+    pre-emptively for a dataset they never ingested) is also
+    flagged as orphaned, with a different remediation hint."""
+    # Plant a VTPK that has no matching catalogue row.
+    vtpk_dir = project_tree["library"].parent / "vtpk"
+    vtpk_dir.mkdir(parents=True, exist_ok=True)
+    (vtpk_dir / "stranger.vtpk").write_bytes(b"PK\x03\x04fake-vtpk")
+
+    result = _reconcile(project_tree)
+    assert len(result.vtpk_orphan) == 1
+
+    finding = result.vtpk_orphan[0]
+    assert finding.dataset_id is None
+    assert "no matching active row" in finding.reason

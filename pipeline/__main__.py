@@ -370,10 +370,11 @@ def reconcile(
         f"renames: [bold]{len(result.renames)}[/bold]"
     )
     # Rev 3: VTPK invariants for vector-tile-layer rows.
-    if result.vtpk_missing or result.vtpk_stale:
+    if result.vtpk_missing or result.vtpk_stale or result.vtpk_orphan:
         console.print(
             f"  VTPK missing: [bold]{len(result.vtpk_missing)}[/bold], "
-            f"VTPK stale: [bold]{len(result.vtpk_stale)}[/bold]"
+            f"VTPK stale: [bold]{len(result.vtpk_stale)}[/bold], "
+            f"VTPK orphan: [bold]{len(result.vtpk_orphan)}[/bold]"
         )
     if result.auto_resolved:
         console.print(

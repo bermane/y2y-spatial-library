@@ -61,9 +61,16 @@ class ReconcileResult(NamedTuple):
     auto_resolved: list[Finding]
     # Rev 3: VTPK invariants for vector-tile-layer rows.
     # ``vtpk_missing``: row targeted for VTL but no .vtpk on disk.
-    # ``vtpk_stale``: VTPK exists but is older than the source GPKG.
+    # ``vtpk_stale``: VTPK exists but older than the source GPKG.
+    # ``vtpk_orphan``: .vtpk on disk has no matching active VTL row
+    #   (either no row at all with that file_stem, or the matching
+    #   row's agol_target is not 'vector-tile-layer'). Surfaced so
+    #   the steward decides whether to manually delete or switch
+    #   the catalogue back to VTL. Pipeline never auto-deletes
+    #   derived artifacts.
     vtpk_missing: list[Finding]
     vtpk_stale: list[Finding]
+    vtpk_orphan: list[Finding]
     deep: bool
 
     @property
@@ -77,6 +84,7 @@ class ReconcileResult(NamedTuple):
             + len(self.renames)
             + len(self.vtpk_missing)
             + len(self.vtpk_stale)
+            + len(self.vtpk_orphan)
         )
 
 
@@ -228,6 +236,63 @@ def reconcile(
                 f"Pro so the next push refreshes the tile cache."
             ))
 
+    # Rev 3: VTPK orphan invariant. A .vtpk file in library/vtpk/
+    # whose stem doesn't match any active row with
+    # agol_target='vector-tile-layer' is orphaned — either because
+    # no row exists with that file_stem at all (steward built a
+    # VTPK for a tombstoned/never-ingested dataset), or because
+    # the matching row's agol_target has since been switched away
+    # from vector-tile-layer (the FL→VTL→FL toggle case). Surface
+    # so the steward decides: manually delete, or switch the row
+    # back to VTL. Pipeline never auto-deletes.
+    vtpk_orphan: list[Finding] = []
+    vtpk_root = library_root.parent / "vtpk"
+    if vtpk_root.exists():
+        # Build a set of stems that ARE legitimately VTL-targeted.
+        active_vtl_stems: set[str] = set()
+        for row in inventory_rows:
+            if row.get("status") != "active":
+                continue
+            if (row.get("agol_target") or "") != "vector-tile-layer":
+                continue
+            fp = str(row.get("file_path") or "")
+            if fp:
+                active_vtl_stems.add(Path(fp).stem)
+
+        for vtpk_path in sorted(vtpk_root.glob("*.vtpk")):
+            stem = vtpk_path.stem
+            if stem in active_vtl_stems:
+                continue  # legitimate VTPK; not an orphan
+            rel_vtpk = str(vtpk_path.relative_to(library_root.parent))
+            # Try to identify which row (if any) the stem matches
+            # to give the steward a more actionable message.
+            matching_row = next(
+                (r for r in inventory_rows
+                 if r.get("file_path")
+                 and Path(str(r["file_path"])).stem == stem
+                 and r.get("status") == "active"),
+                None,
+            )
+            if matching_row is not None:
+                did = str(matching_row["dataset_id"])
+                reason = (
+                    f"VTPK at {rel_vtpk} exists but the matching row "
+                    f"has agol_target="
+                    f"{matching_row.get('agol_target')!r}, not "
+                    f"'vector-tile-layer'. Either delete the VTPK "
+                    f"manually, or switch agol_target back via "
+                    f"`y2y update`."
+                )
+            else:
+                did = None
+                reason = (
+                    f"VTPK at {rel_vtpk} has no matching active row "
+                    f"(no file_path with stem {stem!r}). Either "
+                    f"delete the VTPK manually, or restore the "
+                    f"corresponding catalogue row."
+                )
+            vtpk_orphan.append(Finding(did, rel_vtpk, reason))
+
     report_path = _write_report(
         reports_dir=reports_dir,
         library_root=library_root,
@@ -242,6 +307,7 @@ def reconcile(
         auto_resolved=auto_resolved,
         vtpk_missing=vtpk_missing,
         vtpk_stale=vtpk_stale,
+        vtpk_orphan=vtpk_orphan,
         deep=deep,
     )
 
@@ -257,6 +323,7 @@ def reconcile(
         auto_resolved=auto_resolved,
         vtpk_missing=vtpk_missing,
         vtpk_stale=vtpk_stale,
+        vtpk_orphan=vtpk_orphan,
         deep=deep,
     )
 
@@ -355,6 +422,7 @@ def _write_report(
     auto_resolved: list[Finding],
     vtpk_missing: list[Finding],
     vtpk_stale: list[Finding],
+    vtpk_orphan: list[Finding],
     deep: bool,
 ) -> Path:
     mode = "deep" if deep else "fast"
@@ -380,6 +448,7 @@ def _write_report(
         f"- Auto-resolved drift (informational): {len(auto_resolved)}",
         f"- VTL rows missing a VTPK: {len(vtpk_missing)}",
         f"- VTL rows with a stale VTPK: {len(vtpk_stale)}",
+        f"- Orphan VTPKs (file on disk, no matching VTL row): {len(vtpk_orphan)}",
         "",
     ]
 
@@ -410,6 +479,11 @@ def _write_report(
     section(
         "VTL rows with a stale VTPK (steward should rebuild)",
         vtpk_stale,
+    )
+    section(
+        "Orphan VTPKs (file on disk but no matching VTL row — "
+        "steward decides delete vs. switch target back)",
+        vtpk_orphan,
     )
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
