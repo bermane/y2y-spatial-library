@@ -98,17 +98,18 @@ CREATE TABLE IF NOT EXISTS datasets (
                                     'error',
                                     'unpublished'
                                 )),
-    -- Steward-declared publish target. Drives which publish path
+    -- Steward-declared publish format. Drives which publish path
     -- agol_sync.push() takes:
     --   feature-layer       → arcgis SDK Item.publish() on uploaded GPKG
-    --   vector-tile-layer   → local arcpy-built VTPK upload + publish
+    --   vector-tile-layer   → upload steward-built VTPK + publish
     --                         (no intermediate hosted feature layer)
-    --   imagery-layer       → arcgis SDK hosted imagery publish
+    --   imagery-layer       → arcgis.raster.publish_hosted_imagery_layer
     -- Pre-filled by ingest._build_row() from format; editable later
-    -- via `y2y update <id> --set agol_target=...`. Added by
-    -- migration 007.
-    agol_target             TEXT
-                                CHECK (agol_target IS NULL OR agol_target IN (
+    -- via `y2y update <id> --set agol_format=...`. Added as
+    -- agol_target by migration 007; renamed to agol_format by
+    -- migration 008 (naming alignment with format / source_format).
+    agol_format             TEXT
+                                CHECK (agol_format IS NULL OR agol_format IN (
                                     'feature-layer',
                                     'vector-tile-layer',
                                     'imagery-layer'

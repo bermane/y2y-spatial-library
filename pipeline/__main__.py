@@ -679,8 +679,8 @@ def agol_sync_status(ctx: click.Context, deep: bool) -> None:
     console.print()
     # Show per-target breakdown so the steward can see how many of
     # each kind will be published when sync fires.
-    target_counts = Counter(r.get("agol_target") for r in active)
-    console.print("[bold]By agol_target:[/bold]")
+    target_counts = Counter(r.get("agol_format") for r in active)
+    console.print("[bold]By agol_format:[/bold]")
     for target, n in sorted(target_counts.items(), key=lambda x: (x[0] or "")):
         console.print(f"  {n:3d}  {target}")
 
@@ -780,9 +780,9 @@ _VALID_SHARING = ("private", "org", "public")
     type=click.Choice(_VALID_TARGETS),
     default=None,
     help=(
-        "Override the row's persisted agol_target for this one invocation. "
+        "Override the row's persisted agol_format for this one invocation. "
         "Use for ad-hoc testing; for durable per-dataset changes use "
-        "`y2y update <id> --set agol_target=...`. Not allowed with --all-dirty."
+        "`y2y update <id> --set agol_format=...`. Not allowed with --all-dirty."
     ),
 )
 @click.option(
@@ -827,7 +827,7 @@ def agol_sync_push(
       y2y agol-sync push --all-dirty --sharing private
 
     The publish target for each row comes from the catalogue's
-    `agol_target` column unless overridden via --target. Sharing
+    `agol_format` column unless overridden via --target. Sharing
     defaults to org + Y2Y Conservation Atlas group; --sharing
     overrides per invocation.
     """
@@ -840,7 +840,7 @@ def agol_sync_push(
     if all_dirty and target is not None:
         raise click.UsageError(
             "--target is per-row; not allowed with --all-dirty. "
-            "Use `y2y update <id> --set agol_target=...` to make a "
+            "Use `y2y update <id> --set agol_format=...` to make a "
             "persistent change to a row's target."
         )
     if not all_dirty and dataset_id is None:

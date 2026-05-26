@@ -48,13 +48,13 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("tags", "required"),
     ("terms_of_use", "required"),
     ("acknowledgements", "required"),
-    # agol_target sits with the steward-authored metadata block (and
+    # agol_format sits with the steward-authored metadata block (and
     # next to acknowledgements specifically per steward preference)
     # because the steward picks the publish target at ingest time
     # rather than at push time. Sibling AGOL state columns
     # (agol_item_id, agol_published_at, last_synced_at, sync_status)
     # stay grouped further down with the rest of the AGOL linkage.
-    ("agol_target", "overridable"),
+    ("agol_format", "overridable"),
     ("data_steward", "required"),
     ("internal_notes", "optional"),
     # lifecycle
@@ -80,7 +80,7 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("raster_height", "locked"),
     ("pixel_size_x", "locked"),
     ("pixel_size_y", "locked"),
-    # AGOL linkage (agol_target lives up with the steward-authored
+    # AGOL linkage (agol_format lives up with the steward-authored
     # metadata block; the read-only AGOL state columns stay here)
     ("agol_item_id", "agol"),
     ("agol_published_at", "agol"),

@@ -92,7 +92,7 @@ class ApproveResult(NamedTuple):
     failed: int
     skipped: int  # rows where ready != TRUE
     pending_deleted: bool
-    # Rev 3: rows promoted with agol_target='vector-tile-layer' that
+    # Rev 3: rows promoted with agol_format='vector-tile-layer' that
     # don't have a corresponding library/vtpk/<stem>.vtpk yet.
     # Default is empty so existing callers/tests don't break.
     vtpk_reminders: tuple[VtpkReminder, ...] = ()
@@ -368,11 +368,11 @@ def _vtpk_reminder_for_row(
 ) -> VtpkReminder | None:
     """Return a VtpkReminder when ``row`` needs a VTPK and lacks one.
 
-    Conditions: ``agol_target == 'vector-tile-layer'`` AND the
+    Conditions: ``agol_format == 'vector-tile-layer'`` AND the
     expected VTPK isn't present at the canonical location.
     Otherwise returns ``None``.
     """
-    if (row.get("agol_target") or "") != "vector-tile-layer":
+    if (row.get("agol_format") or "") != "vector-tile-layer":
         return None
     if not row.get("file_path"):
         return None
@@ -493,7 +493,7 @@ def _build_row(
         # can override to vector-tile-layer in the pending sheet for
         # vector data they want delivered as a cached tile service.
         # See DESIGN.md §15.
-        "agol_target": "feature-layer" if meta.is_vector else "imagery-layer",
+        "agol_format": "feature-layer" if meta.is_vector else "imagery-layer",
         # error sink
         pending_sheet.ERROR_COLUMN: None,
     }

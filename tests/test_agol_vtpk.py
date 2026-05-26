@@ -145,11 +145,11 @@ def test_read_vtpk_checksum_reads_from_sidecar_subsequent_calls(
 # ----------------------------------------------------------------------------
 
 def _setup_catalogue_row(
-    db_path: Path, *, agol_target: str, file_stem: str = "parks",
+    db_path: Path, *, agol_format: str, file_stem: str = "parks",
 ) -> str:
     """Insert one catalogue row whose file_path is
     ``Land_Designations_Tenure/<stem>.gpkg`` with the given
-    ``agol_target``. Returns the dataset_id. Reuses
+    ``agol_format``. Returns the dataset_id. Reuses
     test_agol_push._full_row to stay in sync with the schema's
     NOT NULL set as it evolves."""
     from tests.test_agol_push import _full_row
@@ -157,7 +157,7 @@ def _setup_catalogue_row(
         dataset_id="ds_test_vtl",
         file_path=f"Land_Designations_Tenure/{file_stem}.gpkg",
         category="Land Designations & Tenure",
-        agol_target=agol_target,
+        agol_format=agol_format,
     )
     inventory_manager.insert_dataset(db_path, row)
     return row["dataset_id"]
@@ -171,7 +171,7 @@ def test_ingest_one_vtpk_happy_path(
     db_path = project_tree["db"]
     library_root = project_tree["library"]
     valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
-    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
+    _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
     queue_incoming.mkdir(parents=True, exist_ok=True)
@@ -201,7 +201,7 @@ def test_ingest_one_vtpk_rejects_invalid_zip_signature(
     db_path = project_tree["db"]
     library_root = project_tree["library"]
     valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
-    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
+    _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
     queue_incoming.mkdir(parents=True, exist_ok=True)
@@ -243,13 +243,13 @@ def test_ingest_one_vtpk_unmatched_when_no_row(
 def test_ingest_one_vtpk_target_mismatch_rejects(
     project_tree, valid_gpkg_factory,
 ) -> None:
-    """A .vtpk whose matched row has agol_target='feature-layer'
+    """A .vtpk whose matched row has agol_format='feature-layer'
     is rejected with an actionable message — the steward needs to
     flip the target first via `y2y update`."""
     db_path = project_tree["db"]
     library_root = project_tree["library"]
     valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
-    _setup_catalogue_row(db_path, agol_target="feature-layer")
+    _setup_catalogue_row(db_path, agol_format="feature-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
     queue_incoming.mkdir(parents=True, exist_ok=True)
@@ -262,7 +262,7 @@ def test_ingest_one_vtpk_target_mismatch_rejects(
 
     assert result.status == "target_mismatch"
     assert result.dataset_id == "ds_test_vtl"
-    assert "agol_target" in result.message
+    assert "agol_format" in result.message
     assert "vector-tile-layer" in result.message
     assert vtpk.exists()  # not moved
 
@@ -275,7 +275,7 @@ def test_ingest_one_vtpk_replaces_existing_at_destination(
     db_path = project_tree["db"]
     library_root = project_tree["library"]
     valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
-    _setup_catalogue_row(db_path, agol_target="vector-tile-layer")
+    _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     # Plant an old VTPK at the canonical location.
     vtpk_dir = library_root.parent / "vtpk"

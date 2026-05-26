@@ -43,7 +43,7 @@ def _full_row(
     file_path: str,
     classification: str = "vector",
     format_: str = "geopackage",
-    agol_target: str = "feature-layer",
+    agol_format: str = "feature-layer",
     title: str = "Test Title",
     category: str = "Water",
     subcategory: str | None = None,
@@ -73,7 +73,7 @@ def _full_row(
         "agol_published_at": None,
         "last_synced_at": None,
         "sync_status": sync_status,
-        "agol_target": agol_target,
+        "agol_format": agol_format,
         "checksum_sha256": "a" * 64,
         "size_bytes": 1024,
         "mtime": "2026-04-29T00:00:00Z",
@@ -117,7 +117,7 @@ def _make_gis(
 
     ``existing_item_type`` controls what AGOL type the existing item
     reports via ``.type`` — push()'s target-switch detection compares
-    this against the catalogue's agol_target. Defaults to
+    this against the catalogue's agol_format. Defaults to
     "Feature Service" since most tests exercise the feature-layer
     path. Pass "Vector Tile Service" / "Image Service" for the
     other paths. Tests that don't already set ``.type`` on the
@@ -290,7 +290,7 @@ def test_push_refuses_target_format_mismatch(
     valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
     row = _full_row(
         dataset_id="ds_test", file_path="Water/v.gpkg",
-        agol_target="imagery-layer",  # mismatched
+        agol_format="imagery-layer",  # mismatched
     )
     inventory_manager.insert_dataset(db, row)
     gis = _make_gis()
@@ -1249,7 +1249,7 @@ def test_push_imagery_create_uses_publish_hosted_imagery_layer(
     row = _full_row(
         dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
         classification="categorical", format_="geotiff",
-        agol_target="imagery-layer",
+        agol_format="imagery-layer",
         category="Land Cover, Land Use & Disturbance",
     )
     inventory_manager.insert_dataset(db, row)
@@ -1351,7 +1351,7 @@ def test_push_imagery_update_refreshes_via_output_name(
     row = _full_row(
         dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
         classification="categorical", format_="geotiff",
-        agol_target="imagery-layer",
+        agol_format="imagery-layer",
         category="Land Cover, Land Use & Disturbance",
         sync_status="pending_push",
         agol_item_id="preexisting_imagery_id",
@@ -1408,7 +1408,7 @@ def test_push_imagery_update_skips_refresh_when_checksum_unchanged(
     row = _full_row(
         dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
         classification="categorical", format_="geotiff",
-        agol_target="imagery-layer",
+        agol_format="imagery-layer",
         category="Land Cover, Land Use & Disturbance",
         sync_status="clean",
         agol_item_id="preexisting_imagery_id",
@@ -1454,7 +1454,7 @@ def test_push_imagery_records_warning_when_refresh_raises(
     row = _full_row(
         dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
         classification="categorical", format_="geotiff",
-        agol_target="imagery-layer",
+        agol_format="imagery-layer",
         category="Land Cover, Land Use & Disturbance",
         sync_status="pending_push",
         agol_item_id="preexisting_imagery_id",
@@ -1501,7 +1501,7 @@ def test_push_imagery_create_failure_raises_agol_error(
     row = _full_row(
         dataset_id="ds_raster", file_path="Land_Cover_Use_Disturbance/r.tif",
         classification="categorical", format_="geotiff",
-        agol_target="imagery-layer",
+        agol_format="imagery-layer",
         category="Land Cover, Land Use & Disturbance",
     )
     inventory_manager.insert_dataset(db, row)
@@ -1558,7 +1558,7 @@ def test_push_vtl_create_uploads_vtpk_publishes_vts(
     row = _full_row(
         dataset_id="ds_vtl",
         file_path="Land_Designations_Tenure/parks.gpkg",
-        agol_target="vector-tile-layer",
+        agol_format="vector-tile-layer",
         category="Land Designations & Tenure",
     )
     inventory_manager.insert_dataset(db, row)
@@ -1610,7 +1610,7 @@ def test_push_vtl_create_errors_when_vtpk_not_ingested(
     row = _full_row(
         dataset_id="ds_vtl",
         file_path="Land_Designations_Tenure/parks.gpkg",
-        agol_target="vector-tile-layer",
+        agol_format="vector-tile-layer",
         category="Land Designations & Tenure",
     )
     inventory_manager.insert_dataset(db, row)
@@ -1660,7 +1660,7 @@ def test_push_vtl_update_refreshes_when_vtpk_checksum_changed(
     row = _full_row(
         dataset_id="ds_vtl",
         file_path="Land_Designations_Tenure/parks.gpkg",
-        agol_target="vector-tile-layer",
+        agol_format="vector-tile-layer",
         category="Land Designations & Tenure",
         sync_status="pending_push",
         agol_item_id="vtl_item_id",
@@ -1735,7 +1735,7 @@ def test_push_vtl_update_skips_refresh_when_vtpk_checksum_matches(
     row = _full_row(
         dataset_id="ds_vtl",
         file_path="Land_Designations_Tenure/parks.gpkg",
-        agol_target="vector-tile-layer",
+        agol_format="vector-tile-layer",
         category="Land Designations & Tenure",
         sync_status="clean",
         agol_item_id="vtl_item_id",
@@ -1770,7 +1770,7 @@ def test_push_vtl_update_skips_refresh_when_vtpk_checksum_matches(
 def test_push_target_switch_FL_to_VTL_unpublishes_old(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:
-    """When agol_target was changed from feature-layer to
+    """When agol_format was changed from feature-layer to
     vector-tile-layer on a previously-published row, push detects
     the type mismatch and unpublishes the old Feature Service +
     linked source GPKG before creating the new VTS."""
@@ -1780,7 +1780,7 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
 
     # Existing AGOL item is a Feature Service (the catalogue was
     # previously feature-layer). The steward has since switched
-    # agol_target to vector-tile-layer; push must detect the
+    # agol_format to vector-tile-layer; push must detect the
     # mismatch and unpublish.
     linked_source = MagicMock()
     linked_source.id = "old_gpkg_source_id"
@@ -1793,7 +1793,7 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
     row = _full_row(
         dataset_id="ds_vtl",
         file_path="Land_Designations_Tenure/parks.gpkg",
-        agol_target="vector-tile-layer",
+        agol_format="vector-tile-layer",
         category="Land Designations & Tenure",
         sync_status="pending_push",
         agol_item_id="old_fs_id",
@@ -1823,7 +1823,7 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
     # Internal notes records the target switch.
     after = inventory_manager.get_dataset(db, "ds_vtl")
     notes = after["internal_notes"] or ""
-    assert "agol_target switched" in notes
+    assert "agol_format switched" in notes
 
 
 def test_push_recovers_from_filename_collision_on_upload(

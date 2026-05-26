@@ -292,17 +292,17 @@ def test_reconcile_report_filename_includes_mode(project_tree) -> None:
 def test_reconcile_flags_missing_vtpk_for_vtl_row(
     project_tree, valid_gpkg_factory,
 ) -> None:
-    """An active row whose ``agol_target='vector-tile-layer'`` but
+    """An active row whose ``agol_format='vector-tile-layer'`` but
     whose canonical ``library/vtpk/<stem>.vtpk`` is absent is
     reported as a missing-VTPK issue. Reconcile exits non-zero (via
     total_findings > 0) so the steward sees it."""
     dataset_id, _ = _populate_one_dataset(project_tree, valid_gpkg_factory)
 
-    # Switch the row's agol_target to vector-tile-layer; no VTPK
+    # Switch the row's agol_format to vector-tile-layer; no VTPK
     # exists on disk for it yet.
     inventory_manager.update_dataset(
         project_tree["db"], dataset_id,
-        {"agol_target": "vector-tile-layer"},
+        {"agol_format": "vector-tile-layer"},
     )
 
     result = _reconcile(project_tree)
@@ -323,7 +323,7 @@ def test_reconcile_flags_stale_vtpk_when_gpkg_newer(
     dataset_id, rel = _populate_one_dataset(project_tree, valid_gpkg_factory)
     inventory_manager.update_dataset(
         project_tree["db"], dataset_id,
-        {"agol_target": "vector-tile-layer"},
+        {"agol_format": "vector-tile-layer"},
     )
 
     # Plant a VTPK at the canonical location.
@@ -350,11 +350,11 @@ def test_reconcile_flags_stale_vtpk_when_gpkg_newer(
 def test_reconcile_does_not_flag_vtpk_for_non_vtl_rows(
     project_tree, valid_gpkg_factory,
 ) -> None:
-    """Rows whose ``agol_target`` is not 'vector-tile-layer' are
+    """Rows whose ``agol_format`` is not 'vector-tile-layer' are
     not subject to the VTPK invariants — no false positives for
     feature-layer / imagery-layer rows."""
     dataset_id, _ = _populate_one_dataset(project_tree, valid_gpkg_factory)
-    # Default agol_target for a vector is 'feature-layer'. Verify
+    # Default agol_format for a vector is 'feature-layer'. Verify
     # reconcile doesn't fire VTPK findings.
     result = _reconcile(project_tree)
     assert len(result.vtpk_missing) == 0
@@ -365,7 +365,7 @@ def test_reconcile_does_not_flag_vtpk_for_non_vtl_rows(
 def test_reconcile_flags_vtpk_orphan_when_target_switched_away(
     project_tree, valid_gpkg_factory,
 ) -> None:
-    """A .vtpk on disk for a row whose agol_target was switched
+    """A .vtpk on disk for a row whose agol_format was switched
     away from 'vector-tile-layer' is flagged as orphaned. The
     pipeline never auto-deletes; the steward decides whether to
     rm or switch the target back. This is the FL → VTL → FL
@@ -378,7 +378,7 @@ def test_reconcile_flags_vtpk_orphan_when_target_switched_away(
     stem = Path(rel).stem
     (vtpk_dir / f"{stem}.vtpk").write_bytes(b"PK\x03\x04fake-vtpk")
 
-    # The row's default agol_target is 'feature-layer'. No
+    # The row's default agol_format is 'feature-layer'. No
     # explicit switch needed — just having the VTPK present while
     # the row isn't VTL-targeted is enough for the orphan.
 
@@ -389,7 +389,7 @@ def test_reconcile_flags_vtpk_orphan_when_target_switched_away(
 
     finding = result.vtpk_orphan[0]
     assert finding.dataset_id == dataset_id
-    assert "agol_target" in finding.reason
+    assert "agol_format" in finding.reason
     assert "'feature-layer'" in finding.reason
 
 

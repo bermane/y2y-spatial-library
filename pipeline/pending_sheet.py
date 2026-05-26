@@ -86,7 +86,7 @@ COLUMNS: list[tuple[str, str]] = [
     # ``feature-layer`` for vectors, ``imagery-layer`` for rasters.
     # Steward overrides to ``vector-tile-layer`` for large vectors
     # that should be delivered as cached tiles. See DESIGN.md §15.
-    ("agol_target", "overridable"),
+    ("agol_format", "overridable"),
     ("data_steward", "required"),
     # 6. optional
     ("agol_item_id", "optional"),

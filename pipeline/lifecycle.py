@@ -49,7 +49,7 @@ UPDATABLE_FIELDS: frozenset[str] = frozenset({
     # how a dataset should be published (e.g., promoting a large
     # vector from feature-layer to vector-tile-layer). See DESIGN.md
     # §15.
-    "agol_target",
+    "agol_format",
 })
 
 # Status values reachable via update(). Tombstoning is its own command

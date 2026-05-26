@@ -54,7 +54,7 @@ DATASETS_COLUMNS: tuple[str, ...] = (
     "status", "date_added", "date_modified",
     # AGOL linkage
     "agol_item_id", "agol_published_at", "last_synced_at", "sync_status",
-    "agol_target",
+    "agol_format",
     # intrinsic snapshot
     "checksum_sha256", "size_bytes", "mtime", "crs",
     "geographic_extent_bbox", "classification",

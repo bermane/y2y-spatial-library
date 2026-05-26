@@ -64,7 +64,7 @@ class ReconcileResult(NamedTuple):
     # ``vtpk_stale``: VTPK exists but older than the source GPKG.
     # ``vtpk_orphan``: .vtpk on disk has no matching active VTL row
     #   (either no row at all with that file_stem, or the matching
-    #   row's agol_target is not 'vector-tile-layer'). Surfaced so
+    #   row's agol_format is not 'vector-tile-layer'). Surfaced so
     #   the steward decides whether to manually delete or switch
     #   the catalogue back to VTL. Pipeline never auto-deletes
     #   derived artifacts.
@@ -200,7 +200,7 @@ def reconcile(
     if deep and ghosts and orphans:
         renames, ghosts, orphans = _detect_renames(library_root, ghosts, orphans, by_path)
 
-    # Rev 3: VTPK invariants. Every active row whose agol_target is
+    # Rev 3: VTPK invariants. Every active row whose agol_format is
     # 'vector-tile-layer' must have a corresponding VTPK at
     # library/vtpk/<gpkg_stem>.vtpk; if it's there but older than
     # the source GPKG, the steward needs to rebuild. Both are
@@ -212,7 +212,7 @@ def reconcile(
     for row in inventory_rows:
         if row.get("status") != "active":
             continue
-        if (row.get("agol_target") or "") != "vector-tile-layer":
+        if (row.get("agol_format") or "") != "vector-tile-layer":
             continue
         fp = str(row.get("file_path") or "")
         did = str(row.get("dataset_id") or "") or None
@@ -238,10 +238,10 @@ def reconcile(
 
     # Rev 3: VTPK orphan invariant. A .vtpk file in library/vtpk/
     # whose stem doesn't match any active row with
-    # agol_target='vector-tile-layer' is orphaned — either because
+    # agol_format='vector-tile-layer' is orphaned — either because
     # no row exists with that file_stem at all (steward built a
     # VTPK for a tombstoned/never-ingested dataset), or because
-    # the matching row's agol_target has since been switched away
+    # the matching row's agol_format has since been switched away
     # from vector-tile-layer (the FL→VTL→FL toggle case). Surface
     # so the steward decides: manually delete, or switch the row
     # back to VTL. Pipeline never auto-deletes.
@@ -253,7 +253,7 @@ def reconcile(
         for row in inventory_rows:
             if row.get("status") != "active":
                 continue
-            if (row.get("agol_target") or "") != "vector-tile-layer":
+            if (row.get("agol_format") or "") != "vector-tile-layer":
                 continue
             fp = str(row.get("file_path") or "")
             if fp:
@@ -277,10 +277,10 @@ def reconcile(
                 did = str(matching_row["dataset_id"])
                 reason = (
                     f"VTPK at {rel_vtpk} exists but the matching row "
-                    f"has agol_target="
-                    f"{matching_row.get('agol_target')!r}, not "
+                    f"has agol_format="
+                    f"{matching_row.get('agol_format')!r}, not "
                     f"'vector-tile-layer'. Either delete the VTPK "
-                    f"manually, or switch agol_target back via "
+                    f"manually, or switch agol_format back via "
                     f"`y2y update`."
                 )
             else:

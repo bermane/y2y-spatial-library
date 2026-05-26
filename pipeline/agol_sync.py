@@ -655,7 +655,7 @@ def push(
     """Push a single catalogue row to AGOL.
 
     Resolves the publish target (CLI ``target_override`` wins, else
-    ``row['agol_target']``), branches by target type, generates a
+    ``row['agol_format']``), branches by target type, generates a
     thumbnail, sets sharing (org + Conservation Atlas group unless
     overridden), and updates the catalogue + changelog on success.
 
@@ -667,7 +667,7 @@ def push(
             name, etc.).
         library_root: Typed library root (``library/spatial``).
         actor: Recorded in the changelog as the sync's actor.
-        target_override: If set, overrides the row's ``agol_target``
+        target_override: If set, overrides the row's ``agol_format``
             for this single push. Recorded in the changelog so the
             ad-hoc choice is auditable.
         sharing_override: One of ``private`` / ``org`` / ``public``
@@ -710,17 +710,17 @@ def push(
             f"{sync_status_before!r}; resolve via pull or unpublish first."
         )
 
-    target = target_override or row.get("agol_target")
+    target = target_override or row.get("agol_format")
     if target not in _VALID_TARGET_FORMAT:
         raise AgolError(
-            f"unknown agol_target {target!r} on {dataset_id!r}. "
+            f"unknown agol_format {target!r} on {dataset_id!r}. "
             f"Expected one of: {sorted(_VALID_TARGET_FORMAT)}"
         )
     source_format = row.get("format")
     allowed_formats = _VALID_TARGET_FORMAT[target]
     if source_format not in allowed_formats:
         raise AgolError(
-            f"agol_target {target!r} is not valid for format "
+            f"agol_format {target!r} is not valid for format "
             f"{source_format!r} (allowed: {sorted(allowed_formats)})."
         )
 
@@ -787,7 +787,7 @@ def push(
 
     # ----- target-switch detection --------------------------------------
     # If the catalogue's agol_item_id points to an AGOL item whose
-    # type doesn't match the catalogue's current agol_target, the
+    # type doesn't match the catalogue's current agol_format, the
     # steward has changed their mind about how this dataset should
     # be published (e.g., FL → VTL). Unpublish the old AGOL items
     # before proceeding with the create path for the new target.
@@ -1245,7 +1245,7 @@ def _resolve_service_item(gis, agol_item_id: str) -> Any:
     return item
 
 
-# AGOL item types corresponding to each agol_target. push()'s
+# AGOL item types corresponding to each agol_format. push()'s
 # target-switch detection compares the catalogue's intent against
 # the AGOL item's actual type to decide whether to unpublish + re-
 # publish under the new target.
@@ -1265,10 +1265,10 @@ def _handle_target_switch(
     actor: str,
     properties: dict[str, Any],
 ) -> str | None:
-    """If the catalogue's agol_target no longer matches the AGOL item, unpublish.
+    """If the catalogue's agol_format no longer matches the AGOL item, unpublish.
 
     Steward-confirmed (2026-05-27): when an existing row's
-    ``agol_target`` is changed (e.g. ``feature-layer`` →
+    ``agol_format`` is changed (e.g. ``feature-layer`` →
     ``vector-tile-layer``), the next push should delete the old
     AGOL representation before publishing the new one. AGOL credit
     cost is one of the reasons the steward chose VTL — keeping the
@@ -1307,7 +1307,7 @@ def _handle_target_switch(
     # Target switch detected. Delete the old service + its linked
     # sources to free credits before publishing the new target.
     note = (
-        f"agol_target switched (AGOL item is {actual_type!r}, "
+        f"agol_format switched (AGOL item is {actual_type!r}, "
         f"catalogue wants {expected_type!r}). Unpublishing the "
         f"existing AGOL items before publishing the new target."
     )

@@ -70,7 +70,7 @@ class IngestVtpkResult(NamedTuple):
         status: One of ``"moved"`` (success), ``"unmatched"`` (no
             catalogue row), ``"ambiguous"`` (multiple matches),
             ``"target_mismatch"`` (match found but its
-            ``agol_target`` is not ``"vector-tile-layer"``), or
+            ``agol_format`` is not ``"vector-tile-layer"``), or
             ``"invalid"`` (the file is not a valid VTPK).
         vtpk_path: Path the file occupied at ingest time. For
             ``"moved"`` this is the source path in ``queue/``; the
@@ -208,7 +208,7 @@ def ingest_one_vtpk(
       the first four bytes. A spurious file with a ``.vtpk``
       extension is rejected without touching the catalogue.
     * Matches the file to a catalogue row by file stem:
-      ``status='active'`` AND ``agol_target='vector-tile-layer'``
+      ``status='active'`` AND ``agol_format='vector-tile-layer'``
       AND ``file_path`` ends with ``<stem>.gpkg``.
     * On a single clean match: computes SHA-256, moves the file to
       ``library/vtpk/<stem>.vtpk``, writes the ``.sha256`` sidecar,
@@ -217,7 +217,7 @@ def ingest_one_vtpk(
     * On 0 / >1 / wrong-target matches: leaves the file in the
       queue and returns a non-``moved`` status. The scan summary
       surfaces these so the steward can fix the filename or the
-      catalogue's ``agol_target`` and re-run.
+      catalogue's ``agol_format`` and re-run.
 
     Args:
         vtpk_path: Absolute path to the queued ``.vtpk`` file.
@@ -286,16 +286,16 @@ def ingest_one_vtpk(
         )
 
     row = matches[0]
-    if row.get("agol_target") != "vector-tile-layer":
+    if row.get("agol_format") != "vector-tile-layer":
         return IngestVtpkResult(
             status="target_mismatch", vtpk_path=vtpk_path,
             dataset_id=row["dataset_id"], destination=None,
             message=(
                 f"row {row['dataset_id']!r} matched by stem but its "
-                f"agol_target is {row.get('agol_target')!r}, not "
+                f"agol_format is {row.get('agol_format')!r}, not "
                 f"'vector-tile-layer'. To accept this VTPK, run "
                 f"`y2y update {row['dataset_id']} "
-                f"--set agol_target=vector-tile-layer` first."
+                f"--set agol_format=vector-tile-layer` first."
             ),
         )
 
@@ -356,7 +356,7 @@ def _find_rows_by_gpkg_stem(
 
     Used by the VTPK ingest to find the catalogue row a queued
     file belongs to. The match is a SQL LIKE on the file_path
-    suffix; the row's ``agol_target`` is checked by the caller
+    suffix; the row's ``agol_format`` is checked by the caller
     (we report a clear ``target_mismatch`` rather than silently
     ignoring rows that aren't VTL targets).
 
