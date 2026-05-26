@@ -1826,6 +1826,75 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
     assert "agol_target switched" in notes
 
 
+def test_push_recovers_from_filename_collision_on_upload(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """When Folder.add() raises a filename-collision error (AGOL
+    CONT_0027 / code 409), the pipeline parses the conflicting
+    item ID from the error, deletes that item permanently, then
+    retries the upload once. Records a [agol] warning so the
+    steward sees the stale-source cleanup happened.
+
+    Regression for Test 3b Phase B: a VTPK source item from an
+    earlier failed publish lingered in AGOL's _sources/ folder.
+    When the next push tried to upload a new VTPK with the same
+    filename, AGOL rejected with 'Item with this filename already
+    exists. [itemId=11a45...]'. The fix self-heals by reclaiming
+    the conflicting item."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    inventory_manager.insert_dataset(db, row)
+
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    # Wire Folder.add() to raise on the first call (collision) and
+    # succeed on the retry. Mimics the AGOL error message format.
+    folder_obj = gis.content.folders.create.return_value
+    success_job = MagicMock()
+    success_job.result.return_value = gis.content.add.return_value
+    call_count = {"n": 0}
+
+    def add_side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise Exception(
+                "The item could not be added: "
+                "{'error': {'code': 409, 'messageCode': 'CONT_0027', "
+                "'message': 'Item with this filename already exists. "
+                "[itemId=abc123def456abc123def456abc12345]', 'details': []}}"
+            )
+        return success_job
+
+    folder_obj.add.side_effect = add_side_effect
+
+    # Mock the conflicting item that gis.content.get returns when
+    # asked for 'abc123def456abc123def456abc12345'.
+    conflicting_item = MagicMock()
+    conflicting_item.id = "abc123def456abc123def456abc12345"
+    conflicting_item.title = "Stale Source"
+    gis.content.get.return_value = conflicting_item
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    # Folder.add was called twice (initial + retry).
+    assert call_count["n"] == 2
+    # Conflicting item was deleted permanently.
+    conflicting_item.delete.assert_called_once_with(permanent=True)
+    # The push completed; sync_status='clean'.
+    assert result.sync_status_after == "clean"
+    # internal_notes captures the [agol] cleanup warning.
+    after = inventory_manager.get_dataset(db, "ds_test")
+    notes = after["internal_notes"] or ""
+    assert "[agol]" in notes
+    assert "abc123def456abc123def456abc12345" in notes
+    assert "permanently deleted" in notes.lower() or "replaced stale" in notes.lower()
+
+
 def test_push_target_switch_handles_missing_agol_item(
     project_tree, _config_no_cache, valid_gpkg_factory,
 ) -> None:

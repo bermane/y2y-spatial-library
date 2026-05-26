@@ -1457,6 +1457,7 @@ def _publish_feature_layer(
             file_path=source_path,
             source_folder=source_folder,
             source_folder_obj=source_folder_obj,
+            properties=properties,
         )
         try:
             service_item = gpkg_item.publish(file_type="GeoPackage")
@@ -1769,6 +1770,7 @@ def _publish_vector_tile_layer(
             file_path=vtpk_path,
             source_folder=source_folder,
             source_folder_obj=source_folder_obj,
+            properties=properties,
         )
         try:
             service_item = vtpk_item.publish(file_type="Vector Tile Package")
@@ -1846,6 +1848,7 @@ def _add_item_to_folder(
     file_path: Path,
     source_folder: str,
     source_folder_obj: Any,
+    properties: dict[str, Any] | None = None,
 ) -> Any:
     """Add a file as a new item to a folder, preferring Folder.add().
 
@@ -1867,6 +1870,16 @@ def _add_item_to_folder(
     because the SDK didn't expose a Folder for that name). The
     fallback may still hit the lazy-loader bug; report failure
     clearly.
+
+    Filename-collision recovery: AGOL refuses uploads when an item
+    with the same filename already exists for the user (CONT_0027,
+    code 409). This commonly happens when a previous push left a
+    source item behind (e.g., a target-switch's Service2Data walk
+    missed the source, or a failed publish left an orphan). On
+    that error we parse the conflicting item ID, delete it
+    permanently, and retry once. ``properties`` is used to record
+    a ``[agol]`` warning when this fires so the steward sees a
+    note that a stale source was reclaimed.
     """
     from arcgis.gis import ItemProperties, ItemTypeEnum
 
@@ -1899,10 +1912,24 @@ def _add_item_to_folder(
             folder = None
 
     if folder is not None and hasattr(folder, "add"):
-        job = folder.add(item_properties=ip, file=str(file_path))
-        # Job.result() blocks until the upload completes + returns
-        # the resulting Item.
-        return job.result()
+        try:
+            job = folder.add(item_properties=ip, file=str(file_path))
+            return job.result()
+        except Exception as exc:
+            # Detect filename-collision and self-heal by deleting
+            # the conflicting item, then retry once.
+            conflicting_id = _extract_filename_conflict_id(str(exc))
+            if conflicting_id is None:
+                raise
+            cleaned = _cleanup_conflicting_item(
+                gis, conflicting_id, properties,
+            )
+            if not cleaned:
+                raise
+            # Retry the upload once. If it fails again let the
+            # exception propagate.
+            job = folder.add(item_properties=ip, file=str(file_path))
+            return job.result()
 
     # Last-resort fallback to the deprecated API (likely to hit the
     # lazy-loader bug, but we have nothing else).
@@ -1911,6 +1938,73 @@ def _add_item_to_folder(
         data=str(file_path),
         folder=source_folder,
     )
+
+
+def _extract_filename_conflict_id(message: str) -> str | None:
+    """Parse an AGOL filename-collision error for the existing item ID.
+
+    The arcgis SDK raises ``FolderException`` with a message like:
+
+        The item could not be added: {'error': {'code': 409,
+        'messageCode': 'CONT_0027', 'message': 'Item with this
+        filename already exists. [itemId=11a45f8d0be94d0c98ad1ca9b967a9ed]',
+        ...}}
+
+    We don't have a structured payload to introspect, so we regex
+    for the ``itemId=<hex>`` token. Returns ``None`` if the message
+    isn't a filename-collision error (caller should propagate the
+    original exception in that case).
+    """
+    import re
+    if "already exists" not in message:
+        return None
+    match = re.search(r"itemId=([0-9a-fA-F]+)", message)
+    return match.group(1) if match else None
+
+
+def _cleanup_conflicting_item(
+    gis,
+    item_id: str,
+    properties: dict[str, Any] | None,
+) -> bool:
+    """Permanently delete a conflicting AGOL item; return success.
+
+    Used by ``_add_item_to_folder``'s filename-collision recovery
+    path. Records a ``[agol]`` warning if ``properties`` is
+    provided so the steward sees that a stale source was reclaimed
+    during this push.
+
+    Returns ``True`` if the item was successfully deleted (and the
+    caller can safely retry the upload), ``False`` otherwise.
+    """
+    try:
+        existing = gis.content.get(item_id)
+    except Exception:
+        return False
+    if existing is None:
+        # Already gone (maybe AGOL eventual consistency); treat as
+        # success so the retry can proceed.
+        return True
+    try:
+        try:
+            existing.delete(permanent=True)
+        except TypeError:
+            existing.delete()
+    except Exception as exc:
+        if properties is not None:
+            _record_warning(properties, (
+                f"could not clean up conflicting item {item_id!r} "
+                f"during upload: {exc}"
+            ))
+        return False
+    if properties is not None:
+        existing_title = getattr(existing, "title", "(unknown)")
+        _record_warning(properties, (
+            f"replaced stale AGOL item {item_id!r} (title="
+            f"{existing_title!r}) that conflicted with the new "
+            f"upload by filename. Previous item permanently deleted."
+        ))
+    return True
 
 
 def _read_vtpk_sidecar_or_compute(vtpk_path: Path) -> str:
