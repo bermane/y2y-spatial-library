@@ -2644,6 +2644,417 @@ def _append_note(prior: str | None, addition: str) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Pull + conflict resolution (Phase D)
+# ----------------------------------------------------------------------------
+
+# sync_status values from which pull() is a meaningful operation.
+# Pulling from 'unpublished' is nonsensical (no AGOL item to pull from)
+# and from 'pending_push' / 'error' would clobber pending catalogue work
+# the steward hasn't decided to discard.
+_PULLABLE_STATUSES: frozenset[str] = frozenset({
+    "clean", "pending_pull", "conflict",
+})
+
+# Map of AGOL-side field name → catalogue column. Used by pull --accept
+# to absorb AGOL values into the catalogue. ``categories`` is
+# intentionally absent — the catalogue's ``category`` column is
+# filesystem-bound (folder location dictates it), and changing it
+# requires `y2y rename`, not a metadata pull.
+_AGOL_FIELD_TO_CATALOGUE_COLUMN: dict[str, str] = {
+    "title": "title",
+    "snippet": "summary",
+    "description": "description",
+    "tags": "tags",
+    "accessInformation": "acknowledgements",
+    "licenseInfo": "terms_of_use",
+}
+
+
+def detect_pull_candidates(
+    db_path: Path, gis, config: AgolConfig,
+) -> list[PullCandidate]:
+    """Read-only scan for rows where AGOL has drifted from the catalogue.
+
+    For every ``status='active'``, ``sync_status='clean'`` row with an
+    ``agol_item_id``, queries AGOL's ``modified`` timestamp. Returns
+    the rows where ``modified > last_synced_at`` — i.e. AGOL has been
+    touched since the last sync, and a pull is warranted.
+
+    Mirrors what :func:`reconcile_bidirectional` does as a side effect
+    (flipping flagged rows to ``pending_pull``); this read-only
+    variant just surfaces the list so callers can preview without
+    mutating the catalogue.
+    """
+    from . import inventory_manager
+
+    candidates: list[PullCandidate] = []
+    rows = [
+        r for r in inventory_manager.load_inventory(db_path)
+        if r.get("status") == "active"
+        and r.get("sync_status") == "clean"
+        and r.get("agol_item_id")
+    ]
+    for row in rows:
+        try:
+            item = gis.content.get(row["agol_item_id"])
+        except Exception:
+            continue
+        if item is None:
+            continue
+        modified_iso = _agol_modified_iso(item)
+        last_synced = row.get("last_synced_at")
+        if (
+            modified_iso is not None
+            and last_synced is not None
+            and modified_iso > last_synced
+        ):
+            candidates.append(PullCandidate(
+                dataset_id=row["dataset_id"],
+                agol_item_id=row["agol_item_id"],
+                title=row.get("title") or "",
+                last_synced_at=last_synced,
+                agol_modified_at=modified_iso,
+            ))
+    return candidates
+
+
+def pull(
+    db_path: Path,
+    dataset_id: str,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    resolution: str | None = None,
+) -> SyncResult:
+    """Resolve catalogue ↔ AGOL drift for one row.
+
+    Three modes, gated by ``resolution``:
+
+    * ``None`` (default — *surface mode*): fetch the AGOL item, diff
+      it against the catalogue, log the structured diff to the
+      changelog, and mark ``sync_status='conflict'``. No fields are
+      changed on either side. The steward reviews the diff and
+      re-runs ``pull`` with an explicit resolution.
+    * ``'accept_agol'``: absorb AGOL's values for the drifted text
+      fields (title, summary, description, tags, acknowledgements,
+      terms_of_use) into the catalogue. The ``categories`` diff is
+      skipped with an internal_notes annotation — the catalogue's
+      category is filesystem-bound. Marks ``sync_status='clean'``.
+    * ``'reject_agol'``: re-push catalogue values to AGOL,
+      overwriting whatever drifted there. Flips the row to
+      ``sync_status='pending_push'`` first so ``push()`` accepts it,
+      then delegates to ``push()`` which handles all the bookkeeping.
+
+    Valid starting states: ``clean`` / ``pending_pull`` / ``conflict``.
+    Any other state raises ``AgolError``.
+
+    The "no-drift" case (catalogue ↔ AGOL already match) is treated
+    as a successful pull regardless of resolution mode — marks the
+    row clean and bumps ``last_synced_at`` so the steward gets a
+    clear "nothing to do, sync state confirmed" outcome.
+    """
+    from . import inventory_manager
+    from .utils import utc_now_iso
+
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise AgolError(f"dataset_id {dataset_id!r} not in catalogue")
+    if row.get("status") != "active":
+        raise AgolError(
+            f"refusing to pull {dataset_id!r}: status is "
+            f"{row.get('status')!r}, not 'active'"
+        )
+
+    sync_status_before = row.get("sync_status") or "unpublished"
+    if sync_status_before not in _PULLABLE_STATUSES:
+        raise AgolError(
+            f"refusing to pull {dataset_id!r}: sync_status is "
+            f"{sync_status_before!r}; pull requires clean / pending_pull "
+            f"/ conflict. (For 'pending_push' / 'error' use push first; "
+            f"for 'unpublished' there's nothing on AGOL to pull from.)"
+        )
+
+    agol_item_id = row.get("agol_item_id")
+    if not agol_item_id:
+        raise AgolError(
+            f"row {dataset_id!r} has no agol_item_id; nothing to pull"
+        )
+
+    if resolution not in (None, "accept_agol", "reject_agol"):
+        raise AgolError(
+            f"unknown pull resolution {resolution!r}. "
+            f"Expected one of: None, 'accept_agol', 'reject_agol'."
+        )
+
+    # --- fetch AGOL item ---------------------------------------------
+    item = gis.content.get(agol_item_id)
+    now = utc_now_iso()
+    if item is None:
+        msg = (
+            f"AGOL item {agol_item_id!r} no longer exists "
+            f"(deleted out-of-band?). Use `y2y agol-sync unpublish "
+            f"{dataset_id}` to clear the catalogue link, or "
+            f"`y2y agol-sync push {dataset_id}` to re-create."
+        )
+        inventory_manager.update_dataset(
+            db_path, dataset_id,
+            {"sync_status": "error",
+             "internal_notes": _append_note(
+                 row.get("internal_notes"), f"[agol] pull: {msg}"
+             )},
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value=sync_status_before,
+            new_value="error",
+            detail=f"pull failed: {msg}",
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="pull",
+            sync_status_before=sync_status_before,
+            sync_status_after="error",
+            agol_item_id=agol_item_id,
+            note=msg,
+            error=msg,
+        )
+
+    diffs = _diff_adoption_fields(row, item)
+
+    # --- no-drift short-circuit --------------------------------------
+    if not diffs:
+        inventory_manager.update_dataset(
+            db_path, dataset_id,
+            {"sync_status": "clean", "last_synced_at": now},
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value=sync_status_before,
+            new_value="clean",
+            detail=(
+                f"pull confirmed: AGOL item {agol_item_id!r} matches "
+                f"catalogue field-for-field. No changes required."
+            ),
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="pull",
+            sync_status_before=sync_status_before,
+            sync_status_after="clean",
+            agol_item_id=agol_item_id,
+            note="no drift; sync state confirmed",
+        )
+
+    # --- surface mode (no resolution) → mark conflict ---------------
+    diff_lines = [
+        f"  {field}: AGOL={agol_val!r}  catalogue={cat_val!r}"
+        for field, agol_val, cat_val in diffs
+    ]
+    diff_summary = "\n".join(diff_lines)
+
+    if resolution is None:
+        detail = (
+            f"pull surfaced {len(diffs)} field diff(s) between AGOL item "
+            f"{agol_item_id!r} and the catalogue. Steward resolves with "
+            f"`y2y agol-sync pull {dataset_id} --accept` (catalogue "
+            f"absorbs AGOL) or `--reject` (re-push catalogue to AGOL). "
+            f"Diff:\n{diff_summary}"
+        )
+        inventory_manager.update_dataset(
+            db_path, dataset_id, {"sync_status": "conflict"},
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value=sync_status_before,
+            new_value="conflict",
+            detail=detail,
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="pull",
+            sync_status_before=sync_status_before,
+            sync_status_after="conflict",
+            agol_item_id=agol_item_id,
+            note=f"surfaced conflict ({len(diffs)} field(s) drifted)",
+        )
+
+    # --- reject_agol → re-push catalogue to AGOL ---------------------
+    if resolution == "reject_agol":
+        # push() refuses pending_pull / conflict status; flip to
+        # pending_push so it accepts the row. The push itself sets
+        # sync_status='clean' on success.
+        inventory_manager.update_dataset(
+            db_path, dataset_id, {"sync_status": "pending_push"},
+        )
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=now,
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value=sync_status_before,
+            new_value="pending_push",
+            detail=(
+                f"pull --reject: catalogue is authoritative; re-pushing "
+                f"to overwrite AGOL drift. Diff being overwritten:\n"
+                f"{diff_summary}"
+            ),
+        )
+        try:
+            return push(
+                db_path, dataset_id, gis, config,
+                library_root=library_root, actor=actor,
+            )
+        except AgolError as exc:
+            # Push failed — leave row at pending_push so retry/reconcile
+            # picks it up. Re-raise so the steward sees the failure.
+            raise AgolError(
+                f"pull --reject for {dataset_id!r}: row flipped to "
+                f"pending_push but push failed: {exc}. Row stays at "
+                f"pending_push; retry with `y2y agol-sync push "
+                f"{dataset_id}` or `y2y agol-sync reconcile`."
+            ) from exc
+
+    # --- accept_agol → absorb AGOL values into the catalogue --------
+    assert resolution == "accept_agol"  # caught above otherwise
+
+    updates: dict[str, Any] = {"sync_status": "clean", "last_synced_at": now}
+    absorbed: list[str] = []
+    skipped: list[str] = []
+    for field, agol_val, _cat_val in diffs:
+        if field == "categories":
+            skipped.append(
+                "categories (filesystem-bound — use `y2y rename` to "
+                "move the file to a different category folder)"
+            )
+            continue
+        column = _AGOL_FIELD_TO_CATALOGUE_COLUMN.get(field)
+        if column is None:
+            skipped.append(f"{field} (no catalogue column mapping)")
+            continue
+        if field == "tags":
+            # AGOL exposes tags as a sorted list (from _diff_adoption_fields);
+            # catalogue stores them as ';'-delimited strings.
+            updates[column] = ";".join(agol_val)
+        else:
+            updates[column] = agol_val
+        absorbed.append(f"{column} ← AGOL.{field}")
+
+    if skipped:
+        note_addition = (
+            f"[agol pull --accept @ {now}] absorbed AGOL values for "
+            f"{len(absorbed)} field(s); skipped {len(skipped)}: "
+            f"{'; '.join(skipped)}"
+        )
+        updates["internal_notes"] = _append_note(
+            row.get("internal_notes"), note_addition,
+        )
+
+    inventory_manager.update_dataset(db_path, dataset_id, updates)
+    detail = (
+        f"pull --accept: catalogue absorbed {len(absorbed)} drifted "
+        f"field(s) from AGOL item {agol_item_id!r}"
+        + (f"; skipped {len(skipped)} non-absorbable diff(s)" if skipped else "")
+        + f". Per-field absorption: {'; '.join(absorbed) or '(none)'}.\n"
+        + f"Original diff:\n{diff_summary}"
+    )
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=now,
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=row.get("file_path"),
+        field_changed="sync_status",
+        old_value=sync_status_before,
+        new_value="clean",
+        detail=detail,
+    )
+    return SyncResult(
+        dataset_id=dataset_id,
+        action="pull",
+        sync_status_before=sync_status_before,
+        sync_status_after="clean",
+        agol_item_id=agol_item_id,
+        note=(
+            f"absorbed {len(absorbed)} field(s) from AGOL"
+            + (f"; skipped {len(skipped)}" if skipped else "")
+        ),
+    )
+
+
+def pull_all_pending(
+    db_path: Path,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+) -> list[SyncResult]:
+    """Surface diffs for every ``pending_pull`` row.
+
+    Iterates all ``status='active'``, ``sync_status='pending_pull'``
+    rows and calls ``pull()`` with no resolution, so each gets its
+    diff logged + marked ``conflict``. Per-row failures are captured
+    as error-flavoured ``SyncResult`` entries — the batch never
+    aborts. The steward then runs ``y2y agol-sync pull <id> --accept``
+    or ``--reject`` for each conflict surfaced.
+
+    Returns the list of outcomes in catalogue order.
+    """
+    from . import inventory_manager
+
+    rows = [
+        r for r in inventory_manager.load_inventory(db_path)
+        if r.get("status") == "active"
+        and r.get("sync_status") == "pending_pull"
+    ]
+    results: list[SyncResult] = []
+    for row in rows:
+        did = row["dataset_id"]
+        try:
+            result = pull(
+                db_path, did, gis, config,
+                library_root=library_root, actor=actor,
+                resolution=None,
+            )
+            results.append(result)
+        except AgolError as exc:
+            results.append(SyncResult(
+                dataset_id=did,
+                action="pull",
+                sync_status_before="pending_pull",
+                sync_status_after="pending_pull",
+                agol_item_id=row.get("agol_item_id"),
+                note=str(exc),
+                error=str(exc),
+            ))
+    return results
+
+
+# ----------------------------------------------------------------------------
 # Bidirectional reconcile (Phase C.3)
 # ----------------------------------------------------------------------------
 

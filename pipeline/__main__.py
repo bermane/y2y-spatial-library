@@ -1067,5 +1067,137 @@ def agol_sync_reconcile(
         _auto_export_xlsx(ctx)
 
 
+@agol_sync_group.command("pull")
+@click.argument("dataset_id", required=False)
+@click.option(
+    "--all-pending", "all_pending", is_flag=True,
+    help="Surface diffs for every row with sync_status='pending_pull'. "
+         "Mutually exclusive with a dataset_id argument and with "
+         "--accept / --reject (batch mode never auto-resolves).",
+)
+@click.option(
+    "--accept", "accept", is_flag=True,
+    help="Absorb AGOL's drifted text fields into the catalogue "
+         "(title / summary / description / tags / acknowledgements / "
+         "terms_of_use). The `categories` diff is filesystem-bound "
+         "and skipped with an internal_notes annotation; change the "
+         "category with `y2y rename` if needed. Marks sync_status='clean'.",
+)
+@click.option(
+    "--reject", "reject", is_flag=True,
+    help="Re-push catalogue values to AGOL, overwriting whatever "
+         "drifted there. Flips sync_status to pending_push first and "
+         "delegates to push().",
+)
+@click.option(
+    "--actor", default=None,
+    help="Name to record as the changelog actor. Defaults to $USER.",
+)
+@click.pass_context
+def agol_sync_pull(
+    ctx: click.Context,
+    dataset_id: str | None,
+    all_pending: bool,
+    accept: bool,
+    reject: bool,
+    actor: str | None,
+) -> None:
+    """Pull AGOL state back into the catalogue.
+
+    Three single-row modes (gated by --accept / --reject):
+
+    \b
+    * No flag (default):     fetch + diff + mark sync_status='conflict',
+                             log structured diff for steward review.
+    * --accept:              catalogue absorbs AGOL's text-field values.
+    * --reject:              re-push catalogue values to AGOL.
+
+    Batch mode (--all-pending): iterates every pending_pull row and
+    surfaces its diff (no auto-resolution). The steward then runs
+    `pull <id> --accept` or `--reject` per row.
+    """
+    from . import agol_config, agol_sync
+
+    if accept and reject:
+        raise click.UsageError("--accept and --reject are mutually exclusive")
+    if all_pending and (accept or reject):
+        raise click.UsageError(
+            "--all-pending does not accept --accept / --reject; "
+            "batch mode never auto-resolves. Resolve each row "
+            "individually with `pull <id> --accept|--reject`."
+        )
+    if all_pending and dataset_id:
+        raise click.UsageError(
+            "--all-pending and a dataset_id argument are mutually exclusive"
+        )
+    if not all_pending and not dataset_id:
+        raise click.UsageError(
+            "either pass a dataset_id or use --all-pending"
+        )
+
+    db_path, library, _ = _resolve_paths(ctx.obj["root"])
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    resolution: str | None = None
+    if accept:
+        resolution = "accept_agol"
+    elif reject:
+        resolution = "reject_agol"
+
+    actor_name = actor or _default_actor()
+
+    if all_pending:
+        results = agol_sync.pull_all_pending(
+            db_path, gis, cfg,
+            library_root=library, actor=actor_name,
+        )
+        if not results:
+            console.print(
+                "[green]pull --all-pending complete[/green] — "
+                "no rows with sync_status='pending_pull'."
+            )
+            return
+        console.print(
+            f"[green]pull --all-pending complete[/green] — "
+            f"[bold]{len(results)}[/bold] row(s) surfaced:"
+        )
+        for r in results:
+            colour = "red" if r.error else (
+                "yellow" if r.sync_status_after == "conflict" else "cyan"
+            )
+            console.print(
+                f"  [{colour}]{r.dataset_id}[/{colour}] → "
+                f"{r.sync_status_after}: {r.note}"
+            )
+        _auto_export_xlsx(ctx)
+        return
+
+    # Single-row mode.
+    try:
+        result = agol_sync.pull(
+            db_path, dataset_id, gis, cfg,
+            library_root=library, actor=actor_name,
+            resolution=resolution,
+        )
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    colour = (
+        "red" if result.error else
+        "green" if result.sync_status_after == "clean" else
+        "yellow"
+    )
+    console.print(
+        f"[{colour}]pull complete[/{colour}] — "
+        f"{result.dataset_id} → sync_status={result.sync_status_after}"
+    )
+    console.print(f"  {result.note}")
+    _auto_export_xlsx(ctx)
+
+
 if __name__ == "__main__":
     cli()

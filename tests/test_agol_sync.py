@@ -1311,3 +1311,421 @@ def test_reconcile_writes_report_even_when_no_rows(
     assert report.report_path.exists()
     assert report.outcomes == []
     assert "no active rows" in report.report_path.read_text()
+
+
+# =============================================================================
+# pull / pull_all_pending / detect_pull_candidates (Phase D)
+# =============================================================================
+
+def _make_drifted_agol_item(
+    *,
+    title: str | None = None,
+    snippet: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    accessInformation: str | None = None,
+    licenseInfo: str | None = None,
+    categories: list[str] | None = None,
+    modified: int | None = None,
+) -> MagicMock:
+    """Build a MagicMock AGOL item with the supplied attributes.
+
+    Defaults to values that match _full_row's defaults so the steward
+    can override only the fields they want to test drifting.
+    """
+    item = MagicMock()
+    item.title = title if title is not None else "Test Title"
+    item.snippet = snippet if snippet is not None else "Summary."
+    item.description = description if description is not None else "Description."
+    item.tags = tags if tags is not None else ["test", "y2y"]
+    item.accessInformation = (
+        accessInformation if accessInformation is not None else "Ack."
+    )
+    item.licenseInfo = licenseInfo if licenseInfo is not None else "TOU."
+    item.categories = categories if categories is not None else ["Water"]
+    if modified is not None:
+        item.modified = modified
+    return item
+
+
+def test_pull_no_drift_marks_clean_and_bumps_last_synced(
+    project_tree, _config_no_cache,
+) -> None:
+    """A pull on a row whose AGOL state matches the catalogue is a
+    no-op resolution: marks the row 'clean' and bumps last_synced_at.
+    Useful as a 'confirm sync state' command."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_nodrift", file_path="Water/x.gpkg",
+        sync_status="pending_pull", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    item = _make_drifted_agol_item()  # all defaults match _full_row
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.pull(
+        db, "ds_nodrift", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+
+    assert result.sync_status_after == "clean"
+    fresh = inventory_manager.get_dataset(db, "ds_nodrift")
+    assert fresh["sync_status"] == "clean"
+    assert fresh["last_synced_at"] is not None
+
+
+def test_pull_surface_mode_marks_conflict_and_logs_diff(
+    project_tree, _config_no_cache,
+) -> None:
+    """Default pull (no resolution) on a drifted row: marks
+    sync_status='conflict', logs structured per-field diff to the
+    changelog. Does NOT modify either catalogue text fields or AGOL."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_drift", file_path="Water/x.gpkg",
+        sync_status="pending_pull", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    # AGOL drifted on title + snippet.
+    item = _make_drifted_agol_item(
+        title="New AGOL Title", snippet="AGOL snippet",
+    )
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.pull(
+        db, "ds_drift", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+
+    assert result.sync_status_after == "conflict"
+    fresh = inventory_manager.get_dataset(db, "ds_drift")
+    assert fresh["sync_status"] == "conflict"
+    # Catalogue text fields untouched.
+    assert fresh["title"] == "Test Title"
+    assert fresh["summary"] == "Summary."
+
+    log = inventory_manager.load_changelog(db)
+    diffs = [r for r in log if "pull surfaced" in (r["note"] or "")]
+    assert len(diffs) == 1
+    assert "title:" in diffs[0]["note"]
+    assert "snippet:" in diffs[0]["note"]
+    assert "New AGOL Title" in diffs[0]["note"]
+
+
+def test_pull_accept_absorbs_agol_text_fields(
+    project_tree, _config_no_cache,
+) -> None:
+    """pull --accept absorbs AGOL's title/summary/description/tags/
+    acknowledgements/terms_of_use into the catalogue. Row ends 'clean'."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_absorb", file_path="Water/x.gpkg",
+        sync_status="conflict", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    item = _make_drifted_agol_item(
+        title="New AGOL Title",
+        snippet="New AGOL snippet",
+        description="New AGOL description",
+        tags=["new", "agol-tags"],
+        accessInformation="New AGOL ack",
+        licenseInfo="New AGOL terms",
+    )
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.pull(
+        db, "ds_absorb", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        resolution="accept_agol",
+    )
+
+    assert result.sync_status_after == "clean"
+    fresh = inventory_manager.get_dataset(db, "ds_absorb")
+    assert fresh["title"] == "New AGOL Title"
+    assert fresh["summary"] == "New AGOL snippet"
+    assert fresh["description"] == "New AGOL description"
+    # Tags are sorted by _diff_adoption_fields before write-back.
+    assert set(fresh["tags"].split(";")) == {"new", "agol-tags"}
+    assert fresh["acknowledgements"] == "New AGOL ack"
+    assert fresh["terms_of_use"] == "New AGOL terms"
+    assert fresh["last_synced_at"] is not None
+
+
+def test_pull_accept_skips_categories_with_internal_notes(
+    project_tree, _config_no_cache,
+) -> None:
+    """The `categories` diff is filesystem-bound (folder location
+    dictates it) so pull --accept skips it and surfaces a steward
+    note via internal_notes — change it via `y2y rename`."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_cat", file_path="Water/x.gpkg",
+        sync_status="conflict", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    # Only categories drifted.
+    item = _make_drifted_agol_item(categories=["Species"])
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    result = agol_sync.pull(
+        db, "ds_cat", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        resolution="accept_agol",
+    )
+
+    assert result.sync_status_after == "clean"
+    fresh = inventory_manager.get_dataset(db, "ds_cat")
+    # Catalogue's category column is FS-bound — NOT mutated by pull.
+    assert fresh["category"] == "Water"
+    # internal_notes annotation about the skipped diff.
+    assert fresh["internal_notes"] is not None
+    assert "categories" in fresh["internal_notes"]
+    assert "y2y rename" in fresh["internal_notes"]
+
+
+def test_pull_reject_repushes_catalogue_to_agol(
+    project_tree, _config_no_cache, monkeypatch,
+) -> None:
+    """pull --reject flips sync_status to pending_push and calls
+    push() to overwrite AGOL. The push handles all bookkeeping."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_reject", file_path="Water/x.gpkg",
+        sync_status="conflict", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    item = _make_drifted_agol_item(title="AGOL drifted title")
+    gis = MagicMock()
+    gis.content.get.return_value = item
+
+    fake_push_result = agol_sync.SyncResult(
+        dataset_id="ds_reject", action="push",
+        sync_status_before="pending_push", sync_status_after="clean",
+        agol_item_id="abc", note="re-pushed",
+    )
+    push_mock = MagicMock(return_value=fake_push_result)
+    monkeypatch.setattr(agol_sync, "push", push_mock)
+
+    result = agol_sync.pull(
+        db, "ds_reject", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        resolution="reject_agol",
+    )
+
+    assert result.sync_status_after == "clean"
+    push_mock.assert_called_once()
+    # The row was flipped to pending_push so push() would accept it.
+    log = inventory_manager.load_changelog(db)
+    rejects = [r for r in log if "pull --reject" in (r["note"] or "")]
+    assert len(rejects) == 1
+
+
+def test_pull_marks_error_when_agol_item_missing(
+    project_tree, _config_no_cache,
+) -> None:
+    """A deleted-out-of-band AGOL item produces an actionable error
+    outcome: sync_status='error', internal_notes annotated, steward
+    can unpublish or re-push."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_gone", file_path="Water/x.gpkg",
+        sync_status="pending_pull", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = MagicMock()
+    gis.content.get.return_value = None
+
+    result = agol_sync.pull(
+        db, "ds_gone", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+
+    assert result.sync_status_after == "error"
+    assert result.error is not None
+    fresh = inventory_manager.get_dataset(db, "ds_gone")
+    assert fresh["sync_status"] == "error"
+    assert "no longer exists" in (fresh["internal_notes"] or "")
+
+
+def test_pull_rejects_non_pullable_state(
+    project_tree, _config_no_cache,
+) -> None:
+    """pull refuses unpublished / pending_push / error. Steward
+    must push or unpublish those first."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_unp", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    with pytest.raises(agol_sync.AgolError, match="sync_status is 'unpublished'"):
+        agol_sync.pull(
+            db, "ds_unp", MagicMock(), _config_no_cache,
+            library_root=project_tree["library"], actor="tester",
+        )
+
+
+def test_pull_rejects_row_without_agol_item_id(
+    project_tree, _config_no_cache,
+) -> None:
+    """Can't pull from a row that has no AGOL link — sanity check."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_noid", file_path="Water/x.gpkg",
+        sync_status="conflict", agol_item_id=None,
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    with pytest.raises(agol_sync.AgolError, match="no agol_item_id"):
+        agol_sync.pull(
+            db, "ds_noid", MagicMock(), _config_no_cache,
+            library_root=project_tree["library"], actor="tester",
+        )
+
+
+def test_pull_rejects_unknown_resolution_value(
+    project_tree, _config_no_cache,
+) -> None:
+    """Defensive — anything other than None / 'accept_agol' /
+    'reject_agol' should be rejected with a clear error so a typo
+    in a future caller doesn't silently fall through to surface mode."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_bad_res", file_path="Water/x.gpkg",
+        sync_status="conflict", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    with pytest.raises(agol_sync.AgolError, match="unknown pull resolution"):
+        agol_sync.pull(
+            db, "ds_bad_res", MagicMock(), _config_no_cache,
+            library_root=project_tree["library"], actor="tester",
+            resolution="accept",  # missing _agol suffix
+        )
+
+
+def test_pull_all_pending_surfaces_each_row(
+    project_tree, _config_no_cache,
+) -> None:
+    """Batch mode iterates pending_pull rows, calls pull() with no
+    resolution on each, returns one SyncResult per row."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    for did, item_id in (("ds_p1", "agol1"), ("ds_p2", "agol2")):
+        row = _full_row(
+            dataset_id=did, file_path=f"Water/{did}.gpkg",
+            sync_status="pending_pull", agol_item_id=item_id,
+            agol_format="feature-layer",
+        )
+        inventory_manager.insert_dataset(db, row)
+    # A non-pending_pull row should NOT be picked up.
+    row3 = _full_row(
+        dataset_id="ds_clean", file_path="Water/clean.gpkg",
+        sync_status="clean", agol_item_id="agol3",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row3)
+
+    gis = MagicMock()
+    gis.content.get.return_value = _make_drifted_agol_item(title="Drifted")
+
+    results = agol_sync.pull_all_pending(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+
+    assert len(results) == 2
+    assert {r.dataset_id for r in results} == {"ds_p1", "ds_p2"}
+    for r in results:
+        assert r.sync_status_after == "conflict"
+
+
+def test_detect_pull_candidates_returns_drifted_clean_rows(
+    project_tree, _config_no_cache,
+) -> None:
+    """detect_pull_candidates is the read-only equivalent of the
+    reconcile pulled_flag bucket: returns clean rows whose
+    AGOL.modified > last_synced_at, without mutating anything."""
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    drifted = _full_row(
+        dataset_id="ds_drift", file_path="Water/x.gpkg",
+        sync_status="clean", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    drifted["last_synced_at"] = "2026-01-01T00:00:00Z"
+    inventory_manager.insert_dataset(db, drifted)
+    stable = _full_row(
+        dataset_id="ds_stable", file_path="Water/y.gpkg",
+        sync_status="clean", agol_item_id="def",
+        agol_format="feature-layer",
+    )
+    stable["last_synced_at"] = "2026-06-01T00:00:00Z"
+    inventory_manager.insert_dataset(db, stable)
+
+    def _get(item_id):
+        # 2026-06-01 for both items — newer than ds_drift's last_synced,
+        # older than ds_stable's.
+        item = _make_drifted_agol_item(modified=1780272000000)
+        return item
+
+    gis = MagicMock()
+    gis.content.get.side_effect = _get
+
+    candidates = agol_sync.detect_pull_candidates(db, gis, _config_no_cache)
+    assert [c.dataset_id for c in candidates] == ["ds_drift"]
+
+    # Catalogue rows untouched.
+    fresh = inventory_manager.get_dataset(db, "ds_drift")
+    assert fresh["sync_status"] == "clean"
