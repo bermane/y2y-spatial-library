@@ -916,7 +916,7 @@ def test_push_applies_full_metadata_to_service_not_source(
     )
     full_props = update_calls_with_props[-1].kwargs["item_properties"]
     assert full_props["title"] == "Test Title"
-    assert full_props["categories"] == ["Water"]
+    assert full_props["categories"] == ["/Categories/Water"]
     assert full_props["snippet"] == "Summary."
     assert full_props["accessInformation"] == "Ack."
     assert full_props["licenseInfo"] == "TOU."

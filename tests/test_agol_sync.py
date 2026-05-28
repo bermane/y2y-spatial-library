@@ -186,7 +186,7 @@ def test_compute_item_properties_assigns_category_as_full_display_name() -> None
     row = _sample_row()
     row["category"] = "Jurisdictional & Political Boundaries"
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["Jurisdictional & Political Boundaries"]
+    assert props["categories"] == ["/Categories/Jurisdictional & Political Boundaries"]
 
 
 def test_compute_item_properties_includes_subcategory_as_hierarchical_path() -> None:
@@ -199,7 +199,7 @@ def test_compute_item_properties_includes_subcategory_as_hierarchical_path() -> 
     row["category"] = "Species"
     row["subcategory"] = "Grizzly Bear"
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["Species/Grizzly Bear"]
+    assert props["categories"] == ["/Categories/Species/Grizzly Bear"]
     # Belt-and-braces: list length is always 1.
     assert len(props["categories"]) == 1
 
@@ -209,7 +209,7 @@ def test_compute_item_properties_no_subcategory_means_single_entry() -> None:
     row["category"] = "Water"
     row["subcategory"] = None
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["Water"]
+    assert props["categories"] == ["/Categories/Water"]
 
 
 def test_compute_item_properties_stamps_type_keywords_for_y2y_discovery() -> None:
@@ -2063,7 +2063,7 @@ def test_diff_still_flags_stale_category_drift(_config_no_cache) -> None:
     assert cat_diff[1] == [
         "/Categories/Administrative and Jurisdictional Boundaries"
     ]
-    assert cat_diff[2] == ["Water"]
+    assert cat_diff[2] == ["/Categories/Water"]
 
 
 def test_diff_flags_multi_category_drift(_config_no_cache) -> None:
@@ -2104,15 +2104,18 @@ def test_compute_item_properties_emits_single_category_for_top_level() -> None:
 
 
 def test_compute_item_properties_emits_single_path_for_subcategorised() -> None:
-    """The Phase D.6 fix: a subcategorised row sends ONE
-    'Parent/Sub' path entry, not two flat entries. AGOL interprets
-    this as a single hierarchical assignment, preserving the
-    single-top-level-category invariant."""
+    """The Phase D.6 fix: a subcategorised row sends ONE absolute
+    '/Categories/Parent/Sub' path entry, not two flat entries. AGOL
+    interprets this as a single hierarchical assignment, preserving
+    the single-top-level-category invariant. The absolute
+    '/Categories/' prefix is required for AGOL to render the nested
+    breadcrumb (verified live 2026-05-28; relative form shows only
+    the leaf)."""
     row = _sample_row()
     row["category"] = "Species"
     row["subcategory"] = "Caribou"
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["Species/Caribou"]
+    assert props["categories"] == ["/Categories/Species/Caribou"]
     assert len(props["categories"]) == 1
 
 

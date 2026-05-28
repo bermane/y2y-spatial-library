@@ -225,8 +225,12 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     ``tags`` (``;``-delimited)   ``tags`` (list)
     ``acknowledgements``         ``accessInformation``
     ``terms_of_use``             ``licenseInfo``
-    ``category`` (display name)  ``categories`` (list with 1 entry)
+    ``category`` (+subcategory)  ``categories`` (1 absolute path)
     ===========================  ================
+
+    The ``categories`` value is always a single-element list holding
+    an absolute ``/Categories/<Parent>[/<Sub>]`` path — see the
+    single-category invariant note at the categories block below.
 
     Also stamps a stable ``typeKeywords`` list that lets future
     queries find Y2Y items (``Y2Y``, ``Y2Y:dataset_id:<id>``,
@@ -252,7 +256,7 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
         "typeKeywords": type_keywords,
     }
 
-    # AGOL categories: a single hierarchical path per item.
+    # AGOL categories: a single absolute hierarchical path per item.
     #
     # Y2Y invariant: an item is assigned to exactly ONE top-level
     # category. When the catalogue row has a subcategory (Species
@@ -261,19 +265,32 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     # bare names would put the item in two top-level categories on
     # AGOL — explicitly disallowed.
     #
-    # AGOL's REST API takes either bare names ("Water") or full
-    # paths ("/Categories/Water"); bare names get auto-prefixed
-    # on save. Relative path form ("Species/Caribou") rides the
-    # same auto-prefix and lands as "/Categories/Species/Caribou"
-    # in AGOL storage. _normalise_category() strips the prefix on
-    # both sides for diff comparison so push/pull is round-trip-
-    # stable regardless of which form is on the wire.
+    # Format: the FULL absolute path prefixed with '/Categories/'
+    # is required. This is verified live (2026-05-28) against the
+    # production org + confirmed by Esri's `assign_to_items` docs
+    # ("each with full hierarchical path prefixed with /"):
+    #
+    #   * AGOL stores categories VERBATIM — no server-side
+    #     normalisation. Whatever string we send is what's stored.
+    #   * Bare top-level ("Climate Resilience") resolves and
+    #     displays correctly (legacy items were pushed this way).
+    #   * BUT a relative nested path ("Species/Other") does NOT
+    #     resolve — the item page shows only the leaf ("Other"),
+    #     detached from the parent. Only the absolute form
+    #     ("/Categories/Species/Other") renders the proper
+    #     Species ▸ Other breadcrumb.
+    #
+    # So we emit absolute paths for everything (top-level included)
+    # for one consistent, documented form. _normalise_category()
+    # strips the '/Categories/' prefix on both sides for diff
+    # comparison, so this does NOT churn against legacy bare-stored
+    # items — push/pull stays round-trip-stable.
     if category:
         parts = [compute_agol_category(category)]
         sub = row.get("subcategory")
         if sub:
             parts.append(sub)
-        properties["categories"] = ["/".join(parts)]
+        properties["categories"] = ["/Categories/" + "/".join(parts)]
 
     return properties
 

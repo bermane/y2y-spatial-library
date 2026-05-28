@@ -53,11 +53,15 @@ CREATE TABLE IF NOT EXISTS datasets (
     --     changing it requires `y2y rename` (a file move).
     --   * AGOL:      the item is assigned to exactly one top-level
     --     category. agol_sync.compute_item_properties() sends a
-    --     single hierarchical-path entry ('Species/Caribou'), not
-    --     two flat entries — so subcategorised items still get
-    --     one top-level membership. AGOL's Item.update() with the
-    --     full categories list REPLACES; even if a steward adds
-    --     extras in the Map Viewer UI, the next push overwrites
+    --     single absolute-path entry ('/Categories/Species/Caribou'),
+    --     not two flat entries — so subcategorised items still get
+    --     one top-level membership. The absolute '/Categories/...'
+    --     prefix is REQUIRED for AGOL to resolve nested paths: a
+    --     relative 'Species/Caribou' stores verbatim but the item
+    --     page shows only the leaf ('Caribou'), detached from the
+    --     parent (verified live 2026-05-28). AGOL's Item.update()
+    --     with the full categories list REPLACES; even if a steward
+    --     adds extras in the Map Viewer UI, the next push overwrites
     --     back to one.
     -- Multi-rendition (one dataset → multiple AGOL items, each in
     -- its own category) is deferred to v2 per the integration plan.
