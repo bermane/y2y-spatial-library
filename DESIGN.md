@@ -325,9 +325,10 @@ placeholder metadata would erode that invariant over time.
 | Field                | Type              | Required | Notes                                                                |
 | -------------------- | ----------------- | -------- | -------------------------------------------------------------------- |
 | `agol_item_id`       | string            | no       | AGOL item ID once published. Null between ingestion and publication. Schema enforces uniqueness-when-not-null via a sparse `UNIQUE` index, so many unpublished rows can coexist with NULL. |
-| `agol_published_at`  | ISO-8601 datetime | no       | Reserved for AGOL integration (§15). When set, the timestamp the dataset was first published to AGOL. |
-| `last_synced_at`     | ISO-8601 datetime | no       | Reserved for AGOL integration (§15). Last successful catalogue↔AGOL reconciliation. |
-| `sync_status`        | enum              | yes      | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished` (schema CHECK). Defaults to `unpublished`. Reserved for AGOL integration (§15). |
+| `agol_published_at`  | ISO-8601 datetime | no       | AGOL integration (§15). When set, the timestamp the dataset was first published to AGOL. |
+| `last_synced_at`     | ISO-8601 datetime | no       | AGOL integration (§15). Last successful catalogue↔AGOL sync; drives drift detection. |
+| `sync_status`        | enum              | yes      | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished` (schema CHECK). Defaults to `unpublished`. AGOL integration (§15). |
+| `agol_format`        | enum              | no       | Publish-target intent: `feature-layer` / `vector-tile-layer` / `imagery-layer`. Pre-filled at ingest from format; editable via `y2y update`. AGOL integration (§15). |
 | `internal_notes`     | string            | no       | Free-form. Renamed from the pre-migration `notes` column to make its private-audience nature explicit (the steward writes here; AGOL never sees it). Don't encode structured data; add a column instead. |
 
 #### Spatial properties (computed at promote / refresh)
@@ -1183,69 +1184,262 @@ publication shape is downstream and lives in `agol_item_id` linkage.
 
 ---
 
-## 15. AGOL integration (placeholder)
+## 15. AGOL integration
 
-The schema reserves four columns for AGOL synchronisation; this
-section sketches the eventual flow so they're not vestigial.
-**Implementation is deferred** — none of these are populated by code
-in this branch. The columns exist so the integration when it arrives
-doesn't require a schema change.
+The catalogue ↔ ArcGIS Online bridge is **implemented** in
+`pipeline/agol_sync.py` (+ `agol_config.py`, `agol_thumbnails.py`,
+`agol_vtpk.py`) and the `y2y agol-sync` CLI sub-group. It publishes
+the catalogue's authoritative datasets to the Y2Y Conservation Atlas
+org and keeps catalogue ↔ AGOL state reconciled bidirectionally.
 
-### Reserved columns
+### State columns
 
 | Column                | Default        | Meaning                                                                            |
 | --------------------- | -------------- | ---------------------------------------------------------------------------------- |
-| `agol_item_id`        | NULL           | The AGOL item ID once published. Sparse UNIQUE — one published item per row.       |
+| `agol_item_id`        | NULL           | The AGOL **service** item ID once published. Sparse UNIQUE — one published item per row. |
 | `agol_published_at`   | NULL           | Timestamp the dataset was first published to AGOL. Set once, then immutable.       |
-| `last_synced_at`      | NULL           | Timestamp of the last successful catalogue ↔ AGOL reconciliation.                  |
+| `last_synced_at`      | NULL           | Timestamp of the last successful catalogue ↔ AGOL sync. Drives drift detection.    |
 | `sync_status`         | `unpublished`  | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished`. Schema CHECK. |
+| `agol_format`         | per-format     | Publish-target intent: `feature-layer` / `vector-tile-layer` / `imagery-layer`. Pre-filled at ingest from format; editable via `y2y update`. |
 
 ### `sync_status` state machine
 
 ```
-unpublished ──(publish)──> clean
-clean ──(catalogue edit)──> pending_push
-clean ──(AGOL edit detected)──> pending_pull
-pending_push ──(push succeeds)──> clean
-pending_push ──(push fails)──> error
-pending_pull ──(pull succeeds)──> clean
-pending_pull ──(steward rejects pull)──> conflict
-conflict ──(steward resolves)──> pending_push | clean
+unpublished ──(push succeeds)──────────────> clean
+unpublished ──(adopt: AGOL matches)────────> clean
+unpublished ──(adopt: AGOL drifted)────────> conflict
+clean ──(catalogue edit, auto-marked)──────> pending_push
+clean ──(reconcile detects AGOL drift)─────> pending_pull
+clean ──(pull --no-resolution, drift)──────> conflict
+pending_push ──(push / reconcile succeeds)─> clean
+pending_push ──(push / reconcile fails)────> error
+pending_pull ──(pull --accept | --reject)──> clean
+pending_pull ──(pull --no-resolution)──────> conflict
+conflict ──(pull --accept)─────────────────> clean
+conflict ──(pull --reject)──> pending_push ─> clean
+error ──(reconcile retry succeeds)─────────> clean
+error ──(reconcile retry fails)────────────> error
+any-with-item ──(unpublish)────────────────> unpublished
 ```
 
-The state machine lives in application code, not in the schema —
-SQLite CHECK constraints can enforce the **value** of `sync_status`
-but not the legal transitions. A future `pipeline/agol_sync.py` will
-enforce transitions explicitly with the changelog action `metadata`
-(or a new dedicated action added by a numbered migration).
+The state machine lives in application code (`agol_sync.py`), not the
+schema — SQLite CHECK enforces the **value** of `sync_status`, not the
+legal transitions. Every transition writes a `metadata` changelog
+entry, so catalogue mutations and AGOL syncs interleave in one audit
+trail by `timestamp`.
 
-### Two-way drift detection
+### Catalogue-centric scope
 
-The same philosophy that drives `y2y reconcile` (§2) extends to AGOL:
+Every operation iterates rows in `datasets`; the org's full content
+tree is never scanned. Consequences:
 
-- **Don't auto-fix divergences.** If the catalogue says
-  `tags='caribou;telemetry'` and AGOL says `tags='caribou'`, surface
-  the conflict; the steward decides which side wins.
-- **Detect cheaply where possible.** AGOL exposes per-item modified
-  timestamps and content hashes for some types; use those for
-  fast-mode parity with `y2y reconcile --fast`. Deep mode would pull
-  full item descriptors and diff field-by-field.
-- **Log every sync event.** Every push, pull, conflict, and resolution
-  goes through `append_changelog`. The audit trail is one trail —
-  catalogue mutations and AGOL syncs interleave by `timestamp`.
+- **In catalogue, not on AGOL** (`agol_item_id IS NULL`) → push candidate.
+- **In both** (linked rows) → reconciled bidirectionally.
+- **On AGOL, not in catalogue** (maps, dashboards, the steward's
+  experiments) → **ignored**. The integration never ingests or
+  classifies untracked AGOL items.
+- **Tombstoned rows** → filtered out of every iteration. Call
+  `y2y agol-sync unpublish <id>` before tombstoning if the AGOL item
+  should go too.
+
+Integration-created items are stamped with `typeKeywords` (`Y2Y`,
+`Y2Y:dataset_id:<id>`, `Y2Y:category:<category>`) so a future audit
+tool can find them — no v1 command consumes these.
+
+### Per-row AGOL footprint: source + service
+
+Vectors and vector-tile layers produce **two** AGOL items:
+
+- **Source** in `_sources/` — private, minimal metadata, the uploaded
+  GPKG/VTPK. Carries `Y2Y:source` (+ `Y2Y:vtpk_sha256:<hex>` for VTL).
+- **Service** in `<Category>/` — public (org + Conservation Atlas
+  group), full metadata + thumbnail. This is the `agol_item_id`.
+
+Linked via `Service2Data`. `unpublish` walks that link to delete both.
+
+**Imagery is the exception** — published via
+`arcgis.raster.publish_hosted_imagery_layer` in a **no-source model**:
+no separate source TIFF item exists. Refreshing imagery re-runs the
+hosted-imagery publish.
+
+### The three publish targets (`agol_format`)
+
+| `agol_format`       | Source format | Path |
+| ------------------- | ------------- | ---- |
+| `feature-layer`     | geopackage    | Upload GPKG → `publish()` → hosted Feature Service. Data refresh via `FeatureLayerCollection.overwrite()`. |
+| `imagery-layer`     | geotiff       | `publish_hosted_imagery_layer` (no-source). |
+| `vector-tile-layer` | geopackage    | **Manual VTPK** (steward builds in Pro UI, drops in `queue/incoming/`, `y2y ingest scan` files it to `library/vtpk/`); pipeline uploads VTPK → `publish()` → Vector Tile Service. No arcpy in the pipeline. See the VTPK lifecycle below. |
+
+Switching a row's `agol_format` (e.g. `feature-layer` →
+`vector-tile-layer`) makes the next push delete the old AGOL
+representation (`_handle_target_switch`) before publishing the new one
+— credit savings is the whole point of VTL, so the old FS doesn't linger.
+
+#### VTPK lifecycle (vector-tile-layer)
+
+The pipeline never imports arcpy. The steward builds the `.vtpk` once
+per source-data change in ArcGIS Pro's "Share As Vector Tile Package"
+dialog, drops it in `queue/incoming/`, and `y2y ingest scan` dispatches
+`.vtpk` files to `agol_vtpk.ingest_one_vtpk` — matched to the catalogue
+row by file stem, moved to `library/vtpk/<stem>.vtpk` with a `.sha256`
+sidecar. If a GPKG and its same-stem VTPK arrive together, scan pairs
+them and approve promotes both. `y2y reconcile` checks the VTPK
+invariant on every run: **missing-VTPK** (VTL row with no `.vtpk`),
+**stale-VTPK** (GPKG newer than the `.vtpk`), **orphan-VTPK** (`.vtpk`
+on disk with no matching VTL row).
+
+### Auto-sync (default on)
+
+Catalogue mutations propagate to AGOL automatically:
+
+- `inventory_manager._maybe_mark_dirty()` flips `clean → pending_push`
+  on every `y2y update` / `rename` / `refresh` and on new ingest
+  approvals.
+- `agol_sync.try_auto_push()` then attempts a best-effort push when
+  `Y2Y_AGOL_AUTO_PUSH` is true (the env-var default). **Any** AGOL
+  failure — no profile, offline, 5xx — is swallowed and audited in
+  the changelog; the catalogue mutation always succeeds independent of
+  AGOL state. The row stays `pending_push` for the next reconcile.
+
+Set `Y2Y_AGOL_AUTO_PUSH=false` to make all pushes manual.
+
+### Bidirectional reconcile
+
+`y2y agol-sync reconcile [--dry-run]` iterates every active row:
+
+- `pending_push` → push (failures → `error`).
+- `clean` → compare AGOL's `modified` timestamp to `last_synced_at`;
+  if AGOL is newer, flag `pending_pull`.
+- `error` → retry push once.
+- `unpublished` / `pending_pull` / `conflict` → skipped (steward's call).
+
+Writes a markdown report to `reports/agol_reconcile_<ts>.md`. Intended
+for a weekly schedule — see "Scheduling" below.
+
+### Pull + conflict resolution
+
+`y2y agol-sync pull <id> [--accept | --reject]`:
+
+- **no flag** → fetch + diff + mark `conflict`, log the per-field diff.
+- **--accept** → catalogue absorbs AGOL's text fields (title, summary,
+  description, tags, acknowledgements, terms_of_use). `categories` is
+  filesystem-bound and skipped with an `internal_notes` note — change
+  it via `y2y rename`.
+- **--reject** → re-push the catalogue to overwrite AGOL drift.
+
+`pull --all-pending` surfaces diffs for every `pending_pull` row
+without auto-resolving. Drift detection follows the same
+"never auto-fix divergence" philosophy as `y2y reconcile` (§2).
+
+### Diff normalisation
+
+Field comparison treats representational differences as non-drift:
+
+- **HTML-permitting fields** (description, accessInformation,
+  licenseInfo) compare semantic-equivalence — AGOL wraps plain text in
+  `<p>…</p>` on save, and that structural HTML is stripped before
+  comparing. Meaningful tags (`<a href>`, `<ul>`, …) the plain
+  catalogue can't represent **do** count as drift. Plain text remains
+  the catalogue norm; raw HTML in a catalogue column is a supported
+  escape hatch (see schema.sql "Future work: rich text" — Track 1,
+  2026-05-28). Markdown / dual-column approaches are deferred.
+- **Categories** strip AGOL's `/Categories/` path prefix before
+  comparison, so a just-pushed item doesn't false-flag.
+
+### Single-category invariant
+
+One item → exactly one top-level category. The catalogue is
+single-valued, the file lives in one category folder, and
+`compute_item_properties` emits a single **absolute** path
+(`/Categories/<Parent>[/<Sub>]`). Subcategories are allowed (Species
+only at present) as a nested path, not a second top-level membership.
+The absolute `/Categories/` prefix is **required** for AGOL to resolve
+nested paths — a relative `Species/Other` stores but renders only the
+detached leaf (verified live 2026-05-28). Multi-rendition (one dataset
+→ multiple AGOL items) is deferred to v2.
+
+### Item categories & folders
+
+- AGOL **folders** mirror the catalogue's underscored category folders
+  (`Species`, `Juris_Political_Boundaries`, …), flat namespace.
+- AGOL **content categories** mirror the full display names
+  (`Jurisdictional & Political Boundaries`). `init-categories` writes
+  the 10-category typology (+ Species' subcategories) to the org once.
+
+### Adoption
+
+Items published to AGOL manually before this integration existed carry
+an `agol_item_id` but `sync_status='unpublished'`. Migration 009 (and
+ad-hoc `y2y agol-sync adopt <id>`) diffs catalogue ↔ AGOL and marks
+each `clean` (matched) or `conflict` (drifted — Phase D pull resolves).
+Adoption never mutates AGOL.
+
+### Unpublish
+
+`y2y agol-sync unpublish <id>` (confirmation-gated) permanently deletes
+the service + linked source, then clears `agol_item_id` /
+`agol_published_at` / `last_synced_at` and sets `sync_status=
+'unpublished'`. The catalogue row stays active and can be re-pushed.
+`permanent=True` frees the service-name reservation immediately so a
+later re-push under the same name doesn't collide with the recycle bin.
+
+### Authentication & config
+
+Named-user OAuth, one-time `y2y agol-sync login`, profile cached in
+`~/.arcgis/profile_y2y`. `agol_config.load_config()` layers env vars
+(`Y2Y_AGOL_CLIENT_ID`, `Y2Y_AGOL_AUTO_PUSH`, `Y2Y_AGOL_PROFILE`) over
+an optional `~/.y2y/agol_config.yaml` over defaults. The Conservation
+Atlas group ID is resolved on first contact and cached in
+`~/.y2y/agol_group_cache.json`. Thumbnails + caches live under `.y2y/`
+(git-ignored).
 
 ### Why AGOL is downstream, not embedded
 
-AGOL is a publication target, not a storage substrate. Embedding AGOL
-calls into ingest or lifecycle would mean every catalogue mutation
-blocks on a remote API, and every steward without AGOL credentials
-can't run the pipeline. Keeping AGOL out-of-band — invoked by an
-explicit `y2y agol-sync` command in some future session — preserves
-local-first operation and makes the publication step inspectable on
-its own.
+AGOL is a publication target, not a storage substrate. Catalogue
+mutations never *block* on AGOL — auto-sync is best-effort and failures
+are deferred, never fatal. A steward without AGOL credentials can still
+run the full local pipeline; only the `y2y agol-sync` commands need a
+profile. This keeps the catalogue local-first and the publication step
+independently inspectable.
 
-The placeholder columns are sufficient state for the eventual sync
-loop. Nothing else in the schema needs to change to support AGOL.
+### Scheduling (weekly reconcile)
+
+Not auto-installed — sample configs for the steward to wire up.
+
+**macOS (launchd)** — `~/Library/LaunchAgents/net.y2y.agol-reconcile.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>net.y2y.agol-reconcile</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>-lc</string>
+    <string>cd /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data &amp;&amp; source .venv/bin/activate &amp;&amp; y2y agol-sync reconcile --actor reconcile-cron</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/y2y-agol-reconcile.log</string>
+  <key>StandardErrorPath</key><string>/tmp/y2y-agol-reconcile.err</string>
+</dict></plist>
+```
+
+Load with `launchctl load ~/Library/LaunchAgents/net.y2y.agol-reconcile.plist`.
+
+**Linux (cron)** — `crontab -e`, Mondays 06:00:
+
+```
+0 6 * * 1 cd /path/to/Spatial_Data && ./.venv/bin/y2y agol-sync reconcile --actor reconcile-cron >> /tmp/y2y-agol-reconcile.log 2>&1
+```
+
+### Deferred to v2
+
+Multi-rendition (one dataset → both FS and VTL); persistent per-item
+sharing override column; async job-monitor for large-raster republish;
+multi-user contributor flow; Markdown / dual-column rich text; AGOL-side
+audit command for orphan detection.
 
 ---
 
@@ -1256,7 +1450,7 @@ loop. Nothing else in the schema needs to change to support AGOL.
 - Work-in-progress data does not live in `library/`. It lives elsewhere
   (e.g., working directories outside this repo) and only enters via the
   ingest queue.
-- AGOL publishing is *not* handled by this library yet. The catalogue
-  records the AGOL `item_id` when known, but pushing or syncing to AGOL
-  is a separate concern (placeholder design in §15; implementation
-  deferred).
+- AGOL publishing **is** handled by this library via the `y2y agol-sync`
+  sub-group (§15). It remains out-of-band from ingest/lifecycle in the
+  sense that catalogue mutations never *block* on AGOL — auto-sync is
+  best-effort and AGOL failures are deferred, never fatal.

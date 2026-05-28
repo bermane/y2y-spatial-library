@@ -1199,5 +1199,52 @@ def agol_sync_pull(
     _auto_export_xlsx(ctx)
 
 
+@agol_sync_group.command("unpublish")
+@click.argument("dataset_id")
+@click.option(
+    "--actor", default=None,
+    help="Name to record as the changelog actor. Defaults to $USER.",
+)
+@click.confirmation_option(
+    prompt="Permanently delete this dataset's AGOL item(s)? The "
+           "catalogue row stays active and can be re-pushed.",
+)
+@click.pass_context
+def agol_sync_unpublish(
+    ctx: click.Context, dataset_id: str, actor: str | None,
+) -> None:
+    """Delete a dataset's AGOL item(s) and clear the catalogue link.
+
+    Permanently removes the AGOL service + any linked source item,
+    then clears ``agol_item_id`` / ``agol_published_at`` /
+    ``last_synced_at`` and sets ``sync_status='unpublished'``. The
+    catalogue row itself stays active — only the AGOL representation
+    is torn down. Re-publish any time with `y2y agol-sync push`.
+    """
+    from . import agol_config, agol_sync
+
+    db_path, _, _ = _resolve_paths(ctx.obj["root"])
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.get_gis(cfg)
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    try:
+        result = agol_sync.unpublish(
+            db_path, dataset_id, gis, cfg,
+            actor=actor or _default_actor(),
+        )
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print(
+        f"[green]unpublish complete[/green] — "
+        f"{result.dataset_id} → sync_status={result.sync_status_after}"
+    )
+    console.print(f"  {result.note}")
+    _auto_export_xlsx(ctx)
+
+
 if __name__ == "__main__":
     cli()

@@ -3287,6 +3287,125 @@ def pull_all_pending(
 
 
 # ----------------------------------------------------------------------------
+# Unpublish (Phase E)
+# ----------------------------------------------------------------------------
+
+def unpublish(
+    db_path: Path,
+    dataset_id: str,
+    gis,
+    config: AgolConfig,
+    *,
+    actor: str,
+) -> SyncResult:
+    """Delete a row's AGOL item(s) and clear the catalogue link.
+
+    Tears down the AGOL side of a published dataset:
+
+    * Resolves the service item by ``agol_item_id``.
+    * Deletes the service **and** any ``Service2Data``-linked source
+      item (the source VTPK / GPKG in ``_sources/``), both with
+      ``permanent=True`` so the service name reservation frees
+      immediately (a soft-delete leaves the name reserved in the
+      recycle bin, blocking a future re-push under the same name).
+    * Clears ``agol_item_id`` / ``agol_published_at`` /
+      ``last_synced_at`` and sets ``sync_status='unpublished'``.
+
+    The catalogue row is **not** tombstoned — it stays in its current
+    ``status`` (normally ``'active'``). Unpublish only removes the
+    AGOL representation; the dataset remains in the library + catalogue
+    and can be re-pushed at any time.
+
+    Works from any ``sync_status`` as long as the row has an
+    ``agol_item_id`` — clean / conflict / error / pending_* are all
+    valid starting points (the whole point is to tear down the AGOL
+    side regardless of sync state).
+
+    If the AGOL item is already gone (deleted out-of-band), the
+    operation still succeeds: it clears the catalogue link and notes
+    that AGOL had nothing to delete.
+
+    Per-item AGOL deletion failures are recorded as ``[agol]``
+    warnings in ``internal_notes`` + the changelog rather than
+    aborting — partial cleanup with a remediation note beats leaving
+    the catalogue pointing at a half-deleted item.
+    """
+    from . import inventory_manager
+    from .utils import utc_now_iso
+
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise AgolError(f"dataset_id {dataset_id!r} not in catalogue")
+
+    sync_status_before = row.get("sync_status") or "unpublished"
+    agol_item_id = row.get("agol_item_id")
+    if not agol_item_id:
+        raise AgolError(
+            f"row {dataset_id!r} has no agol_item_id; nothing to unpublish"
+        )
+
+    # Accumulator for _record_warning (reused from the push path).
+    properties: dict[str, Any] = {}
+
+    service_item = gis.content.get(agol_item_id)
+    if service_item is None:
+        note = (
+            f"AGOL item {agol_item_id!r} already absent (deleted "
+            f"out-of-band); cleared catalogue link only."
+        )
+    else:
+        _unpublish_agol_items(
+            gis=gis,
+            service_item=service_item,
+            dataset_id=dataset_id,
+            properties=properties,
+        )
+        note = (
+            f"deleted AGOL item {agol_item_id!r} and any linked source "
+            f"(permanent)."
+        )
+
+    warnings = properties.get("_warnings", [])
+
+    updates: dict[str, Any] = {
+        "agol_item_id": None,
+        "agol_published_at": None,
+        "last_synced_at": None,
+        "sync_status": "unpublished",
+    }
+    if warnings:
+        updates["internal_notes"] = _append_note(
+            row.get("internal_notes"),
+            "[agol] unpublish warnings: " + "; ".join(warnings),
+        )
+
+    inventory_manager.update_dataset(db_path, dataset_id, updates)
+    detail = f"unpublished: {note}"
+    if warnings:
+        detail += " Warnings: " + "; ".join(warnings)
+    inventory_manager.append_changelog(
+        db_path,
+        timestamp=utc_now_iso(),
+        action="metadata",
+        dataset_id=dataset_id,
+        actor=actor,
+        path=row.get("file_path"),
+        field_changed="sync_status",
+        old_value=sync_status_before,
+        new_value="unpublished",
+        detail=detail,
+    )
+    return SyncResult(
+        dataset_id=dataset_id,
+        action="unpublish",
+        sync_status_before=sync_status_before,
+        sync_status_after="unpublished",
+        agol_item_id=None,
+        note=note,
+    )
+
+
+# ----------------------------------------------------------------------------
 # Bidirectional reconcile (Phase C.3)
 # ----------------------------------------------------------------------------
 

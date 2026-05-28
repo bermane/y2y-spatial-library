@@ -2186,3 +2186,152 @@ def test_diff_no_drift_when_path_form_matches_subcategorised(
     diffs = agol_sync._diff_adoption_fields(row, item)
     field_labels = [d[0] for d in diffs]
     assert not any(f.startswith("categories") for f in field_labels)
+
+
+# =============================================================================
+# unpublish (Phase E)
+# =============================================================================
+
+def test_unpublish_deletes_service_and_source_clears_link(
+    project_tree, _config_no_cache,
+) -> None:
+    """unpublish deletes the service item + its Service2Data-linked
+    source (both permanent=True), then clears the catalogue's AGOL
+    columns and sets sync_status='unpublished'. The row stays active."""
+    from unittest.mock import MagicMock, call
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_unpub", file_path="Water/x.gpkg",
+        sync_status="clean", agol_item_id="svc123",
+        agol_format="feature-layer",
+    )
+    row["agol_published_at"] = "2026-01-01T00:00:00Z"
+    row["last_synced_at"] = "2026-01-02T00:00:00Z"
+    inventory_manager.insert_dataset(db, row)
+
+    # Service item with one linked source via Service2Data.
+    source_item = MagicMock()
+    service_item = MagicMock()
+    service_item.id = "svc123"
+    service_item.related_items.return_value = [source_item]
+
+    gis = MagicMock()
+    gis.content.get.return_value = service_item
+
+    result = agol_sync.unpublish(
+        db, "ds_unpub", gis, _config_no_cache, actor="tester",
+    )
+
+    # Both items deleted permanently.
+    source_item.delete.assert_called_once_with(permanent=True)
+    service_item.delete.assert_called_once_with(permanent=True)
+
+    assert result.action == "unpublish"
+    assert result.sync_status_after == "unpublished"
+    assert result.agol_item_id is None
+
+    fresh = inventory_manager.get_dataset(db, "ds_unpub")
+    assert fresh["agol_item_id"] is None
+    assert fresh["agol_published_at"] is None
+    assert fresh["last_synced_at"] is None
+    assert fresh["sync_status"] == "unpublished"
+    # Row stays active — unpublish never tombstones.
+    assert fresh["status"] == "active"
+
+
+def test_unpublish_succeeds_when_agol_item_already_gone(
+    project_tree, _config_no_cache,
+) -> None:
+    """If the AGOL item was deleted out-of-band, unpublish still
+    clears the catalogue link (idempotent cleanup)."""
+    from unittest.mock import MagicMock
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_gone", file_path="Water/x.gpkg",
+        sync_status="error", agol_item_id="missing123",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    gis = MagicMock()
+    gis.content.get.return_value = None  # already gone
+
+    result = agol_sync.unpublish(
+        db, "ds_gone", gis, _config_no_cache, actor="tester",
+    )
+
+    assert result.sync_status_after == "unpublished"
+    assert "already absent" in result.note
+    fresh = inventory_manager.get_dataset(db, "ds_gone")
+    assert fresh["agol_item_id"] is None
+    assert fresh["sync_status"] == "unpublished"
+
+
+def test_unpublish_rejects_row_without_agol_item_id(
+    project_tree, _config_no_cache,
+) -> None:
+    """A row that was never published has nothing to unpublish."""
+    from unittest.mock import MagicMock
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_never", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id=None,
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    with pytest.raises(agol_sync.AgolError, match="no agol_item_id"):
+        agol_sync.unpublish(
+            db, "ds_never", MagicMock(), _config_no_cache, actor="tester",
+        )
+
+
+def test_unpublish_records_deletion_warning_in_changelog(
+    project_tree, _config_no_cache,
+) -> None:
+    """If AGOL deletion partially fails, unpublish still clears the
+    link but records the warning in internal_notes + changelog so the
+    steward can clean up the orphan."""
+    from unittest.mock import MagicMock
+    from pipeline import inventory_manager
+    from tests.test_agol_push import _full_row
+
+    db = project_tree["db"]
+    row = _full_row(
+        dataset_id="ds_warn", file_path="Water/x.gpkg",
+        sync_status="clean", agol_item_id="svc123",
+        agol_format="feature-layer",
+    )
+    inventory_manager.insert_dataset(db, row)
+
+    service_item = MagicMock()
+    service_item.id = "svc123"
+    service_item.related_items.return_value = []
+    # Service deletion fails both permanent and fallback.
+    service_item.delete.side_effect = Exception("AGOL 500")
+
+    gis = MagicMock()
+    gis.content.get.return_value = service_item
+
+    result = agol_sync.unpublish(
+        db, "ds_warn", gis, _config_no_cache, actor="tester",
+    )
+
+    # Link still cleared despite the failure.
+    assert result.sync_status_after == "unpublished"
+    fresh = inventory_manager.get_dataset(db, "ds_warn")
+    assert fresh["agol_item_id"] is None
+    assert "unpublish warnings" in (fresh["internal_notes"] or "")
+
+    log = inventory_manager.load_changelog(db)
+    warned = [r for r in log if "Warnings" in (r["note"] or "")]
+    assert len(warned) == 1

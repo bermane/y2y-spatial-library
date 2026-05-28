@@ -183,6 +183,71 @@ Other categories — orphans, ghosts (unpaired with orphans), schema
 violations — surface for manual investigation; auto-fixing them is
 deliberately not offered.
 
+## Publishing to AGOL
+
+The `y2y agol-sync` sub-group publishes catalogue datasets to the Y2Y
+Conservation Atlas ArcGIS Online org and keeps catalogue ↔ AGOL state
+reconciled. Full design in DESIGN.md §15.
+
+### One-time setup
+
+```
+y2y agol-sync login              # interactive OAuth; caches ~/.arcgis/profile_y2y
+y2y agol-sync init-categories    # writes the 10-category typology to the org
+```
+
+`Y2Y_AGOL_CLIENT_ID` must be set (OAuth client id; never committed).
+
+### Publish target per dataset
+
+Each row carries an `agol_format`, pre-filled at ingest and editable
+via `y2y update <id> --set agol_format=...`:
+
+| `agol_format`       | For        | AGOL result |
+| ------------------- | ---------- | ----------- |
+| `feature-layer`     | vectors    | Hosted Feature Layer (default for GPKG) |
+| `imagery-layer`     | rasters    | Hosted Imagery Layer (default for GeoTIFF) |
+| `vector-tile-layer` | vectors    | Vector Tile Layer — needs a steward-built VTPK (see below) |
+
+### Everyday commands
+
+```
+y2y agol-sync status [--deep]            # sync_status distribution (+ AGOL timestamps)
+y2y agol-sync push <id> [--dry-run]      # publish/update one row
+y2y agol-sync push --all-dirty           # push every pending_push row
+y2y agol-sync reconcile [--dry-run]      # weekly bidirectional sync + report
+y2y agol-sync pull <id> [--accept|--reject]   # resolve AGOL-side drift
+y2y agol-sync unpublish <id>             # delete AGOL item(s), keep catalogue row
+y2y agol-sync adopt <id>                 # bring a manually-published item under management
+```
+
+**Auto-sync is on by default.** Editing a published row
+(`y2y update` / `rename` / `refresh`) or approving a new ingest marks
+it `pending_push` and attempts an immediate best-effort push. AGOL
+failures never block the catalogue write — the row just waits for the
+next `reconcile` or `push --all-dirty`. Disable with
+`Y2Y_AGOL_AUTO_PUSH=false`.
+
+### Vector Tile Layers (manual VTPK)
+
+The pipeline never runs arcpy. To publish a vector as a VTL:
+
+1. Set `agol_format=vector-tile-layer` on the row.
+2. In ArcGIS Pro: open the GPKG → Share As → Vector Tile Package →
+   save as `<file_stem>.vtpk` (matching the GPKG stem).
+3. Drop the `.vtpk` in `queue/incoming/` and run `y2y ingest scan` —
+   it files the VTPK to `library/vtpk/`.
+4. `y2y agol-sync push <id>`.
+
+`y2y reconcile` flags VTL rows missing a VTPK, or whose VTPK is older
+than the source GPKG.
+
+### Weekly reconcile schedule
+
+`y2y agol-sync reconcile` is meant to run weekly. Sample launchd
+(macOS) and cron (Linux) configs are in DESIGN.md §15 — not
+auto-installed.
+
 ## Taxonomy
 
 Nine top-level categories, drawn from `Spatial_Data_Typology.xlsx`. Disk
