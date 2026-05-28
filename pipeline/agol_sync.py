@@ -2192,24 +2192,25 @@ def _format_push_plan(
 # push_all_dirty — batch wrapper
 # ----------------------------------------------------------------------------
 
-def push_all_dirty(
+def _push_batch(
     db_path: Path,
     gis,
     config: AgolConfig,
     *,
+    statuses: frozenset[str],
     library_root: Path,
     actor: str,
     sharing_override: str | None = None,
     dry_run: bool = False,
 ) -> list[SyncResult]:
-    """Push every row whose ``sync_status='pending_push'``.
+    """Push every active row whose ``sync_status`` is in ``statuses``.
 
-    Per-row failures mark that row's ``sync_status='error'`` (and a
-    structured changelog entry captures the failure reason) but do
-    not abort the batch — subsequent rows still get a chance.
-
-    Returns the list of ``SyncResult`` for every row attempted (one
-    entry per row, in catalogue order).
+    Shared engine behind :func:`push_all_dirty` (pending_push) and
+    :func:`push_all_unpublished` (unpublished). Per-row failures mark
+    that row's ``sync_status='error'`` (+ a structured changelog
+    entry) but do not abort the batch — subsequent rows still get a
+    chance. Returns one ``SyncResult`` per row attempted, in
+    catalogue order.
     """
     from . import inventory_manager
     from .utils import utc_now_iso
@@ -2217,12 +2218,13 @@ def push_all_dirty(
     rows = [
         r for r in inventory_manager.load_inventory(db_path)
         if r.get("status") == "active"
-        and r.get("sync_status") == "pending_push"
+        and (r.get("sync_status") or "unpublished") in statuses
     ]
 
     results: list[SyncResult] = []
     for row in rows:
         did = row["dataset_id"]
+        status_before = row.get("sync_status") or "unpublished"
         try:
             result = push(
                 db_path, did, gis, config,
@@ -2246,14 +2248,14 @@ def push_all_dirty(
                     path=row.get("file_path"),
                     detail=f"push failed: {exc}",
                     field_changed="sync_status",
-                    old_value="pending_push",
+                    old_value=status_before,
                     new_value="error",
                 )
             results.append(SyncResult(
                 dataset_id=did,
                 action="push" if not dry_run else "push (dry-run)",
-                sync_status_before="pending_push",
-                sync_status_after="error" if not dry_run else "pending_push",
+                sync_status_before=status_before,
+                sync_status_after="error" if not dry_run else status_before,
                 agol_item_id=row.get("agol_item_id"),
                 note=str(exc),
                 error=str(exc),
@@ -2261,6 +2263,55 @@ def push_all_dirty(
         else:
             results.append(result)
     return results
+
+
+def push_all_dirty(
+    db_path: Path,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    sharing_override: str | None = None,
+    dry_run: bool = False,
+) -> list[SyncResult]:
+    """Push every active row whose ``sync_status='pending_push'``.
+
+    Per-row failures mark that row ``error`` without aborting the
+    batch. Returns one ``SyncResult`` per row attempted.
+    """
+    return _push_batch(
+        db_path, gis, config,
+        statuses=frozenset({"pending_push"}),
+        library_root=library_root, actor=actor,
+        sharing_override=sharing_override, dry_run=dry_run,
+    )
+
+
+def push_all_unpublished(
+    db_path: Path,
+    gis,
+    config: AgolConfig,
+    *,
+    library_root: Path,
+    actor: str,
+    sharing_override: str | None = None,
+    dry_run: bool = False,
+) -> list[SyncResult]:
+    """Push every active row whose ``sync_status='unpublished'``.
+
+    The initial-publish counterpart to :func:`push_all_dirty` — used
+    to publish the backlog of never-pushed rows in one auditable
+    batch. Per-row failures mark that row ``error`` without aborting;
+    VTL rows lacking a VTPK fail cleanly and are reported. Returns
+    one ``SyncResult`` per row attempted.
+    """
+    return _push_batch(
+        db_path, gis, config,
+        statuses=frozenset({"unpublished"}),
+        library_root=library_root, actor=actor,
+        sharing_override=sharing_override, dry_run=dry_run,
+    )
 
 
 # ----------------------------------------------------------------------------

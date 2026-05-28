@@ -215,6 +215,7 @@ via `y2y update <id> --set agol_format=...`:
 y2y agol-sync status [--deep]            # sync_status distribution (+ AGOL timestamps)
 y2y agol-sync push <id> [--dry-run]      # publish/update one row
 y2y agol-sync push --all-dirty           # push every pending_push row
+y2y agol-sync push --all-unpublished     # initial bulk publish of the backlog
 y2y agol-sync reconcile [--dry-run]      # weekly bidirectional sync + report
 y2y agol-sync pull <id> [--accept|--reject]   # resolve AGOL-side drift
 y2y agol-sync unpublish <id>             # delete AGOL item(s), keep catalogue row

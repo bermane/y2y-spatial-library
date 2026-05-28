@@ -2073,3 +2073,118 @@ def test_push_all_dirty_isolates_per_row_failures(
     # Catalogue reflects the per-row outcome.
     assert inventory_manager.get_dataset(db, "ds_ok")["sync_status"] == "clean"
     assert inventory_manager.get_dataset(db, "ds_fail")["sync_status"] == "error"
+
+
+# ----------------------------------------------------------------------------
+# push_all_unpublished (initial bulk publish)
+# ----------------------------------------------------------------------------
+
+def test_push_all_unpublished_iterates_only_unpublished_rows(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """push_all_unpublished publishes the backlog: every active row in
+    sync_status='unpublished'. pending_push / clean rows are skipped —
+    those belong to push_all_dirty / are already synced."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v1.gpkg", dest_dir=project_tree["library"] / "Water")
+    valid_gpkg_factory("v2.gpkg", dest_dir=project_tree["library"] / "Water")
+
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_u1", file_path="Water/v1.gpkg",
+        sync_status="unpublished",
+    ))
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_u2", file_path="Water/v2.gpkg",
+        sync_status="unpublished",
+    ))
+    # A pending_push row and a clean row — both should be skipped.
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_dirty", file_path="Water/v1.gpkg",
+        sync_status="pending_push", agol_item_id="dirty_id",
+    ))
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_clean", file_path="Water/v2.gpkg",
+        sync_status="clean", agol_item_id="clean_id",
+    ))
+
+    new_ids = ["item_u1", "item_u2"]
+    def make_source_item(*args, **kwargs):
+        item = MagicMock()
+        item.id = new_ids.pop(0)
+        item.sharing = MagicMock()
+        item.sharing.sharing_level = "PRIVATE"
+        item.sharing.groups = MagicMock()
+        published = MagicMock()
+        published.id = item.id
+        published.sharing = MagicMock()
+        published.sharing.sharing_level = "PRIVATE"
+        published.sharing.groups = MagicMock()
+        item.publish.return_value = published
+        return item
+
+    gis = _make_gis()
+    gis.content.folders.create.return_value.add.return_value.result.side_effect = make_source_item
+
+    results = agol_sync.push_all_unpublished(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+
+    assert {r.dataset_id for r in results} == {"ds_u1", "ds_u2"}
+    assert all(r.sync_status_after == "clean" for r in results)
+    # The pending_push + clean rows are untouched.
+    assert inventory_manager.get_dataset(db, "ds_dirty")["sync_status"] == "pending_push"
+    assert inventory_manager.get_dataset(db, "ds_clean")["sync_status"] == "clean"
+
+
+def test_push_all_unpublished_isolates_per_row_failures(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """A failing row (e.g. missing file) becomes sync_status='error'
+    without aborting the batch — the rest still publish."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_ok", file_path="Water/v.gpkg",
+        sync_status="unpublished",
+    ))
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_fail",
+        file_path="Water/nonexistent.gpkg",
+        sync_status="unpublished",
+    ))
+
+    gis = _make_gis(new_item_id="ok_item_id")
+
+    results = agol_sync.push_all_unpublished(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+    )
+    by_id = {r.dataset_id: r for r in results}
+    assert by_id["ds_ok"].sync_status_after == "clean"
+    assert by_id["ds_fail"].sync_status_after == "error"
+    assert by_id["ds_fail"].error is not None
+    assert inventory_manager.get_dataset(db, "ds_fail")["sync_status"] == "error"
+
+
+def test_push_all_unpublished_dry_run_does_not_mutate(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    """Dry-run previews without mutating the catalogue — the row stays
+    'unpublished' so the steward can review before the real run."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    inventory_manager.insert_dataset(db, _full_row(
+        dataset_id="ds_dry", file_path="Water/v.gpkg",
+        sync_status="unpublished",
+    ))
+
+    gis = _make_gis(new_item_id="would_be_id")
+
+    results = agol_sync.push_all_unpublished(
+        db, gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        dry_run=True,
+    )
+    assert len(results) == 1
+    assert inventory_manager.get_dataset(db, "ds_dry")["sync_status"] == "unpublished"

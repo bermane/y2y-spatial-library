@@ -793,13 +793,20 @@ _VALID_SHARING = ("private", "org", "public")
     help="Push every row whose sync_status='pending_push' (no <dataset_id> argument).",
 )
 @click.option(
+    "--all-unpublished",
+    "all_unpublished",
+    is_flag=True,
+    help="Push every row whose sync_status='unpublished' — the initial "
+         "bulk publish of the backlog (no <dataset_id> argument).",
+)
+@click.option(
     "--target",
     type=click.Choice(_VALID_TARGETS),
     default=None,
     help=(
         "Override the row's persisted agol_format for this one invocation. "
         "Use for ad-hoc testing; for durable per-dataset changes use "
-        "`y2y update <id> --set agol_format=...`. Not allowed with --all-dirty."
+        "`y2y update <id> --set agol_format=...`. Not allowed with batch flags."
     ),
 )
 @click.option(
@@ -827,21 +834,23 @@ def agol_sync_push(
     ctx: click.Context,
     dataset_id: str | None,
     all_dirty: bool,
+    all_unpublished: bool,
     target: str | None,
     sharing: str | None,
     dry_run: bool,
     actor: str | None,
 ) -> None:
-    """Push a single dataset (or every pending-push row) to AGOL.
+    """Push a single dataset (or a batch) to AGOL.
 
     \b
     USAGE:
       y2y agol-sync push <dataset_id>             — push one row
       y2y agol-sync push --all-dirty              — push every pending_push row
+      y2y agol-sync push --all-unpublished        — initial bulk publish of the backlog
       y2y agol-sync push <id> --dry-run           — preview without contacting AGOL
       y2y agol-sync push <id> --target vector-tile-layer
                                                   — ad-hoc target override
-      y2y agol-sync push --all-dirty --sharing private
+      y2y agol-sync push --all-unpublished --dry-run
 
     The publish target for each row comes from the catalogue's
     `agol_format` column unless overridden via --target. Sharing
@@ -850,19 +859,26 @@ def agol_sync_push(
     """
     from . import agol_config, agol_sync
 
-    if all_dirty and dataset_id is not None:
+    if all_dirty and all_unpublished:
         raise click.UsageError(
-            "Cannot combine <dataset_id> argument with --all-dirty."
+            "Pass only one of --all-dirty / --all-unpublished."
         )
-    if all_dirty and target is not None:
+    batch = all_dirty or all_unpublished
+    if batch and dataset_id is not None:
         raise click.UsageError(
-            "--target is per-row; not allowed with --all-dirty. "
+            "Cannot combine <dataset_id> argument with a batch flag "
+            "(--all-dirty / --all-unpublished)."
+        )
+    if batch and target is not None:
+        raise click.UsageError(
+            "--target is per-row; not allowed with a batch flag. "
             "Use `y2y update <id> --set agol_format=...` to make a "
             "persistent change to a row's target."
         )
-    if not all_dirty and dataset_id is None:
+    if not batch and dataset_id is None:
         raise click.UsageError(
-            "Either give a <dataset_id> or pass --all-dirty."
+            "Either give a <dataset_id> or pass --all-dirty / "
+            "--all-unpublished."
         )
 
     db_path, library, _ = _resolve_paths(ctx.obj["root"])
@@ -875,8 +891,12 @@ def agol_sync_push(
     except agol_sync.AgolError as exc:
         raise click.ClickException(str(exc))
 
-    if all_dirty:
-        results = agol_sync.push_all_dirty(
+    if batch:
+        batch_fn = (
+            agol_sync.push_all_dirty if all_dirty
+            else agol_sync.push_all_unpublished
+        )
+        results = batch_fn(
             db_path, gis, cfg,
             library_root=library, actor=actor_name,
             sharing_override=sharing, dry_run=dry_run,
