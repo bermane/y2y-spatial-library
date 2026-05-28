@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Y2Y Spatial Library — Command Reference</title>
+<style>
+  :root {
+    --ink: #1a2b22;
+    --muted: #5a6b62;
+    --accent: #1f6b43;
+    --accent-light: #e7f1eb;
+    --rule: #cdd8d1;
+    --code-bg: #f4f6f5;
+    --cmd: #0b5a36;
+    --zebra: #f7faf8;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.55;
+    max-width: 850px;
+    margin: 0 auto;
+    padding: 32px 40px 60px;
+    background: #fff;
+  }
+  header.doc {
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 14px;
+    margin-bottom: 22px;
+  }
+  header.doc h1 { font-size: 26px; margin: 0 0 4px; color: var(--accent); letter-spacing: -0.4px; }
+  header.doc p { margin: 0; color: var(--muted); font-size: 12.5px; }
+  nav.toc {
+    background: var(--accent-light);
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    padding: 14px 20px;
+    margin-bottom: 28px;
+    columns: 2;
+    column-gap: 30px;
+  }
+  nav.toc h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--accent); column-span: all; }
+  nav.toc ol { margin: 0; padding-left: 22px; font-size: 12.5px; }
+  nav.toc li { margin: 2px 0; break-inside: avoid; }
+  nav.toc a { color: var(--ink); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); text-decoration: underline; }
+  h2.sec {
+    font-size: 18px;
+    color: var(--accent);
+    border-bottom: 1.5px solid var(--rule);
+    padding-bottom: 5px;
+    margin: 34px 0 14px;
+  }
+  h2.sec .num {
+    display: inline-block;
+    min-width: 1.6em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  h3 { font-size: 14.5px; margin: 20px 0 8px; color: var(--ink); }
+  h3 code { font-size: 13.5px; background: none; color: var(--cmd); padding: 0; }
+  p { margin: 8px 0; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 11px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  pre .c { color: var(--muted); }
+  pre .k { color: var(--cmd); font-weight: 600; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 12.5px;
+    break-inside: avoid;
+  }
+  th, td {
+    text-align: left;
+    padding: 6px 10px;
+    border: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th { background: var(--accent); color: #fff; font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--zebra); }
+  td code { font-size: 11.5px; }
+  .note {
+    background: var(--accent-light);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 5px 5px 0;
+    padding: 9px 14px;
+    margin: 14px 0;
+    font-size: 12.5px;
+  }
+  .note strong { color: var(--accent); }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 30px 0; }
+  footer.doc { margin-top: 44px; padding-top: 14px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 11.5px; }
+  @page { size: letter portrait; margin: 0.6in; }
+  @media print {
+    body { max-width: none; padding: 0; font-size: 10.5px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    nav.toc { break-after: page; }
+    h2.sec { break-after: avoid; }
+    pre, table, .note { break-inside: avoid; }
+    th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    a { color: var(--ink); text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="doc">
+  <h1>Y2Y Spatial Library — Command Reference</h1>
+  <p>Exhaustive <code>y2y</code> CLI reference. Quick subset in CHEATSHEET.html · design rationale in DESIGN.md · narrative how-to in README.md.</p>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#s1">Environment &amp; invocation</a></li>
+    <li><a href="#s2">Ingest</a></li>
+    <li><a href="#s3">Lifecycle: update / rename / refresh / tombstone</a></li>
+    <li><a href="#s4">Reconcile (filesystem)</a></li>
+    <li><a href="#s5">Export</a></li>
+    <li><a href="#s6">AGOL setup: login / init-categories</a></li>
+    <li><a href="#s7">AGOL: status</a></li>
+    <li><a href="#s8">AGOL: push</a></li>
+    <li><a href="#s9">AGOL: reconcile (bidirectional)</a></li>
+    <li><a href="#s10">AGOL: pull</a></li>
+    <li><a href="#s11">AGOL: adopt</a></li>
+    <li><a href="#s12">AGOL: unpublish</a></li>
+    <li><a href="#s13">Vector Tile Layer workflow</a></li>
+    <li><a href="#s14">Reference tables</a></li>
+    <li><a href="#s15">Workflows / recipes</a></li>
+  </ol>
+</nav>
+
+<h2 class="sec" id="s1"><span class="num">1.</span>Environment &amp; invocation</h2>
+<pre><span class="k">cd</span> /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data &amp;&amp; <span class="k">source</span> .venv/bin/activate</pre>
+<pre>y2y [--root DIRECTORY] COMMAND [ARGS]...</pre>
+<ul>
+  <li><code>--root DIRECTORY</code> — project root (default: cwd). All paths (<code>queue/</code>, <code>library/</code>, <code>inventory/</code>, <code>reports/</code>) resolve under it.</li>
+  <li><code>y2y --help</code> — list all commands. <code>y2y &lt;command&gt; --help</code> — options for one.</li>
+</ul>
+<div class="note"><strong>Source of truth:</strong> <code>inventory/inventory.db</code> (SQLite). <code>inventory.xlsx</code> is a rendered read-only view. AGOL is a downstream publication target — catalogue mutations never block on it.</div>
+<p><strong>Common option — <code>--actor NAME</code>:</strong> every mutating command accepts it to record who made the change in the changelog. Defaults to <code>$USER</code>.</p>
+
+<h2 class="sec" id="s2"><span class="num">2.</span>Ingest</h2>
+<pre>y2y ingest [--approve] [--actor TEXT]</pre>
+<p>Two phases of one command:</p>
+<ul>
+  <li><strong>Phase 1 (default) — scan.</strong> Walks <code>queue/incoming/</code>, stages accepted source datasets into <code>queue/processing/pending.xlsx</code>. Rejected files → <code>queue/rejected/</code> with a <code>.rejected.yaml</code> sidecar. <code>.vtpk</code> files are filed into <code>library/vtpk/</code> (matched to a row by file stem); a GPKG + same-stem <code>.vtpk</code> dropped together are auto-paired.</li>
+  <li><strong>Phase 2 (<code>--approve</code>) — promote.</strong> Validates each <code>ready=TRUE</code> row, moves the file into <code>library/spatial/…</code>, inserts the catalogue row, archives the source bundle, and (if logged in) auto-pushes to AGOL.</li>
+</ul>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--approve</code></td><td>Run Phase 2 instead of Phase 1.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor at promotion. Defaults to <code>$USER</code>.</td></tr>
+  </tbody>
+</table>
+<p><strong>Review-sheet fields:</strong> <code>title</code>, <code>summary</code>, <code>description</code>, <code>category</code>, <code>subcategory</code> (Species only), <code>tags</code>, <code>terms_of_use</code>, <code>acknowledgements</code>, <code>data_steward</code>, <code>agol_format</code>, <code>ready</code>. <code>agol_format</code> is pre-filled from the format.</p>
+<div class="note"><strong>On validation failure:</strong> the row's <code>ready</code> flips to <code>FALSE</code> and <code>_validation_error</code> explains why. Fix the issue, set <code>ready=TRUE</code>, re-run <code>y2y ingest --approve</code>.</div>
+<pre><span class="c"># drop files into queue/incoming/</span>
+<span class="k">y2y ingest</span>
+<span class="k">open</span> queue/processing/pending.xlsx     <span class="c"># edit + set ready=TRUE</span>
+<span class="k">y2y ingest --approve</span></pre>
+
+<h2 class="sec" id="s3"><span class="num">3.</span>Lifecycle</h2>
+
+<h3><code>y2y update</code></h3>
+<pre>y2y update [--set KEY=VALUE]... [--actor TEXT] DATASET_ID</pre>
+<p>Update non-locked metadata fields. Repeat <code>--set</code> per field.</p>
+<p><strong>Updatable fields:</strong> <code>title</code>, <code>status</code> (<code>active</code>/<code>deprecated</code>), <code>classification</code> (raster only), <code>data_steward</code>, <code>summary</code>, <code>description</code>, <code>tags</code> (<code>;</code>-delimited), <code>terms_of_use</code>, <code>acknowledgements</code>, <code>agol_item_id</code>, <code>internal_notes</code>, <code>agol_format</code>.</p>
+<p>Rejected: locked columns (<code>checksum_sha256</code>, <code>size_bytes</code>, <code>mtime</code>, <code>crs</code>, <code>geographic_extent_bbox</code> — only <code>refresh</code> changes these) and movement-bound columns (<code>file_path</code>, <code>category</code>, <code>subcategory</code> — use <code>rename</code>). <code>status='tombstoned'</code> is rejected here — use <code>tombstone</code>.</p>
+<pre><span class="k">y2y update</span> ds_01ABC --set summary=<span class="c">"Revised text"</span>
+<span class="k">y2y update</span> ds_01ABC --set tags=<span class="c">"caribou;telemetry"</span> --set data_steward=<span class="c">"Ethan"</span>
+<span class="k">y2y update</span> ds_01ABC --set agol_format=vector-tile-layer</pre>
+
+<h3><code>y2y rename</code></h3>
+<pre>y2y rename [--actor TEXT] DATASET_ID NEW_PATH</pre>
+<p>Move a file within <code>library/</code> and update <code>file_path</code> (+ derived <code>category</code>/<code>subcategory</code>). <code>NEW_PATH</code> is library-relative and must pass the naming validator. Handles: file at old path only (moves it); already at new path (records the manual move); at both/neither (errors).</p>
+<pre><span class="k">y2y rename</span> ds_01ABC <span class="c">"Water/streams_v2.gpkg"</span>
+<span class="k">y2y rename</span> ds_01ABC <span class="c">"Species/Caribou/dens_2024.gpkg"</span></pre>
+
+<h3><code>y2y refresh</code></h3>
+<pre>y2y refresh [--actor TEXT] DATASET_ID</pre>
+<p>Re-stat the canonical file after editing it in place. Recomputes checksum / size / mtime / crs / bbox from disk. Refuses if the file no longer passes canonical validators. No-op when nothing changed.</p>
+<pre><span class="k">y2y refresh</span> ds_01ABC</pre>
+
+<h3><code>y2y tombstone</code></h3>
+<pre>y2y tombstone [--reason TEXT] [--actor TEXT] [--yes] DATASET_ID</pre>
+<p>Soft-delete: set <code>status='tombstoned'</code> and delete the file. The row stays as an audit record; <code>dataset_id</code> stays reserved. Confirmation-prompted unless <code>--yes</code>.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--reason</code></td><td>Optional reason recorded in the changelog.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+    <tr><td><code>--yes</code></td><td>Skip the confirmation prompt.</td></tr>
+  </tbody>
+</table>
+<pre><span class="k">y2y tombstone</span> ds_01ABC --reason <span class="c">"superseded by 2025 update"</span></pre>
+<div class="note"><strong>Auto-sync:</strong> <code>update</code>/<code>rename</code>/<code>refresh</code> on a published row auto-mark it <code>pending_push</code> and attempt a best-effort push (§8). To also remove the AGOL item when tombstoning, run <code>y2y agol-sync unpublish &lt;id&gt;</code> <em>before</em> tombstoning.</div>
+
+<h2 class="sec" id="s4"><span class="num">4.</span>Reconcile (filesystem)</h2>
+<pre>y2y reconcile [--deep] [--fix-renames] [--actor TEXT]</pre>
+<p>Detect drift between <code>library/</code> and the catalogue; write a timestamped report to <code>reports/reconcile_&lt;ts&gt;_&lt;mode&gt;.md</code>.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--deep</code></td><td>Recompute SHA-256 for every file (vs stat-only: size + mtime).</td></tr>
+    <tr><td><code>--fix-renames</code></td><td>Prompt to confirm + apply each detected rename. Implies <code>--deep</code>.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor when applying fixes. Defaults to <code>$USER</code>.</td></tr>
+  </tbody>
+</table>
+<p><strong>Findings:</strong> orphans (file, no row), ghosts (row, no file), drift (content changed + non-canonical), schema violations, renames (deep-mode checksum pairs), auto-resolved drift (changed but still canonical — snapshot auto-refreshed), and VTPK invariants (missing / stale / orphan).</p>
+<p><strong>Mutations:</strong> drift on still-canonical files auto-refreshes; renames apply only with <code>--fix-renames</code>. Orphans, ghosts, and schema violations surface for manual handling.</p>
+<pre><span class="k">y2y reconcile</span>
+<span class="k">y2y reconcile --deep</span>
+<span class="k">y2y reconcile --fix-renames</span></pre>
+
+<h2 class="sec" id="s5"><span class="num">5.</span>Export</h2>
+<pre>y2y export-xlsx [--out FILE]</pre>
+<p>Render the catalogue as a read-only <code>inventory.xlsx</code>. Editing it changes nothing. Most mutating commands auto-export, so manual use is rare.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody><tr><td><code>--out</code></td><td>Output path. Defaults to <code>inventory/inventory.xlsx</code> under <code>--root</code>.</td></tr></tbody>
+</table>
+<pre><span class="k">y2y export-xlsx</span>
+<span class="k">y2y export-xlsx</span> --out /tmp/inventory_snapshot.xlsx</pre>
+
+<h2 class="sec" id="s6"><span class="num">6.</span>AGOL setup</h2>
+
+<h3><code>y2y agol-sync login</code></h3>
+<pre>y2y agol-sync login</pre>
+<p>Interactive OAuth. Requires the OAuth client id in <code>Y2Y_AGOL_CLIENT_ID</code> (or <code>~/.y2y/agol_config.yaml</code>). Opens a browser once; caches credentials at <code>~/.arcgis/profile_y2y</code>.</p>
+<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<span class="k">y2y agol-sync login</span></pre>
+
+<h3><code>y2y agol-sync init-categories</code></h3>
+<pre>y2y agol-sync init-categories [--dry-run] [--yes]</pre>
+<p>Write the canonical AGOL org category schema from <code>pipeline/taxonomy.py</code> (10 top-level + 7 Species subcategories). <strong>Destructive</strong> — non-canonical categories are orphaned and items lose those tags. Requires org-admin.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--dry-run</code></td><td>Show the diff without writing to AGOL.</td></tr>
+    <tr><td><code>--yes</code></td><td>Skip the confirmation prompt.</td></tr>
+  </tbody>
+</table>
+<pre><span class="k">y2y agol-sync init-categories</span> --dry-run
+<span class="k">y2y agol-sync init-categories</span></pre>
+
+<h2 class="sec" id="s7"><span class="num">7.</span>AGOL: status</h2>
+<pre>y2y agol-sync status [--deep]</pre>
+<p>Report <code>sync_status</code> distribution across every <code>active</code> row.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody><tr><td><code>--deep</code></td><td>Also query AGOL for each linked item's modified timestamp and flag rows where AGOL drifted past <code>last_synced_at</code>.</td></tr></tbody>
+</table>
+<pre><span class="k">y2y agol-sync status</span>
+<span class="k">y2y agol-sync status</span> --deep</pre>
+
+<h2 class="sec" id="s8"><span class="num">8.</span>AGOL: push</h2>
+<pre>y2y agol-sync push [OPTIONS] [DATASET_ID]</pre>
+<p>Publish or update a dataset (or a batch). Target comes from the row's <code>agol_format</code> unless <code>--target</code> overrides. Sharing defaults to org + Y2Y Conservation Atlas group.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--all-dirty</code></td><td>Push every <code>pending_push</code> row. No <code>DATASET_ID</code>.</td></tr>
+    <tr><td><code>--all-unpublished</code></td><td>Push every <code>unpublished</code> row — the initial backlog publish. No <code>DATASET_ID</code>.</td></tr>
+    <tr><td><code>--target</code></td><td><code>feature-layer</code> / <code>vector-tile-layer</code> / <code>imagery-layer</code>. Ad-hoc override for this invocation only. Not allowed with batch flags; for durable change use <code>y2y update</code>.</td></tr>
+    <tr><td><code>--sharing</code></td><td><code>private</code> / <code>org</code> / <code>public</code>. Overrides the default.</td></tr>
+    <tr><td><code>--dry-run</code></td><td>Show the plan without contacting AGOL or mutating.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+  </tbody>
+</table>
+<p><strong>Rules:</strong> batch flags are mutually exclusive and can't take a <code>DATASET_ID</code>. Per-row failures mark that row <code>error</code> and the batch continues. VTL rows lacking a VTPK fail cleanly and are reported.</p>
+<div class="note"><strong>Per-row footprint:</strong> vectors and VTL produce two AGOL items — a private <em>source</em> in <code>_sources/</code> and the public <em>service</em> in the category folder (the <code>agol_item_id</code>). Imagery uses a no-source model (one item).</div>
+<pre><span class="k">y2y agol-sync push</span> ds_01ABC                       <span class="c"># one row</span>
+<span class="k">y2y agol-sync push</span> ds_01ABC --dry-run             <span class="c"># preview</span>
+<span class="k">y2y agol-sync push</span> ds_01ABC --target vector-tile-layer
+<span class="k">y2y agol-sync push</span> ds_01ABC --sharing private
+<span class="k">y2y agol-sync push --all-unpublished</span> --dry-run    <span class="c"># preview backlog</span>
+<span class="k">y2y agol-sync push --all-unpublished</span>              <span class="c"># publish backlog</span>
+<span class="k">y2y agol-sync push --all-dirty</span>                    <span class="c"># push edited rows</span></pre>
+<div class="note"><strong>Auto-sync:</strong> with <code>Y2Y_AGOL_AUTO_PUSH=true</code> (default), catalogue edits and ingest approvals attempt an immediate best-effort push when logged in. Failures are deferred (changelog-logged, never fatal); the row waits for the next <code>reconcile</code> / <code>push --all-dirty</code>. Set <code>Y2Y_AGOL_AUTO_PUSH=false</code> to make all pushes manual.</div>
+
+<h2 class="sec" id="s9"><span class="num">9.</span>AGOL: reconcile (bidirectional)</h2>
+<pre>y2y agol-sync reconcile [--dry-run] [--actor TEXT]</pre>
+<p>For every <code>active</code> row: push <code>pending_push</code> (failures → <code>error</code>); check <code>clean</code> rows for AGOL-side drift (item <code>modified</code> &gt; <code>last_synced_at</code>) and flag drifted ones <code>pending_pull</code>; retry <code>error</code> rows once; skip <code>unpublished</code> / <code>pending_pull</code> / <code>conflict</code>. Writes <code>reports/agol_reconcile_&lt;ts&gt;.md</code>.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--dry-run</code></td><td>Compute outcomes + write the report without mutating or pushing.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code> (use <code>reconcile-cron</code> for scheduled runs).</td></tr>
+  </tbody>
+</table>
+<pre><span class="k">y2y agol-sync reconcile</span> --dry-run
+<span class="k">y2y agol-sync reconcile</span>
+<span class="k">y2y agol-sync reconcile</span> --actor reconcile-cron</pre>
+<p>Scheduling samples (launchd / cron) are in <code>DESIGN.md §15</code>.</p>
+
+<h2 class="sec" id="s10"><span class="num">10.</span>AGOL: pull</h2>
+<pre>y2y agol-sync pull [OPTIONS] [DATASET_ID]</pre>
+<p>Resolve catalogue ↔ AGOL drift.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>(no flag)</td><td>Fetch + diff + mark <code>conflict</code>, log the per-field diff. No data changes.</td></tr>
+    <tr><td><code>--accept</code></td><td>Catalogue absorbs AGOL's drifted text fields (title, summary, description, tags, acknowledgements, terms_of_use). Marks <code>clean</code>.</td></tr>
+    <tr><td><code>--reject</code></td><td>Re-push catalogue values to AGOL, overwriting the drift.</td></tr>
+    <tr><td><code>--all-pending</code></td><td>Surface diffs for every <code>pending_pull</code> row (no auto-resolution). Mutually exclusive with <code>DATASET_ID</code> / <code>--accept</code> / <code>--reject</code>.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+  </tbody>
+</table>
+<p><code>--accept</code> skips the <code>categories</code> field — it's filesystem-bound; change a dataset's category with <code>y2y rename</code>, not a pull.</p>
+<pre><span class="k">y2y agol-sync pull</span> ds_01ABC               <span class="c"># surface the diff</span>
+<span class="k">y2y agol-sync pull</span> ds_01ABC --accept      <span class="c"># take AGOL's text edits</span>
+<span class="k">y2y agol-sync pull</span> ds_01ABC --reject      <span class="c"># re-assert the catalogue</span>
+<span class="k">y2y agol-sync pull --all-pending</span>          <span class="c"># review all drifted rows</span></pre>
+
+<h2 class="sec" id="s11"><span class="num">11.</span>AGOL: adopt</h2>
+<pre>y2y agol-sync adopt [--actor TEXT] DATASET_ID</pre>
+<p>Bring a manually-published item under management: for a row whose <code>agol_item_id</code> is set but <code>sync_status='unpublished'</code>, fetch the AGOL item, diff field-by-field, and mark the row <code>clean</code> (matched) or <code>conflict</code> (drifted — resolve via <code>pull</code>). Never mutates AGOL.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody><tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr></tbody>
+</table>
+<pre><span class="k">y2y agol-sync adopt</span> ds_01ABC</pre>
+
+<h2 class="sec" id="s12"><span class="num">12.</span>AGOL: unpublish</h2>
+<pre>y2y agol-sync unpublish [--actor TEXT] [--yes] DATASET_ID</pre>
+<p>Permanently delete the AGOL service + any linked source, then clear <code>agol_item_id</code> / <code>agol_published_at</code> / <code>last_synced_at</code> and set <code>sync_status='unpublished'</code>. The catalogue row stays <code>active</code> and can be re-pushed. Confirmation-prompted unless <code>--yes</code>. Partial-deletion failures are recorded as <code>[agol]</code> warnings rather than aborting.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+    <tr><td><code>--yes</code></td><td>Skip the confirmation prompt.</td></tr>
+  </tbody>
+</table>
+<pre><span class="k">y2y agol-sync unpublish</span> ds_01ABC
+<span class="k">y2y agol-sync unpublish</span> ds_01ABC --yes</pre>
+
+<h2 class="sec" id="s13"><span class="num">13.</span>Vector Tile Layer workflow</h2>
+<p>The pipeline never imports arcpy — the steward builds the VTPK once per source-data change in ArcGIS Pro.</p>
+<pre><span class="c"># 1. Set the target on the row:</span>
+<span class="k">y2y update</span> ds_01ABC --set agol_format=vector-tile-layer
+
+<span class="c"># 2. In ArcGIS Pro: open the GPKG → Share As → Vector Tile Package →</span>
+<span class="c">#    save as &lt;file_stem&gt;.vtpk (matching the catalogue file's stem).</span>
+
+<span class="c"># 3. Drop the .vtpk in queue/incoming/, then file it into library/vtpk/:</span>
+<span class="k">y2y ingest</span>          <span class="c"># scan recognises the .vtpk extension</span>
+
+<span class="c"># 4. Publish:</span>
+<span class="k">y2y agol-sync push</span> ds_01ABC</pre>
+<p>A GPKG + same-stem <code>.vtpk</code> dropped together are auto-paired during scan. <code>y2y reconcile</code> flags VTL rows whose VTPK is <strong>missing</strong> or <strong>stale</strong> (older than the source GPKG), and <code>.vtpk</code> files with no matching VTL row (<strong>orphan</strong>). Refreshing a VTL: rebuild in Pro, re-ingest, push — the VTS item id stays stable.</p>
+
+<h2 class="sec" id="s14"><span class="num">14.</span>Reference tables</h2>
+
+<h3><code>sync_status</code> values</h3>
+<table>
+  <thead><tr><th>Value</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>unpublished</code></td><td>Never pushed (or torn down by <code>unpublish</code>).</td></tr>
+    <tr><td><code>clean</code></td><td>Catalogue ↔ AGOL in sync.</td></tr>
+    <tr><td><code>pending_push</code></td><td>Catalogue edited since last sync; owes a push.</td></tr>
+    <tr><td><code>pending_pull</code></td><td>AGOL modified since last sync; needs a <code>pull</code>.</td></tr>
+    <tr><td><code>conflict</code></td><td>Diff surfaced, awaiting steward resolution.</td></tr>
+    <tr><td><code>error</code></td><td>Last push failed; <code>reconcile</code> retries once.</td></tr>
+  </tbody>
+</table>
+
+<h3>State transitions</h3>
+<pre>unpublished ──push────────────────&gt; clean
+unpublished ──adopt(match)─────────&gt; clean
+unpublished ──adopt(drift)─────────&gt; conflict
+clean ──catalogue edit─────────────&gt; pending_push
+clean ──reconcile finds AGOL drift─&gt; pending_pull
+pending_push ──push ok─────────────&gt; clean
+pending_push ──push fails──────────&gt; error
+pending_pull ──pull --accept|reject&gt; clean
+pending_pull ──pull (no flag)──────&gt; conflict
+conflict ──pull --accept───────────&gt; clean
+conflict ──pull --reject───────────&gt; clean (via pending_push)
+error ──reconcile retry ok─────────&gt; clean
+any-with-item ──unpublish──────────&gt; unpublished</pre>
+
+<h3><code>agol_format</code> values</h3>
+<table>
+  <thead><tr><th>Value</th><th>Source format</th><th>AGOL result</th></tr></thead>
+  <tbody>
+    <tr><td><code>feature-layer</code></td><td>geopackage</td><td>Hosted Feature Layer (default for GPKG).</td></tr>
+    <tr><td><code>imagery-layer</code></td><td>geotiff</td><td>Hosted Imagery Layer (default for GeoTIFF; no-source model).</td></tr>
+    <tr><td><code>vector-tile-layer</code></td><td>geopackage</td><td>Vector Tile Layer — needs a steward-built VTPK (§13).</td></tr>
+  </tbody>
+</table>
+
+<h3>Environment variables</h3>
+<table>
+  <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>Y2Y_AGOL_CLIENT_ID</code></td><td>—</td><td>OAuth client id; required for <code>login</code>. Keep out of git.</td></tr>
+    <tr><td><code>Y2Y_AGOL_AUTO_PUSH</code></td><td><code>true</code></td><td>Auto-push on catalogue edits / ingest approvals. <code>false</code> = all pushes manual.</td></tr>
+    <tr><td><code>Y2Y_AGOL_PROFILE</code></td><td><code>y2y</code></td><td>Override the cached OAuth profile name.</td></tr>
+  </tbody>
+</table>
+<p>Optional config file: <code>~/.y2y/agol_config.yaml</code>. Resolved group id cached in <code>~/.y2y/agol_group_cache.json</code>.</p>
+
+<h3>Directory layout</h3>
+<table>
+  <thead><tr><th>Path</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td><code>queue/incoming/</code></td><td>Drop new source files (+ <code>.vtpk</code>) here.</td></tr>
+    <tr><td><code>queue/processing/</code></td><td><code>pending.xlsx</code> review sheet during ingest.</td></tr>
+    <tr><td><code>queue/rejected/</code></td><td>Rejected files + <code>.rejected.yaml</code> sidecars.</td></tr>
+    <tr><td><code>queue/archived/</code></td><td>Source bundles, post-approval.</td></tr>
+    <tr><td><code>library/spatial/</code></td><td>Canonical typed datasets (source-of-truth files).</td></tr>
+    <tr><td><code>library/vtpk/</code></td><td>Ingested VTPKs for VTL rows.</td></tr>
+    <tr><td><code>inventory/inventory.db</code></td><td><strong>The catalogue — source of truth.</strong></td></tr>
+    <tr><td><code>inventory/inventory.xlsx</code></td><td>Rendered read-only view.</td></tr>
+    <tr><td><code>reports/</code></td><td>Reconcile reports (filesystem + AGOL).</td></tr>
+    <tr><td><code>.y2y/</code></td><td>Thumbnail + group-id caches (git-ignored).</td></tr>
+  </tbody>
+</table>
+
+<h3>Sharing levels (<code>--sharing</code>)</h3>
+<table>
+  <thead><tr><th>Value</th><th>Visibility</th></tr></thead>
+  <tbody>
+    <tr><td>(default)</td><td>Org + Y2Y Conservation Atlas group.</td></tr>
+    <tr><td><code>private</code></td><td>Owner only.</td></tr>
+    <tr><td><code>org</code></td><td>Org-visible, no group.</td></tr>
+    <tr><td><code>public</code></td><td>World-visible, no group.</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sec" id="s15"><span class="num">15.</span>Workflows / recipes</h2>
+
+<h3>First-time AGOL setup</h3>
+<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<span class="k">y2y agol-sync login</span>
+<span class="k">y2y agol-sync init-categories</span> --dry-run
+<span class="k">y2y agol-sync init-categories</span></pre>
+
+<h3>Ingest a batch end-to-end</h3>
+<pre><span class="c"># drop files into queue/incoming/</span>
+<span class="k">y2y ingest</span>
+<span class="k">open</span> queue/processing/pending.xlsx        <span class="c"># fill fields, set ready=TRUE</span>
+<span class="k">y2y ingest --approve</span>
+<span class="k">y2y reconcile --deep</span>                       <span class="c"># confirm catalogue ↔ filesystem 1:1</span></pre>
+
+<h3>Initial bulk publish of the backlog</h3>
+<pre><span class="k">y2y agol-sync push --all-unpublished</span> --dry-run    <span class="c"># review</span>
+<span class="k">y2y agol-sync push --all-unpublished</span>              <span class="c"># publish</span>
+<span class="k">y2y agol-sync reconcile</span>                            <span class="c"># retry any errors, get report</span></pre>
+
+<h3>Controlled first publish (no auto-sync noise during ingest)</h3>
+<pre><span class="k">export</span> Y2Y_AGOL_AUTO_PUSH=false
+<span class="c"># ... ingest the whole backlog ...</span>
+<span class="k">unset</span> Y2Y_AGOL_AUTO_PUSH
+<span class="k">y2y agol-sync push --all-unpublished</span></pre>
+
+<h3>Edit metadata and let it propagate</h3>
+<pre><span class="k">y2y update</span> ds_01ABC --set summary=<span class="c">"Revised"</span> --set tags=<span class="c">"a;b;c"</span>
+<span class="c"># auto-pushes if logged in; otherwise next reconcile picks it up</span></pre>
+
+<h3>Resolve AGOL-side edits</h3>
+<pre><span class="k">y2y agol-sync reconcile</span>           <span class="c"># flags drifted rows pending_pull</span>
+<span class="k">y2y agol-sync pull --all-pending</span>  <span class="c"># review each diff</span>
+<span class="k">y2y agol-sync pull</span> ds_01ABC --accept   <span class="c"># or --reject, per row</span></pre>
+
+<h3>Full health check</h3>
+<pre><span class="k">y2y reconcile --deep</span>              <span class="c"># filesystem integrity</span>
+<span class="k">y2y agol-sync status</span> --deep       <span class="c"># AGOL sync state + drift</span>
+<span class="k">pytest</span> tests/                      <span class="c"># test suite (dev only)</span></pre>
+
+<footer class="doc">
+  Y2Y Spatial Library · catalogue-first, AGOL-downstream · generated reference, verified against the live <code>y2y</code> CLI.
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Y2Y Spatial Library — Cheat Sheet</title>
+<style>
+  :root {
+    --ink: #1a2b22;
+    --muted: #5a6b62;
+    --accent: #1f6b43;
+    --accent-light: #e7f1eb;
+    --rule: #cdd8d1;
+    --code-bg: #f4f6f5;
+    --cmd: #0b5a36;
+    --zebra: #f7faf8;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.55;
+    max-width: 850px;
+    margin: 0 auto;
+    padding: 32px 40px 60px;
+    background: #fff;
+  }
+  header.doc {
+    border-bottom: 3px solid var(--accent);
+    padding-bottom: 14px;
+    margin-bottom: 22px;
+  }
+  header.doc h1 { font-size: 26px; margin: 0 0 4px; color: var(--accent); letter-spacing: -0.4px; }
+  header.doc p { margin: 0; color: var(--muted); font-size: 12.5px; }
+  h2.sec {
+    font-size: 18px;
+    color: var(--accent);
+    border-bottom: 1.5px solid var(--rule);
+    padding-bottom: 5px;
+    margin: 26px 0 12px;
+  }
+  p { margin: 8px 0; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 11px 14px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  pre .c { color: var(--muted); }
+  pre .k { color: var(--cmd); font-weight: 600; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 12.5px;
+    break-inside: avoid;
+  }
+  th, td {
+    text-align: left;
+    padding: 6px 10px;
+    border: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th { background: var(--accent); color: #fff; font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--zebra); }
+  td code { font-size: 11.5px; }
+  .note {
+    background: var(--accent-light);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 5px 5px 0;
+    padding: 9px 14px;
+    margin: 14px 0;
+    font-size: 12.5px;
+  }
+  .note strong { color: var(--accent); }
+  footer.doc { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 11.5px; }
+  @page { size: letter portrait; margin: 0.6in; }
+  @media print {
+    body { max-width: none; padding: 0; font-size: 10.5px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    h2.sec { break-after: avoid; }
+    pre, table, .note { break-inside: avoid; }
+    th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+
+<header class="doc">
+  <h1>Y2Y Spatial Library — Cheat Sheet</h1>
+  <p>Everyday <code>y2y</code> commands. Full detail in COMMAND_REFERENCE.html · design in DESIGN.md.</p>
+</header>
+
+<h2 class="sec">Start of session</h2>
+<p>Run once per new terminal (activates the venv + moves to the project):</p>
+<pre><span class="k">cd</span> /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data &amp;&amp; <span class="k">source</span> .venv/bin/activate</pre>
+<div class="note"><code>inventory/inventory.db</code> is the source of truth · the xlsx is a read-only view · AGOL is downstream. Run <code>y2y &lt;command&gt; --help</code> for every option.</div>
+
+<h2 class="sec">Ingest new data &nbsp;·&nbsp; scan → review → approve</h2>
+<pre><span class="k">y2y ingest</span>                              <span class="c"># scan queue/incoming/ → pending.xlsx</span>
+<span class="k">open</span> queue/processing/pending.xlsx      <span class="c"># fill fields, set ready=TRUE</span>
+<span class="k">y2y ingest --approve</span>                    <span class="c"># validate + promote into library/ + catalogue</span></pre>
+
+<h2 class="sec">Edit · move · remove</h2>
+<pre><span class="k">y2y update</span> &lt;id&gt; --set summary=<span class="c">"…"</span> --set tags=<span class="c">"a;b;c"</span>   <span class="c"># change metadata fields</span>
+<span class="k">y2y rename</span> &lt;id&gt; <span class="c">"Water/streams_v2.gpkg"</span>                <span class="c"># move within library/</span>
+<span class="k">y2y refresh</span> &lt;id&gt;                                       <span class="c"># re-stat after in-place edit</span>
+<span class="k">y2y tombstone</span> &lt;id&gt; --reason <span class="c">"…"</span>                       <span class="c"># soft-delete + erase file</span></pre>
+
+<h2 class="sec">Check integrity</h2>
+<pre><span class="k">y2y reconcile</span>                <span class="c"># fast: catalogue ↔ filesystem</span>
+<span class="k">y2y reconcile --deep</span>         <span class="c"># recompute checksums</span>
+<span class="k">y2y export-xlsx</span>              <span class="c"># re-render inventory.xlsx (usually automatic)</span></pre>
+
+<h2 class="sec">Publish to AGOL</h2>
+<pre><span class="k">y2y agol-sync status</span>                         <span class="c"># sync state of every active row</span>
+<span class="k">y2y agol-sync push</span> &lt;id&gt; [--dry-run]          <span class="c"># publish/update one row</span>
+<span class="k">y2y agol-sync push --all-unpublished</span>         <span class="c"># initial bulk publish of the backlog</span>
+<span class="k">y2y agol-sync push --all-dirty</span>               <span class="c"># push every pending_push row</span>
+<span class="k">y2y agol-sync reconcile</span>                      <span class="c"># weekly: push pending + flag AGOL drift</span></pre>
+
+<h2 class="sec">Resolve AGOL drift</h2>
+<pre><span class="k">y2y agol-sync pull</span> &lt;id&gt;             <span class="c"># show diff, mark conflict</span>
+<span class="k">y2y agol-sync pull</span> &lt;id&gt; --accept    <span class="c"># catalogue absorbs AGOL's text fields</span>
+<span class="k">y2y agol-sync pull</span> &lt;id&gt; --reject    <span class="c"># re-push catalogue, overwrite AGOL</span>
+<span class="k">y2y agol-sync unpublish</span> &lt;id&gt;        <span class="c"># delete AGOL item(s); keep catalogue row</span></pre>
+
+<h2 class="sec">First-time AGOL setup</h2>
+<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<span class="k">y2y agol-sync login</span>            <span class="c"># OAuth, browser, once</span>
+<span class="k">y2y agol-sync init-categories</span>  <span class="c"># write the org category schema</span></pre>
+
+<h2 class="sec">Quick reference</h2>
+<table>
+  <tbody>
+    <tr><th>sync_status</th><td><code>unpublished</code> → <code>clean</code> ⇄ <code>pending_push</code> / <code>pending_pull</code> → <code>conflict</code> / <code>error</code></td></tr>
+    <tr><th>agol_format</th><td><code>feature-layer</code> (vector) · <code>imagery-layer</code> (raster) · <code>vector-tile-layer</code> (vector + VTPK)</td></tr>
+    <tr><th>Auto-sync</th><td>Edits &amp; approvals auto-push when logged in. <code>Y2Y_AGOL_AUTO_PUSH=false</code> disables.</td></tr>
+    <tr><th>VTL</th><td>Set <code>agol_format=vector-tile-layer</code> → build <code>.vtpk</code> in Pro → drop in <code>queue/incoming/</code> → <code>y2y ingest</code> → push.</td></tr>
+  </tbody>
+</table>
+
+<footer class="doc">
+  Y2Y Spatial Library · catalogue-first, AGOL-downstream · see DESIGN.md §15 for the AGOL integration.
+</footer>
+
+</body>
+</html>
