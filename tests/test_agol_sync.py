@@ -1960,3 +1960,121 @@ def test_diff_title_still_strict(_config_no_cache) -> None:
     diffs = agol_sync._diff_adoption_fields(row, item)
     fields = {d[0] for d in diffs}
     assert "title" in fields  # <b> in a title field is genuine drift
+
+
+# =============================================================================
+# Categories path normalisation (Phase D.5)
+# =============================================================================
+
+# ----- _normalise_category unit tests ----------------------------------------
+
+def test_normalise_category_strips_prefix() -> None:
+    """The base case: AGOL stores '/Categories/Water'; catalogue
+    sends 'Water'. Both normalise to 'Water'."""
+    assert agol_sync._normalise_category("/Categories/Water") == "Water"
+    assert agol_sync._normalise_category("Water") == "Water"
+
+
+def test_normalise_category_is_case_insensitive_on_prefix() -> None:
+    """Esri API docs reference both '/Categories/' and '/categories/'
+    casings — strip both."""
+    assert agol_sync._normalise_category("/categories/Water") == "Water"
+    assert agol_sync._normalise_category("/CATEGORIES/Water") == "Water"
+
+
+def test_normalise_category_preserves_inner_path() -> None:
+    """A hierarchical category strips ONLY the '/Categories/' root
+    prefix; inner path segments are preserved so set-comparison
+    catches structural differences."""
+    assert agol_sync._normalise_category(
+        "/Categories/Region/Subregion"
+    ) == "Region/Subregion"
+
+
+def test_normalise_category_handles_empty_and_none() -> None:
+    """Empty / None / pure whitespace → empty string; gets filtered
+    out of the set by _category_set."""
+    assert agol_sync._normalise_category(None) == ""
+    assert agol_sync._normalise_category("") == ""
+    assert agol_sync._normalise_category("   ") == ""
+
+
+def test_category_set_handles_single_string() -> None:
+    """_category_set accepts a single string OR a list — symmetric
+    handling of both AGOL's list-form and any single-value edge case."""
+    assert agol_sync._category_set("/Categories/Water") == {"Water"}
+    assert agol_sync._category_set(["/Categories/Water"]) == {"Water"}
+    assert agol_sync._category_set(None) == set()
+    assert agol_sync._category_set([]) == set()
+    # Empty strings dropped.
+    assert agol_sync._category_set(["", "/Categories/Water"]) == {"Water"}
+
+
+# ----- _diff_adoption_fields categories integration --------------------------
+
+def test_diff_no_drift_when_only_categories_prefix_differs(
+    _config_no_cache,
+) -> None:
+    """Fortress Mountain false-positive class: AGOL stores
+    '/Categories/Water' while catalogue sends 'Water'. After
+    normalisation, no drift."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_cat_clean", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(categories=["/Categories/Water"])
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "categories" not in fields
+
+
+def test_diff_still_flags_stale_category_drift(_config_no_cache) -> None:
+    """The Fortress Mountain real drift: AGOL has a category that
+    doesn't exist in the org schema anymore (e.g. 'Administrative
+    and Jurisdictional Boundaries' after init-categories renamed
+    it). Prefix stripping reveals the genuine name mismatch."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_stale_cat", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer", category="Water",
+    )
+    # AGOL has a stale category that no longer matches the catalogue.
+    item = _make_drifted_agol_item(
+        categories=["/Categories/Administrative and Jurisdictional Boundaries"],
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "categories" in fields
+    # The raw values are preserved in the diff so the steward sees
+    # AGOL's actual path form.
+    cat_diff = next(d for d in diffs if d[0] == "categories")
+    assert cat_diff[1] == [
+        "/Categories/Administrative and Jurisdictional Boundaries"
+    ]
+    assert cat_diff[2] == ["Water"]
+
+
+def test_diff_flags_multi_category_drift(_config_no_cache) -> None:
+    """AGOL can hold multiple categories per item; catalogue is
+    single-valued. If AGOL has extras, that's drift."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_multi", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(
+        categories=["/Categories/Water", "/Categories/Species"],
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "categories" in fields

@@ -2498,6 +2498,47 @@ def _texts_semantically_equal(catalogue: Any, agol: Any) -> bool:
     return True
 
 
+def _normalise_category(cat: Any) -> str:
+    """Strip AGOL's ``/Categories/`` path prefix for diff comparison.
+
+    AGOL stores content categories as paths from the org's category-
+    schema root, prefixed with ``/Categories/`` (the well-known root
+    name the org uses). The pipeline sends bare display names via
+    :func:`compute_item_properties`. Without normalisation, every
+    just-pushed item appears to diff on next pull (prefixed-vs-bare).
+
+    Esri's API docs reference both ``/Categories/`` and ``/categories/``
+    casings; we strip case-insensitively. Hierarchical paths (e.g.
+    ``/Categories/Region/Subregion``) keep their inner path so the
+    set comparison still catches structurally different categories.
+    Y2Y's typology is flat (no hierarchy on either side), so a bare
+    leaf name is the canonical form for both sides.
+    """
+    s = (str(cat) if cat is not None else "").strip()
+    if s.lower().startswith("/categories/"):
+        return s[len("/categories/"):]
+    return s.lstrip("/")
+
+
+def _category_set(values: Any) -> set[str]:
+    """Return a normalised set of category leaf names.
+
+    Handles None, list, tuple, or single-value inputs. Empty
+    strings (after normalisation) are dropped — a stray "" should
+    never count as a category.
+    """
+    if values is None:
+        return set()
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    out: set[str] = set()
+    for v in values:
+        norm = _normalise_category(v)
+        if norm:
+            out.add(norm)
+    return out
+
+
 def _tag_set(value: Any) -> set[str]:
     """Normalise a tags value to a set for set-equality comparison.
 
@@ -2590,11 +2631,18 @@ def _diff_adoption_fields(
             _str(cat_license_raw),
         ))
 
-    # Categories — list-equality after normalising both sides.
-    cat_cats = list(expected.get("categories") or [])
-    agol_cats = list(getattr(item, "categories", None) or [])
-    if sorted(cat_cats) != sorted(agol_cats):
-        diffs.append(("categories", agol_cats, cat_cats))
+    # Categories — set-equality after stripping AGOL's '/Categories/'
+    # path prefix on both sides. The pipeline sends bare display
+    # names; AGOL stores '/Categories/<name>'. Without normalisation
+    # every just-pushed item would diff on next pull. Raw values are
+    # preserved in the diff output so the steward sees AGOL's actual
+    # path form and can recognise stale-category drift (e.g. an
+    # AGOL category that no longer exists in the org schema after
+    # `init-categories` rewrote it).
+    cat_cats_raw = list(expected.get("categories") or [])
+    agol_cats_raw = list(getattr(item, "categories", None) or [])
+    if _category_set(cat_cats_raw) != _category_set(agol_cats_raw):
+        diffs.append(("categories", agol_cats_raw, cat_cats_raw))
 
     return diffs
 
