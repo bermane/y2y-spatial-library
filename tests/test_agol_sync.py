@@ -1729,3 +1729,234 @@ def test_detect_pull_candidates_returns_drifted_clean_rows(
     # Catalogue rows untouched.
     fresh = inventory_manager.get_dataset(db, "ds_drift")
     assert fresh["sync_status"] == "clean"
+
+
+# =============================================================================
+# Semantic-equivalence diff for HTML-permitting AGOL fields (Phase D.4)
+# =============================================================================
+
+# ----- _normalise_and_classify unit tests ------------------------------------
+
+def test_normalise_strips_p_wrapping() -> None:
+    """The most common case: AGOL wraps catalogue's plain text in <p>
+    on save. Normalisation strips it; both sides yield the same form."""
+    assert agol_sync._normalise_and_classify("<p>Hello</p>") == ("Hello", False)
+    assert agol_sync._normalise_and_classify("Hello") == ("Hello", False)
+
+
+def test_normalise_joins_paragraph_runs_with_whitespace() -> None:
+    """Adjacent <p>A</p><p>B</p> should normalise to 'A B', not 'AB'."""
+    assert (
+        agol_sync._normalise_and_classify("<p>A</p><p>B</p>")
+        == ("A B", False)
+    )
+
+
+def test_normalise_decodes_html_entities() -> None:
+    """&nbsp; → space, &mdash; → —, named + numeric entities both."""
+    assert agol_sync._normalise_and_classify("Hello&nbsp;world") == (
+        "Hello world", False,
+    )
+    assert agol_sync._normalise_and_classify(
+        "caribou&mdash;wolf"
+    ) == ("caribou—wolf", False)
+    assert agol_sync._normalise_and_classify(
+        "A&#8212;B"
+    ) == ("A—B", False)
+
+
+def test_normalise_strips_structural_div_and_span() -> None:
+    """The Map Viewer rich-text editor emits bare <div> and <span>
+    wrappers; treat them as structural."""
+    assert agol_sync._normalise_and_classify(
+        "<div><span>X</span></div>"
+    ) == ("X", False)
+
+
+def test_normalise_handles_br_and_self_closing() -> None:
+    """<br> and <br/> are structural whitespace boundaries."""
+    out, rich = agol_sync._normalise_and_classify("A<br>B<br/>C")
+    assert out == "A B C"
+    assert rich is False
+
+
+def test_normalise_empty_and_none() -> None:
+    """Empty string, None, and a bare <p></p> all normalise to ''
+    with no rich content — so an empty catalogue field matches an
+    empty AGOL field regardless of wrapping."""
+    assert agol_sync._normalise_and_classify("") == ("", False)
+    assert agol_sync._normalise_and_classify(None) == ("", False)
+    assert agol_sync._normalise_and_classify("<p></p>") == ("", False)
+
+
+def test_normalise_flags_meaningful_tags() -> None:
+    """Any non-structural tag (<a>, <ul>, <strong>, …) sets the
+    'rich content' flag — even when the text content matches a
+    plain-text version, the steward can't faithfully represent the
+    formatting in the plain catalogue column."""
+    _, rich = agol_sync._normalise_and_classify(
+        '<p>Hello <a href="https://y2y.net">link</a></p>'
+    )
+    assert rich is True
+
+    _, rich = agol_sync._normalise_and_classify(
+        "<ul><li>One</li><li>Two</li></ul>"
+    )
+    assert rich is True
+
+    _, rich = agol_sync._normalise_and_classify(
+        "<strong>bold</strong>"
+    )
+    assert rich is True
+
+    _, rich = agol_sync._normalise_and_classify("<h2>Heading</h2>")
+    assert rich is True
+
+
+def test_normalise_tolerates_malformed_html() -> None:
+    """A parse failure on garbage input shouldn't crash the diff;
+    falls back to whitespace-collapsed entity-decoded raw form."""
+    out, rich = agol_sync._normalise_and_classify("<p>oops<")
+    # Python's html.parser is permissive — it'll keep the trailing
+    # '<' as text. Just confirm the function returns a string and
+    # doesn't raise.
+    assert isinstance(out, str)
+    assert rich is False
+
+
+# ----- _texts_semantically_equal -----------------------------
+
+def test_semantic_equal_plain_matches_p_wrapped() -> None:
+    """The Fortress Mountain case: AGOL has <p>X</p>; catalogue has
+    X. Semantic equivalence treats them as the same."""
+    assert agol_sync._texts_semantically_equal(
+        "Rough polygon derived from gap in provincial parks.",
+        "<p>Rough polygon derived from gap in provincial parks.</p>",
+    ) is True
+
+
+def test_semantic_equal_detects_real_text_difference() -> None:
+    """Different text content is real drift, regardless of HTML."""
+    assert agol_sync._texts_semantically_equal(
+        "<p>Hello</p>", "<p>Goodbye</p>",
+    ) is False
+    assert agol_sync._texts_semantically_equal(
+        "Hello", "<p>Goodbye</p>",
+    ) is False
+
+
+def test_semantic_equal_flags_rich_vs_plain() -> None:
+    """AGOL has a hyperlink the catalogue can't represent in plain
+    text — flag as drift even when the visible text matches."""
+    cat = "Hello link"
+    agol = '<p>Hello <a href="https://y2y.net">link</a></p>'
+    assert agol_sync._texts_semantically_equal(cat, agol) is False
+
+
+def test_semantic_equal_matching_rich_content_on_both_sides() -> None:
+    """Steward used the escape hatch — catalogue contains the same
+    HTML as AGOL. Should match."""
+    raw = '<p>Hello <a href="https://y2y.net">link</a></p>'
+    assert agol_sync._texts_semantically_equal(raw, raw) is True
+
+
+def test_semantic_equal_flags_attribute_drift() -> None:
+    """Both sides rich, normalised text matches, but link href
+    differs — attribute drift counts as real drift so the steward
+    sees that the link target changed."""
+    cat = '<p>See <a href="https://old.example">here</a></p>'
+    agol = '<p>See <a href="https://new.example">here</a></p>'
+    assert agol_sync._texts_semantically_equal(cat, agol) is False
+
+
+def test_semantic_equal_handles_none_and_empty() -> None:
+    """Empty / None / <p></p> all collapse to the empty form and
+    match each other."""
+    assert agol_sync._texts_semantically_equal(None, "") is True
+    assert agol_sync._texts_semantically_equal("", "<p></p>") is True
+    assert agol_sync._texts_semantically_equal(None, "<p></p>") is True
+
+
+# ----- _diff_adoption_fields integration ------------------------------------
+
+def test_diff_no_drift_when_only_p_wrapping(_config_no_cache) -> None:
+    """End-to-end: a row whose AGOL state differs ONLY by <p>
+    wrapping should produce zero diffs (the Fortress Mountain
+    false-positive fix)."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_x", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(
+        description="<p>Description.</p>",
+        accessInformation="<p>Ack.</p>",
+        licenseInfo="<p>TOU.</p>",
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    assert diffs == []
+
+
+def test_diff_still_flags_real_content_change(_config_no_cache) -> None:
+    """A real difference (different text) still produces a diff
+    even when both sides are HTML-wrapped — only structural
+    wrapping is ignored."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_x", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(
+        description="<p>A completely different description.</p>",
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "description" in fields
+
+
+def test_diff_flags_rich_content_on_agol_when_catalogue_plain(
+    _config_no_cache,
+) -> None:
+    """AGOL has a hyperlink that the catalogue's plain text can't
+    represent — flag as drift so the steward can decide whether
+    to absorb the HTML via pull --accept."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_x", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    # AGOL's description text matches catalogue's normalised form
+    # ("Description.") but AGOL carries a link the catalogue
+    # doesn't.
+    item = _make_drifted_agol_item(
+        description='<p><a href="https://y2y.net">Description.</a></p>',
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "description" in fields
+
+
+def test_diff_title_still_strict(_config_no_cache) -> None:
+    """Titles are plain-text by AGOL convention — even an HTML-
+    wrapped title is a real difference, not just structural."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_x", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(title="<b>Test Title</b>")
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    fields = {d[0] for d in diffs}
+    assert "title" in fields  # <b> in a title field is genuine drift

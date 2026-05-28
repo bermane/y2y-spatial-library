@@ -70,6 +70,61 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- description carries both the public-facing dataset description and
     -- any processing/lineage details (e.g. "Geometry repaired with
     -- ogr2ogr -makevalid; 5 ring self-intersections fixed").
+    --
+    -- == Future work: rich text vs plain text =============================
+    -- summary, description, terms_of_use, and acknowledgements are
+    -- currently stored as plain text. AGOL natively stores HTML for
+    -- description / accessInformation / licenseInfo (the AGOL Map
+    -- Viewer rich-text editor produces <p>…</p> wrappers, <a> links,
+    -- lists, headings); snippet (summary) stays plain by AGOL
+    -- convention. This creates two questions:
+    --
+    --   1. Should plain-text catalogue ↔ HTML-wrapped AGOL be treated
+    --      as drift, or as semantically equivalent?
+    --   2. Should the catalogue grow first-class support for rich
+    --      text so steward-authored AGOL formatting (links, lists)
+    --      survives a pull --accept?
+    --
+    -- Three tracks were considered (2026-05-28):
+    --
+    --   Track 1 — Semantic-equivalence diff (no schema change).
+    --     agol_sync._diff_adoption_fields() normalises both sides
+    --     (strip <p>/<br>/<div>/<span>, decode HTML entities,
+    --     collapse whitespace) before comparing. Plain↔wrapped is no
+    --     drift; meaningful tags (<a>, <ul>, …) are real drift.
+    --     Rich text supported via an escape hatch — steward types
+    --     HTML directly into the catalogue column; xlsx shows it
+    --     verbatim. ~150 LOC; no migration.
+    --
+    --   Track 2 — Markdown catalogue, HTML wire format.
+    --     Catalogue stores Markdown. Push renders → HTML; pull
+    --     converts AGOL HTML → Markdown via html2text / markdownify.
+    --     Readable xlsx; lossless for the formatting stewards
+    --     typically use; lossy for non-canonical AGOL HTML (Map
+    --     Viewer editor's vendor classes / <span> wrappers).
+    --     Adds a Markdown / HTML-conversion dep; ~300 LOC.
+    --
+    --   Track 3 — Dual-column schema (plain + _html siblings).
+    --     New columns: description_html, terms_of_use_html,
+    --     acknowledgements_html. _html is authoritative when set;
+    --     plain is denormalised for grep / xlsx. Migration 0XX adds
+    --     the columns + every read/write path updated. Lossless;
+    --     largest blast radius (~500 LOC + migration + UX docs).
+    --
+    -- Decision (2026-05-28): Track 1 in Phase D.4 — fix the diff
+    -- false-positive (Fortress Mountain HTML wrapping flagged as
+    -- conflict) and enable raw-HTML escape hatch. Defer Track 2 /
+    -- Track 3 until a steward use case emerges that the escape
+    -- hatch can't serve.
+    --
+    -- Revisit criteria for Track 2 or Track 3:
+    --   • Steward wants to author formatting in the catalogue (CLI
+    --     or xlsx) rather than the AGOL UI.
+    --   • Multiple datasets carry rich content (links, lists) that
+    --     the steward edits routinely.
+    --   • xlsx readability becomes a sticking point with HTML-in-
+    --     cells (Track 1's accepted tradeoff).
+    -- ====================================================================
     summary                 TEXT NOT NULL,
     description             TEXT NOT NULL,
     tags                    TEXT NOT NULL,                   -- ';'-delimited

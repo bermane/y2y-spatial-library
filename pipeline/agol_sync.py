@@ -2373,6 +2373,131 @@ def try_auto_push(
 # (catalogue_field, agol_attribute, comparator) where comparator(cat, agol)
 # returns True if the values match. Order matters only for the
 # reported diff sequence (titles first, then snippet, etc.).
+# ---- HTML semantic-equivalence helpers (Phase D.4) -------------------------
+#
+# Background: AGOL stores HTML in description / accessInformation /
+# licenseInfo natively; the catalogue stores plain text. Pushing plain
+# text → AGOL → AGOL's own save wraps it in <p>...</p> → next pull
+# diffs it as drift. That false-positive shows up on every clean push
+# the moment AGOL touches the item. These helpers normalise both
+# sides for comparison so structural-only HTML wrapping is treated as
+# semantically equivalent to bare text. See pipeline/schema.sql's
+# "Future work: rich text vs plain text" block for the decision
+# rationale (Track 1, 2026-05-28).
+
+import re
+from html import unescape
+from html.parser import HTMLParser
+
+# Tags whose presence is purely structural — stripping them and
+# keeping the text content yields the same meaning. <span> is in
+# here because the Map Viewer rich-text editor emits bare class-less
+# <span>s as wrapping noise.
+_STRUCTURAL_HTML_TAGS: frozenset[str] = frozenset({
+    "p", "br", "div", "span",
+})
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+class _StructuralStripper(HTMLParser):
+    """HTML parser that strips structural tags and records whether
+    any non-structural ("meaningful") tags were present.
+
+    ``get_text()`` returns the concatenated text content with
+    whitespace collapsed. ``has_meaningful_tags`` is True iff the
+    input contained any tag NOT in ``_STRUCTURAL_HTML_TAGS`` — that
+    signals rich content (links, lists, images, formatting) the
+    plain-text catalogue can't faithfully represent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self.has_meaningful_tags: bool = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in _STRUCTURAL_HTML_TAGS:
+            self.has_meaningful_tags = True
+        # Always insert a whitespace boundary so adjacent
+        # <p>X</p><p>Y</p> becomes "X Y" not "XY". The whitespace
+        # collapse at the end folds runs of spaces.
+        self._parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        self._parts.append(" ")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # <br/>, <img/> etc.
+        if tag not in _STRUCTURAL_HTML_TAGS:
+            self.has_meaningful_tags = True
+        self._parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def get_text(self) -> str:
+        return _WHITESPACE_RUN_RE.sub(" ", "".join(self._parts)).strip()
+
+
+def _normalise_and_classify(text: Any) -> tuple[str, bool]:
+    """Return ``(normalised_text, has_meaningful_tags)`` for one side.
+
+    Normalisation: HTML entities decoded (``&amp;`` → ``&``,
+    ``&mdash;`` → ``—``), structural-only tags stripped, whitespace
+    collapsed, trimmed. ``has_meaningful_tags`` is True if the input
+    carried any tag outside ``_STRUCTURAL_HTML_TAGS`` — used by the
+    diff to flag rich content drift even when normalised text matches.
+
+    Tolerates ``None`` / empty string (→ ``("", False)``) and
+    HTML-parser exceptions on malformed input (returns the raw
+    stripped string with ``has_meaningful_tags=False`` so a parse
+    failure errs on the side of "treat as plain text").
+    """
+    if text is None or text == "":
+        return "", False
+    raw = str(text)
+    try:
+        parser = _StructuralStripper()
+        parser.feed(raw)
+        parser.close()
+        return parser.get_text(), parser.has_meaningful_tags
+    except Exception:
+        return _WHITESPACE_RUN_RE.sub(" ", unescape(raw)).strip(), False
+
+
+def _texts_semantically_equal(catalogue: Any, agol: Any) -> bool:
+    """Compare a rich-text field across catalogue ↔ AGOL.
+
+    Equivalence rules (Track 1, schema.sql future-work block):
+
+    * Both sides normalised: structural tags stripped, entities
+      decoded, whitespace collapsed. If the normalised forms differ,
+      the field has drifted.
+    * If the normalised forms match BUT one side carries meaningful
+      tags (``<a href>``, ``<ul>``, etc.) and the other doesn't,
+      the steward can't faithfully represent the AGOL content in the
+      plain catalogue → flag as drift.
+    * If both sides carry meaningful tags AND the normalised text
+      matches, fall back to entity-decoded whitespace-collapsed
+      raw-string comparison so attribute differences (``<a href="x">``
+      vs ``<a href="y">``) register as drift.
+    """
+    cat_norm, cat_rich = _normalise_and_classify(catalogue)
+    agol_norm, agol_rich = _normalise_and_classify(agol)
+    if cat_norm != agol_norm:
+        return False
+    if cat_rich != agol_rich:
+        return False
+    if cat_rich and agol_rich:
+        # Both rich; compare raw forms (entity-decoded + whitespace-
+        # collapsed) so attribute differences count.
+        cat_raw = _WHITESPACE_RUN_RE.sub(" ", unescape(str(catalogue or ""))).strip()
+        agol_raw = _WHITESPACE_RUN_RE.sub(" ", unescape(str(agol or ""))).strip()
+        return cat_raw == agol_raw
+    return True
+
+
 def _tag_set(value: Any) -> set[str]:
     """Normalise a tags value to a set for set-equality comparison.
 
@@ -2425,11 +2550,19 @@ def _diff_adoption_fields(
     if cat_snippet != agol_snippet:
         diffs.append(("snippet", agol_snippet, cat_snippet))
 
-    # Description
-    cat_desc = _str(expected.get("description"))
-    agol_desc = _str(getattr(item, "description", None))
-    if cat_desc != agol_desc:
-        diffs.append(("description", agol_desc, cat_desc))
+    # Description — HTML-permitting on the AGOL side. Use semantic
+    # equivalence so structural-only HTML wrapping doesn't false-flag
+    # as drift (Track 1, schema.sql future-work block). Raw values
+    # preserved in the diff output so the steward sees what AGOL
+    # actually has.
+    cat_desc_raw = expected.get("description")
+    agol_desc_raw = getattr(item, "description", None)
+    if not _texts_semantically_equal(cat_desc_raw, agol_desc_raw):
+        diffs.append((
+            "description",
+            _str(agol_desc_raw),
+            _str(cat_desc_raw),
+        ))
 
     # Tags — set-equality.
     cat_tags = _tag_set(expected.get("tags"))
@@ -2437,17 +2570,25 @@ def _diff_adoption_fields(
     if cat_tags != agol_tags:
         diffs.append(("tags", sorted(agol_tags), sorted(cat_tags)))
 
-    # Access information (acknowledgements)
-    cat_access = _str(expected.get("accessInformation"))
-    agol_access = _str(getattr(item, "accessInformation", None))
-    if cat_access != agol_access:
-        diffs.append(("accessInformation", agol_access, cat_access))
+    # Access information (acknowledgements) — HTML-permitting on AGOL.
+    cat_access_raw = expected.get("accessInformation")
+    agol_access_raw = getattr(item, "accessInformation", None)
+    if not _texts_semantically_equal(cat_access_raw, agol_access_raw):
+        diffs.append((
+            "accessInformation",
+            _str(agol_access_raw),
+            _str(cat_access_raw),
+        ))
 
-    # License info (terms_of_use)
-    cat_license = _str(expected.get("licenseInfo"))
-    agol_license = _str(getattr(item, "licenseInfo", None))
-    if cat_license != agol_license:
-        diffs.append(("licenseInfo", agol_license, cat_license))
+    # License info (terms_of_use) — HTML-permitting on AGOL.
+    cat_license_raw = expected.get("licenseInfo")
+    agol_license_raw = getattr(item, "licenseInfo", None)
+    if not _texts_semantically_equal(cat_license_raw, agol_license_raw):
+        diffs.append((
+            "licenseInfo",
+            _str(agol_license_raw),
+            _str(cat_license_raw),
+        ))
 
     # Categories — list-equality after normalising both sides.
     cat_cats = list(expected.get("categories") or [])
