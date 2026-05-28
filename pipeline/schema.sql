@@ -45,6 +45,22 @@ CREATE TABLE IF NOT EXISTS datasets (
     dataset_type            TEXT NOT NULL DEFAULT 'spatial'
                                 CHECK (dataset_type IN ('spatial')),
     title                   TEXT NOT NULL,
+    -- Single-category invariant (Phase D.6, 2026-05-28):
+    --   * Catalogue: one row → one `category` (and optional one
+    --     `subcategory`); SQLite enforces single-valued TEXT.
+    --   * Library:   the file lives in exactly one category folder
+    --     (under `library/spatial/<category>/[<subcategory>/]`);
+    --     changing it requires `y2y rename` (a file move).
+    --   * AGOL:      the item is assigned to exactly one top-level
+    --     category. agol_sync.compute_item_properties() sends a
+    --     single hierarchical-path entry ('Species/Caribou'), not
+    --     two flat entries — so subcategorised items still get
+    --     one top-level membership. AGOL's Item.update() with the
+    --     full categories list REPLACES; even if a steward adds
+    --     extras in the Map Viewer UI, the next push overwrites
+    --     back to one.
+    -- Multi-rendition (one dataset → multiple AGOL items, each in
+    -- its own category) is deferred to v2 per the integration plan.
     category                TEXT NOT NULL
                                 CHECK (category IN (
                                     -- Order matches Spatial_Data_Typology.xlsx

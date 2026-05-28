@@ -252,17 +252,28 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
         "typeKeywords": type_keywords,
     }
 
-    # AGOL categories: parent + (optional) subcategory. The subcategory
-    # is identity-mapped to its AGOL counterpart since the schema we
-    # write to the org mirrors the catalogue subcategory display names
-    # exactly. Both go in `categories` as a flat list — AGOL's tree
-    # resolves them by title.
+    # AGOL categories: a single hierarchical path per item.
+    #
+    # Y2Y invariant: an item is assigned to exactly ONE top-level
+    # category. When the catalogue row has a subcategory (Species
+    # only at present), the assignment is the path 'Parent/Sub'
+    # (e.g. 'Species/Caribou'), not two flat entries. Sending two
+    # bare names would put the item in two top-level categories on
+    # AGOL — explicitly disallowed.
+    #
+    # AGOL's REST API takes either bare names ("Water") or full
+    # paths ("/Categories/Water"); bare names get auto-prefixed
+    # on save. Relative path form ("Species/Caribou") rides the
+    # same auto-prefix and lands as "/Categories/Species/Caribou"
+    # in AGOL storage. _normalise_category() strips the prefix on
+    # both sides for diff comparison so push/pull is round-trip-
+    # stable regardless of which form is on the wire.
     if category:
-        cats = [compute_agol_category(category)]
+        parts = [compute_agol_category(category)]
         sub = row.get("subcategory")
         if sub:
-            cats.append(sub)
-        properties["categories"] = cats
+            parts.append(sub)
+        properties["categories"] = ["/".join(parts)]
 
     return properties
 
@@ -2639,10 +2650,20 @@ def _diff_adoption_fields(
     # path form and can recognise stale-category drift (e.g. an
     # AGOL category that no longer exists in the org schema after
     # `init-categories` rewrote it).
+    #
+    # When AGOL has more than one categories entry (steward manually
+    # added one in the Map Viewer UI), the diff label gets an
+    # explicit "(multi-category on AGOL)" annotation so the steward
+    # recognises that pull --reject will collapse AGOL back to the
+    # single catalogue value (per the single-category invariant —
+    # see schema.sql at `category`).
     cat_cats_raw = list(expected.get("categories") or [])
     agol_cats_raw = list(getattr(item, "categories", None) or [])
     if _category_set(cat_cats_raw) != _category_set(agol_cats_raw):
-        diffs.append(("categories", agol_cats_raw, cat_cats_raw))
+        field_label = "categories"
+        if len(agol_cats_raw) > 1:
+            field_label = "categories (multi-category on AGOL)"
+        diffs.append((field_label, agol_cats_raw, cat_cats_raw))
 
     return diffs
 
@@ -3133,10 +3154,15 @@ def pull(
     absorbed: list[str] = []
     skipped: list[str] = []
     for field, agol_val, _cat_val in diffs:
-        if field == "categories":
+        # The diff label for categories may carry a parenthetical
+        # annotation (e.g. "categories (multi-category on AGOL)") —
+        # match on the leading word so both forms are skipped.
+        if field == "categories" or field.startswith("categories "):
             skipped.append(
                 "categories (filesystem-bound — use `y2y rename` to "
-                "move the file to a different category folder)"
+                "move the file to a different category folder; "
+                "pull --reject re-pushes to restore single-category "
+                "invariant if AGOL has extras)"
             )
             continue
         column = _AGOL_FIELD_TO_CATALOGUE_COLUMN.get(field)

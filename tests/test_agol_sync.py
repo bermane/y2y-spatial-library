@@ -189,14 +189,19 @@ def test_compute_item_properties_assigns_category_as_full_display_name() -> None
     assert props["categories"] == ["Jurisdictional & Political Boundaries"]
 
 
-def test_compute_item_properties_includes_subcategory_when_set() -> None:
-    """Species rows with a subcategory tag with [parent, subcategory] so
-    AGOL's nested category tree resolves both levels."""
+def test_compute_item_properties_includes_subcategory_as_hierarchical_path() -> None:
+    """Species rows with a subcategory emit a SINGLE hierarchical-path
+    entry ('Species/Grizzly Bear'), NOT two flat entries. The Y2Y
+    invariant is one top-level category per item; sending
+    ['Species', 'Grizzly Bear'] would put the item in two top-level
+    categories on AGOL — explicitly disallowed."""
     row = _sample_row()
     row["category"] = "Species"
     row["subcategory"] = "Grizzly Bear"
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["Species", "Grizzly Bear"]
+    assert props["categories"] == ["Species/Grizzly Bear"]
+    # Belt-and-braces: list length is always 1.
+    assert len(props["categories"]) == 1
 
 
 def test_compute_item_properties_no_subcategory_means_single_entry() -> None:
@@ -2063,7 +2068,10 @@ def test_diff_still_flags_stale_category_drift(_config_no_cache) -> None:
 
 def test_diff_flags_multi_category_drift(_config_no_cache) -> None:
     """AGOL can hold multiple categories per item; catalogue is
-    single-valued. If AGOL has extras, that's drift."""
+    single-valued. If AGOL has extras, that's drift. Phase D.6
+    adds an explicit "(multi-category on AGOL)" annotation; this
+    test confirms drift is still flagged (the annotation itself is
+    asserted in test_diff_annotates_multi_category_on_agol)."""
     from tests.test_agol_push import _full_row
 
     row = _full_row(
@@ -2077,4 +2085,101 @@ def test_diff_flags_multi_category_drift(_config_no_cache) -> None:
 
     diffs = agol_sync._diff_adoption_fields(row, item)
     fields = {d[0] for d in diffs}
-    assert "categories" in fields
+    assert any(f.startswith("categories") for f in fields)
+
+
+# =============================================================================
+# Single-category invariant (Phase D.6)
+# =============================================================================
+
+def test_compute_item_properties_emits_single_category_for_top_level() -> None:
+    """Sanity guard: a top-level-only row sends categories as a
+    1-element list, never 0 and never 2+."""
+    row = _sample_row()
+    row["category"] = "Water"
+    row["subcategory"] = None
+    props = agol_sync.compute_item_properties(row)
+    assert isinstance(props["categories"], list)
+    assert len(props["categories"]) == 1
+
+
+def test_compute_item_properties_emits_single_path_for_subcategorised() -> None:
+    """The Phase D.6 fix: a subcategorised row sends ONE
+    'Parent/Sub' path entry, not two flat entries. AGOL interprets
+    this as a single hierarchical assignment, preserving the
+    single-top-level-category invariant."""
+    row = _sample_row()
+    row["category"] = "Species"
+    row["subcategory"] = "Caribou"
+    props = agol_sync.compute_item_properties(row)
+    assert props["categories"] == ["Species/Caribou"]
+    assert len(props["categories"]) == 1
+
+
+def test_compute_item_properties_always_emits_single_category_invariant() -> None:
+    """Property-style invariant guard: across the canonical typology
+    + a Species row, categories is always a 1-element list. Defends
+    against future regressions that might re-introduce the
+    [parent, subcategory] flat-list bug."""
+    from pipeline import taxonomy
+
+    sample = _sample_row()
+    for cat in taxonomy.CATEGORIES:
+        row = dict(sample)
+        row["category"] = cat
+        row["subcategory"] = None
+        props = agol_sync.compute_item_properties(row)
+        assert len(props["categories"]) == 1, (
+            f"category={cat!r}: expected single-element categories, "
+            f"got {props['categories']!r}"
+        )
+
+    # A Species + subcategory row also stays single-valued.
+    row = dict(sample)
+    row["category"] = "Species"
+    row["subcategory"] = "Grizzly Bear"
+    props = agol_sync.compute_item_properties(row)
+    assert len(props["categories"]) == 1
+
+
+def test_diff_annotates_multi_category_on_agol(_config_no_cache) -> None:
+    """When AGOL has 2+ categories (steward added one in the Map
+    Viewer UI), the diff label is "categories (multi-category on
+    AGOL)" so the steward sees this is a structural violation that
+    pull --reject will collapse back to one."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_multi_agol", file_path="Water/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+    )
+    item = _make_drifted_agol_item(
+        categories=["/Categories/Water", "/Categories/Species"],
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    field_labels = [d[0] for d in diffs]
+    assert "categories (multi-category on AGOL)" in field_labels
+
+
+def test_diff_no_drift_when_path_form_matches_subcategorised(
+    _config_no_cache,
+) -> None:
+    """Round-trip check: a subcategorised catalogue row whose AGOL
+    state is the corresponding path produces zero categories drift."""
+    from tests.test_agol_push import _full_row
+
+    row = _full_row(
+        dataset_id="ds_sub", file_path="Species/Caribou/x.gpkg",
+        sync_status="unpublished", agol_item_id="abc",
+        agol_format="feature-layer",
+        category="Species", subcategory="Caribou",
+    )
+    item = _make_drifted_agol_item(
+        categories=["/Categories/Species/Caribou"],
+    )
+
+    diffs = agol_sync._diff_adoption_fields(row, item)
+    field_labels = [d[0] for d in diffs]
+    assert not any(f.startswith("categories") for f in field_labels)
