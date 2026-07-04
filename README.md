@@ -257,24 +257,22 @@ auto-installed.
 
 ## Taxonomy
 
-Nine top-level categories, drawn from `Spatial_Data_Typology.xlsx`. Disk
-folder names use underscores; AGOL item titles use Title Case with spaces.
+Ten top-level categories, drawn from `Spatial_Data_Typology.xlsx` (2026
+mid-year revision — see migration 010). Disk folder names use underscores;
+AGOL content categories use the Title Case display names.
 
-| # | Category                                    | Directory                          | Contents |
-| - | ------------------------------------------- | ---------------------------------- | -------- |
-| 1 | Administrative & Jurisdictional Boundaries | `Admin_Juris_Boundaries`           | Provinces, states, international boundary, First Nations lands, management units, municipal boundaries, population centers, census boundaries |
-| 2 | Biodiversity & Ecosystems                   | `Biodiversity_Ecosystems`          | Ecoregions, ecosystem classification, key biodiversity areas, ecological benchmarks, biophysical data |
-| 3 | Climate Resilience                          | `Climate_Resilience`               | Climate normals, projections, refugia, climate velocity, resilient landscapes, carbon stocks, fire regime, natural disturbance regime |
-| 4 | Connectivity & Wildlife Movement            | `Connectivity_Wildlife_Movement`   | Corridors, linkages, resistance/permeability surfaces, telemetry, movement models, barrier analysis |
-| 5 | Species & Species at Risk                   | `Species`                          | Distributions, habitat models, critical habitat, wildlife surveys, key ranges, range distribution, movement and presence data (GPS/telemetry) |
-| 6 | Water                                       | `Water`                            | Hydrology, watershed boundaries, aquatic connectivity, riparian areas, water quality, fish habitat |
-| 7 | Land Cover, Land Use & Disturbance          | `Land_Cover_Use_Disturbance`       | Land cover classification, change detection, NDVI/phenology, burn history, burn severity, insect/disease extent |
-| 8 | Protected Areas & Conservation Lands        | `Prot_Areas_Cons_Lands`            | Parks, wilderness, WMAs, conservation easements, IPCAs, private conservation lands and easements |
-| 9 | Threats, Human Footprint & Infrastructure   | `Threats_Human_Footprint_Infras`   | Roads, railways, pipelines, utility corridors, resource extraction, development, cumulative effects, human footprint indices, barrier structures, human population demographics |
-
-> **Note:** The disk folder name `Threats_Human_Footprint_Infras` corrects a
-> typo (`Footpring`) in `Spatial_Data_Typology.xlsx`. If the typology file
-> is updated to match, clear this note.
+| #  | Category                          | Directory                        | Contents |
+| -- | --------------------------------- | -------------------------------- | -------- |
+| 1  | Boundaries, Tenure & Governance   | `Boundaries_Tenure_Governance`   | Provinces, states, international boundary, management units, First Nations lands, municipal boundaries, population centers, census boundaries, congressional districts, constituencies, political boundaries, parks, wilderness, WMAs, conservation easements, IPCAs, private conservation lands and easements, national forests, tenure holders, stewardship agreements |
+| 2  | Biodiversity & Ecosystems         | `Biodiversity_Ecosystems`        | Ecoregions, ecosystem classification, key biodiversity areas, ecological benchmarks, biophysical data, digital elevation models, LiDAR products, slope, aspect, hillshade |
+| 3  | Climate Change                    | `Climate_Change`                 | Climate normals, projections, refugia, climate velocity, resilient landscapes, carbon stocks, fire regime, natural disturbance regime |
+| 4  | Connectivity & Wildlife Movement  | `Connectivity_Wildlife_Movement` | Corridors, linkages, resistance/permeability surfaces, telemetry, movement models, barrier analysis |
+| 5  | Species                           | `Species`                        | Distributions, habitat models, critical habitat, wildlife surveys, key ranges, range distribution, fish habitat, movement and presence data (GPS/telemetry) |
+| 6  | Water                             | `Water`                          | Hydrology, watershed boundaries, aquatic connectivity, riparian areas, water quality |
+| 7  | Land Cover, Land Use & Disturbance| `Land_Cover_Use_Disturbance`     | Land cover classification, change detection, NDVI/phenology, burn history, burn severity, insect/disease extent |
+| 8  | Human Dimensions of Conservation  | `Human_Dimensions_Conservation`  | Governance research, community and stakeholder data, Indigenous-led research, public attitudes and perception surveys |
+| 9  | Threats & Infrastructure          | `Threats_Infrastructure`         | Roads, railways, pipelines, utility corridors, resource extraction, development, cumulative effects, human footprint indices, barrier structures, trails |
+| 10 | Demographics & Socioeconomic Data | `Demographics_Socioeconomic`     | Human population demographics, socioeconomic data |
 
 ### Species sub-categories
 

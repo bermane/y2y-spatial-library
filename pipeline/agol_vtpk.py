@@ -99,11 +99,11 @@ def resolve_vtpk_path(row: dict[str, Any], library_root: Path) -> Path:
 
     The catalogue row's ``file_path`` is relative to
     ``library_root`` (the spatial subtree), e.g.
-    ``"Land_Designations_Tenure/parks.gpkg"``. The corresponding
+    ``"Boundaries_Tenure_Governance/parks.gpkg"``. The corresponding
     VTPK lives under a sibling ``vtpk/`` subtree, flat (no category
     folders), keyed by the GPKG's file stem:
 
-        library/spatial/Land_Designations_Tenure/parks.gpkg
+        library/spatial/Boundaries_Tenure_Governance/parks.gpkg
         library/vtpk/parks.vtpk
 
     Args:

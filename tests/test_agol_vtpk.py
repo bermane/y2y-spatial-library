@@ -39,7 +39,7 @@ def test_resolve_vtpk_path_for_typical_row(tmp_path: Path) -> None:
     library_root.mkdir(parents=True)
     row = {
         "dataset_id": "ds_X",
-        "file_path": "Land_Designations_Tenure/parks_protected_areas_alberta.gpkg",
+        "file_path": "Boundaries_Tenure_Governance/parks_protected_areas_alberta.gpkg",
     }
     out = agol_vtpk.resolve_vtpk_path(row, library_root)
     assert out == library_root.parent / "vtpk" / "parks_protected_areas_alberta.vtpk"
@@ -148,15 +148,15 @@ def _setup_catalogue_row(
     db_path: Path, *, agol_format: str, file_stem: str = "parks",
 ) -> str:
     """Insert one catalogue row whose file_path is
-    ``Land_Designations_Tenure/<stem>.gpkg`` with the given
+    ``Boundaries_Tenure_Governance/<stem>.gpkg`` with the given
     ``agol_format``. Returns the dataset_id. Reuses
     test_agol_push._full_row to stay in sync with the schema's
     NOT NULL set as it evolves."""
     from tests.test_agol_push import _full_row
     row = _full_row(
         dataset_id="ds_test_vtl",
-        file_path=f"Land_Designations_Tenure/{file_stem}.gpkg",
-        category="Land Designations & Tenure",
+        file_path=f"Boundaries_Tenure_Governance/{file_stem}.gpkg",
+        category="Boundaries, Tenure & Governance",
         agol_format=agol_format,
     )
     inventory_manager.insert_dataset(db_path, row)
@@ -170,7 +170,7 @@ def test_ingest_one_vtpk_happy_path(
     sidecar written, changelog entry appended."""
     db_path = project_tree["db"]
     library_root = project_tree["library"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Boundaries_Tenure_Governance")
     _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
@@ -200,7 +200,7 @@ def test_ingest_one_vtpk_rejects_invalid_zip_signature(
     touching the catalogue or moving anything."""
     db_path = project_tree["db"]
     library_root = project_tree["library"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Boundaries_Tenure_Governance")
     _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
@@ -248,7 +248,7 @@ def test_ingest_one_vtpk_target_mismatch_rejects(
     flip the target first via `y2y update`."""
     db_path = project_tree["db"]
     library_root = project_tree["library"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Boundaries_Tenure_Governance")
     _setup_catalogue_row(db_path, agol_format="feature-layer")
 
     queue_incoming = project_tree["root"] / "queue" / "incoming"
@@ -274,7 +274,7 @@ def test_ingest_one_vtpk_replaces_existing_at_destination(
     prior one at library/vtpk/, updates the sidecar checksum."""
     db_path = project_tree["db"]
     library_root = project_tree["library"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=library_root / "Boundaries_Tenure_Governance")
     _setup_catalogue_row(db_path, agol_format="vector-tile-layer")
 
     # Plant an old VTPK at the canonical location.

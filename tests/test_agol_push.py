@@ -1552,14 +1552,14 @@ def test_push_vtl_create_uploads_vtpk_publishes_vts(
     push uploads it as a source item + publishes the VTS. No arcpy
     invocation anywhere; no intermediate Feature Service."""
     db = project_tree["db"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Boundaries_Tenure_Governance")
     vtpk_path = _plant_vtpk(project_tree, "parks")
 
     row = _full_row(
         dataset_id="ds_vtl",
-        file_path="Land_Designations_Tenure/parks.gpkg",
+        file_path="Boundaries_Tenure_Governance/parks.gpkg",
         agol_format="vector-tile-layer",
-        category="Land Designations & Tenure",
+        category="Boundaries, Tenure & Governance",
     )
     inventory_manager.insert_dataset(db, row)
 
@@ -1605,13 +1605,13 @@ def test_push_vtl_create_errors_when_vtpk_not_ingested(
     this case via the missing-VTPK invariant.
     """
     db = project_tree["db"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Boundaries_Tenure_Governance")
     # NB: no VTPK planted.
     row = _full_row(
         dataset_id="ds_vtl",
-        file_path="Land_Designations_Tenure/parks.gpkg",
+        file_path="Boundaries_Tenure_Governance/parks.gpkg",
         agol_format="vector-tile-layer",
-        category="Land Designations & Tenure",
+        category="Boundaries, Tenure & Governance",
     )
     inventory_manager.insert_dataset(db, row)
     gis = _make_gis(new_item_id="vtl_item_id")
@@ -1635,7 +1635,7 @@ def test_push_vtl_update_refreshes_when_vtpk_checksum_changed(
     source item, refresh via source.update(data) + source.publish(
     file_type='Vector Tile Package', overwrite=True)."""
     db = project_tree["db"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Boundaries_Tenure_Governance")
     vtpk_path = _plant_vtpk(project_tree, "parks")
 
     # The AGOL source item — has a stale checksum typeKeyword.
@@ -1659,9 +1659,9 @@ def test_push_vtl_update_refreshes_when_vtpk_checksum_changed(
 
     row = _full_row(
         dataset_id="ds_vtl",
-        file_path="Land_Designations_Tenure/parks.gpkg",
+        file_path="Boundaries_Tenure_Governance/parks.gpkg",
         agol_format="vector-tile-layer",
-        category="Land Designations & Tenure",
+        category="Boundaries, Tenure & Governance",
         sync_status="pending_push",
         agol_item_id="vtl_item_id",
     )
@@ -1708,7 +1708,7 @@ def test_push_vtl_update_skips_refresh_when_vtpk_checksum_matches(
     + move + sharing happen. Avoids re-uploading multi-MB packages
     unnecessarily."""
     db = project_tree["db"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Boundaries_Tenure_Governance")
     vtpk_path = _plant_vtpk(project_tree, "parks")
 
     # Compute the actual sha to plant on the AGOL source mock.
@@ -1734,9 +1734,9 @@ def test_push_vtl_update_skips_refresh_when_vtpk_checksum_matches(
 
     row = _full_row(
         dataset_id="ds_vtl",
-        file_path="Land_Designations_Tenure/parks.gpkg",
+        file_path="Boundaries_Tenure_Governance/parks.gpkg",
         agol_format="vector-tile-layer",
-        category="Land Designations & Tenure",
+        category="Boundaries, Tenure & Governance",
         sync_status="clean",
         agol_item_id="vtl_item_id",
     )
@@ -1775,7 +1775,7 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
     the type mismatch and unpublishes the old Feature Service +
     linked source GPKG before creating the new VTS."""
     db = project_tree["db"]
-    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Land_Designations_Tenure")
+    valid_gpkg_factory("parks.gpkg", dest_dir=project_tree["library"] / "Boundaries_Tenure_Governance")
     _plant_vtpk(project_tree, "parks")
 
     # Existing AGOL item is a Feature Service (the catalogue was
@@ -1792,9 +1792,9 @@ def test_push_target_switch_FL_to_VTL_unpublishes_old(
 
     row = _full_row(
         dataset_id="ds_vtl",
-        file_path="Land_Designations_Tenure/parks.gpkg",
+        file_path="Boundaries_Tenure_Governance/parks.gpkg",
         agol_format="vector-tile-layer",
-        category="Land Designations & Tenure",
+        category="Boundaries, Tenure & Governance",
         sync_status="pending_push",
         agol_item_id="old_fs_id",
     )

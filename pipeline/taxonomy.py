@@ -14,35 +14,38 @@ from __future__ import annotations
 # ampersands and spaces. Order follows the typology document.
 #
 # Schema CHECK constraint (pipeline/schema.sql) hard-codes this same
-# list — keep the two in sync. Migration 006 carries the transition
-# from the legacy 9-category typology.
+# list — keep the two in sync. Migration 006 carried the 9→10 legacy
+# transition; migration 010 carries the 2026 mid-year revision
+# (merge the two boundary/tenure categories, rename Climate
+# Resilience→Climate Change and Human Dimensions→Human Dimensions of
+# Conservation, split out Demographics & Socioeconomic Data).
 CATEGORIES: tuple[str, ...] = (
-    "Jurisdictional & Political Boundaries",
-    "Land Designations & Tenure",
+    "Boundaries, Tenure & Governance",
     "Biodiversity & Ecosystems",
-    "Climate Resilience",
+    "Climate Change",
     "Connectivity & Wildlife Movement",
     "Species",
     "Water",
     "Land Cover, Land Use & Disturbance",
-    "Human Dimensions",
+    "Human Dimensions of Conservation",
     "Threats & Infrastructure",
+    "Demographics & Socioeconomic Data",
 )
 
 # Display name → on-disk folder name. The folder names follow the
 # Title_Case_Underscores convention from DESIGN.md §6 and match the
 # subdirectories scaffolded under library/spatial/.
 CATEGORY_FOLDERS: dict[str, str] = {
-    "Jurisdictional & Political Boundaries": "Juris_Political_Boundaries",
-    "Land Designations & Tenure": "Land_Designations_Tenure",
+    "Boundaries, Tenure & Governance": "Boundaries_Tenure_Governance",
     "Biodiversity & Ecosystems": "Biodiversity_Ecosystems",
-    "Climate Resilience": "Climate_Resilience",
+    "Climate Change": "Climate_Change",
     "Connectivity & Wildlife Movement": "Connectivity_Wildlife_Movement",
     "Species": "Species",
     "Water": "Water",
     "Land Cover, Land Use & Disturbance": "Land_Cover_Use_Disturbance",
-    "Human Dimensions": "Human_Dimensions",
+    "Human Dimensions of Conservation": "Human_Dimensions_Conservation",
     "Threats & Infrastructure": "Threats_Infrastructure",
+    "Demographics & Socioeconomic Data": "Demographics_Socioeconomic",
 }
 
 # Reverse mapping for parsing library paths back to display names
@@ -142,7 +145,8 @@ def is_valid_subcategory(category: str, subcategory: str | None) -> bool:
 KeywordEntry = str | tuple[str, int]
 
 CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
-    "Jurisdictional & Political Boundaries": (
+    "Boundaries, Tenure & Governance": (
+        # Boundaries (formerly "Jurisdictional & Political Boundaries")
         "boundary", "boundaries", "border", "borders",
         "province", "provincial", "state", "states",
         "jurisdiction", "jurisdictional", "admin", "administrative",
@@ -150,18 +154,14 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "municipal", "municipality",
         "census", "constituency", "constituencies",
         "international", "political",
-        # high-signal compound terms
         ("population_center", 2), ("population_centers", 2),
         ("management_unit", 2), ("management_units", 2),
-    ),
-    "Land Designations & Tenure": (
-        # Designations
+        # Designations / tenure (formerly "Land Designations & Tenure")
         "park", "parks", "wilderness",
         ("wma", 2), ("ipca", 2), ("iucn", 2),
         "conservation", "easement", "easements",
         "protected",
         "designation", "designations",
-        # Tenure / stewardship
         "tenure", "tenures", "stewardship",
         "first_nations", "treaty", "treaties",
     ),
@@ -169,15 +169,17 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "ecoregion", "ecoregions", "ecosystem", "ecosystems",
         "biodiversity", "biophysical", "biome", "biomes",
         "kba", "ecological", "benchmark", "benchmarks",
-        # Typology now lists DEM/LiDAR products under this category.
+        # Typology lists DEM/LiDAR/terrain products under this category.
         "elevation", "slope", "aspect", "hillshade",
         "lidar", "dem",
     ),
-    "Climate Resilience": (
+    "Climate Change": (
         "climate", "refugia", "refugium",
         "carbon", "biomass",
         "fire", "wildfire", "burn_regime", "disturbance_regime",
-        "temperature", "precipitation",
+        "velocity", "resilient", "resilience",
+        "temperature", "precipitation", "projection", "projections",
+        "normals",
     ),
     "Connectivity & Wildlife Movement": (
         "corridor", "corridors", "linkage", "linkages",
@@ -206,16 +208,17 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "vegetation", "forest", "grassland",
         "change_detection",
     ),
-    "Human Dimensions": (
-        "demographic", "demographics",
-        "socioeconomic", "socio_economic",
+    "Human Dimensions of Conservation": (
+        # Social-science / governance-research side. Population
+        # demographics + socioeconomic data now live in their own
+        # category (below), so those keywords are NOT here.
         "governance",
         "community", "communities",
         "stakeholder", "stakeholders",
         # "indigenous" lives here (per typology: "Indigenous-led
         # research"); the related-but-distinct "first_nations" sits
-        # under Land Designations & Tenure (typology: "First Nations
-        # lands").
+        # under Boundaries, Tenure & Governance (typology: "First
+        # Nations lands").
         "indigenous",
         "attitudes", "perception", "perceptions",
         "survey", "surveys",
@@ -226,6 +229,12 @@ CATEGORY_KEYWORDS: dict[str, tuple[KeywordEntry, ...]] = {
         "extraction", "development",
         "footprint", "footprints", "infrastructure", "infras",
         "cumulative", "cumulative_effects",
+        "trail", "trails",
+    ),
+    "Demographics & Socioeconomic Data": (
+        "demographic", "demographics",
+        "socioeconomic", "socio_economic",
+        "population",
     ),
 }
 

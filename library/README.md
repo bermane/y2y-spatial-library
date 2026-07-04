@@ -12,12 +12,12 @@ it lives in `queue/` until it does.
 library/
 ├── spatial/                       # dataset_type = 'spatial'
 │   ├── Biodiversity_Ecosystems/
-│   ├── Climate_Resilience/
+│   ├── Boundaries_Tenure_Governance/  # merged boundaries + tenure (migration 010)
+│   ├── Climate_Change/
 │   ├── Connectivity_Wildlife_Movement/
-│   ├── Human_Dimensions/           # new in 2026 typology revision
-│   ├── Juris_Political_Boundaries/
+│   ├── Demographics_Socioeconomic/    # new in the 2026 mid-year revision
+│   ├── Human_Dimensions_Conservation/
 │   ├── Land_Cover_Use_Disturbance/
-│   ├── Land_Designations_Tenure/
 │   ├── Species/                    # only category with subcategory folders
 │   │   ├── Caribou/
 │   │   ├── Elk/
@@ -39,7 +39,7 @@ For datasets the steward wants published to AGOL as Vector Tile
 Layers (rather than Feature Layers), the canonical `.gpkg` lives
 in `spatial/<Category>/` as usual, AND a manually-built `.vtpk`
 lives here as a sibling, flat (no category subfolders). The VTPK
-filename matches the GPKG stem — e.g. `library/spatial/Land_Designations_Tenure/parks.gpkg`
+filename matches the GPKG stem — e.g. `library/spatial/Boundaries_Tenure_Governance/parks.gpkg`
 pairs with `library/vtpk/parks.vtpk`.
 
 The pipeline never writes VTPKs directly. Stewards build them

@@ -70,7 +70,7 @@ def test_update_rejects_movement_bound_field(project_tree, populate_dataset) -> 
     with pytest.raises(lifecycle.LifecycleError, match="cannot update"):
         lifecycle.update(
             project_tree["db"],
-            dataset_id=dataset_id, fields={"category": "Climate Resilience"},
+            dataset_id=dataset_id, fields={"category": "Climate Change"},
             actor="Ethan",
         )
 

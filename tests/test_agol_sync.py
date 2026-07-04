@@ -32,12 +32,12 @@ def test_compute_target_folder_mirrors_catalogue_folder() -> None:
     the steward sees in ``library/spatial/``."""
     assert agol_sync.compute_target_folder("Species") == "Species"
     assert (
-        agol_sync.compute_target_folder("Jurisdictional & Political Boundaries")
-        == "Juris_Political_Boundaries"
+        agol_sync.compute_target_folder("Boundaries, Tenure & Governance")
+        == "Boundaries_Tenure_Governance"
     )
     assert (
-        agol_sync.compute_target_folder("Land Designations & Tenure")
-        == "Land_Designations_Tenure"
+        agol_sync.compute_target_folder("Climate Change")
+        == "Climate_Change"
     )
 
 
@@ -49,7 +49,7 @@ def test_compute_target_folder_returns_bare_name_with_no_slash() -> None:
     silently failed against the same string, stranding feature layers
     in My Content root. Stripping the prefix sidesteps both bugs."""
     for cat in (
-        "Species", "Water", "Jurisdictional & Political Boundaries",
+        "Species", "Water", "Boundaries, Tenure & Governance",
         "Land Cover, Land Use & Disturbance",
     ):
         out = agol_sync.compute_target_folder(cat)
@@ -72,11 +72,14 @@ def test_compute_agol_category_is_identity_for_typology_categories() -> None:
     """The AGOL Content Category equals the catalogue display name verbatim,
     never the underscored folder name."""
     assert (
-        agol_sync.compute_agol_category("Jurisdictional & Political Boundaries")
-        == "Jurisdictional & Political Boundaries"
+        agol_sync.compute_agol_category("Boundaries, Tenure & Governance")
+        == "Boundaries, Tenure & Governance"
     )
     assert agol_sync.compute_agol_category("Species") == "Species"
-    assert agol_sync.compute_agol_category("Human Dimensions") == "Human Dimensions"
+    assert (
+        agol_sync.compute_agol_category("Human Dimensions of Conservation")
+        == "Human Dimensions of Conservation"
+    )
 
 
 def test_compute_agol_category_rejects_unknown() -> None:
@@ -184,9 +187,9 @@ def test_compute_item_properties_strips_tag_whitespace_and_drops_empties() -> No
 
 def test_compute_item_properties_assigns_category_as_full_display_name() -> None:
     row = _sample_row()
-    row["category"] = "Jurisdictional & Political Boundaries"
+    row["category"] = "Boundaries, Tenure & Governance"
     props = agol_sync.compute_item_properties(row)
-    assert props["categories"] == ["/Categories/Jurisdictional & Political Boundaries"]
+    assert props["categories"] == ["/Categories/Boundaries, Tenure & Governance"]
 
 
 def test_compute_item_properties_includes_subcategory_as_hierarchical_path() -> None:
@@ -360,7 +363,7 @@ def test_ensure_org_categories_orphans_old_categories() -> None:
                 {"title": "Grizzly Bear", "categories": []},
             ]},
             {"title": "Water", "categories": []},
-            {"title": "Climate Resilience", "categories": []},
+            {"title": "Climate Change", "categories": []},
         ],
     }]
     written = _patch_schema_property(gis, old_schema)
@@ -368,16 +371,17 @@ def test_ensure_org_categories_orphans_old_categories() -> None:
     diff = agol_sync.ensure_org_categories(gis, cfg, apply=True)
 
     assert diff.applied is True
-    # 'Water' and 'Climate Resilience' carry over; the rest of the old
-    # categories are orphaned.
+    # 'Water' and 'Climate Change' are canonical → carry over; the rest of
+    # the old categories are orphaned.
     assert "Water" in diff.unchanged
-    assert "Climate Resilience" in diff.unchanged
+    assert "Climate Change" in diff.unchanged
     assert "Administrative and Jurisdictional Boundaries" in diff.will_orphan
     assert "Protected Areas and Conservation Lands" in diff.will_orphan
     assert "Species and Species at Risk" in diff.will_orphan
-    # All 10 catalogue categories minus the 2 already-present get added.
-    assert "Jurisdictional & Political Boundaries" in diff.will_add
-    assert "Human Dimensions" in diff.will_add
+    # New-typology categories not already present get added.
+    assert "Boundaries, Tenure & Governance" in diff.will_add
+    assert "Human Dimensions of Conservation" in diff.will_add
+    assert "Demographics & Socioeconomic Data" in diff.will_add
     assert "Species" in diff.will_add
     assert len(written) == 1
 
@@ -557,8 +561,8 @@ def _adoption_row(dataset_id: str = "ds_adopt_test") -> dict:
     from tests.test_agol_push import _full_row
     row = _full_row(
         dataset_id=dataset_id,
-        file_path="Juris_Political_Boundaries/fortress_mountain.gpkg",
-        category="Jurisdictional & Political Boundaries",
+        file_path="Boundaries_Tenure_Governance/fortress_mountain.gpkg",
+        category="Boundaries, Tenure & Governance",
         agol_item_id="ad594173963245388b45bd2a123f9466",
         sync_status="unpublished",
     )
@@ -579,7 +583,7 @@ def _make_agol_item(
     tags=("test", "y2y"),
     access_information="Ack.",
     license_info="TOU.",
-    categories=("Jurisdictional & Political Boundaries",),
+    categories=("Boundaries, Tenure & Governance",),
     created=1700000000000,
 ) -> MagicMock:
     """A MagicMock that looks like an arcgis.gis.Item with the
@@ -645,7 +649,7 @@ def test_adopt_row_marks_conflict_when_agol_differs(
         tags=["test", "y2y"],
         access_information="Ack.",
         license_info="TOU.",
-        categories=["Jurisdictional & Political Boundaries"],
+        categories=["Boundaries, Tenure & Governance"],
     )
     gis = MagicMock()
     gis.content.get.return_value = item

@@ -122,7 +122,7 @@ def compute_target_folder(category: str) -> str:
     """Catalogue category → AGOL folder name.
 
     Returns the underscored category folder name (e.g. ``"Species"``,
-    ``"Water"``, ``"Juris_Political_Boundaries"``) — matching the
+    ``"Water"``, ``"Boundaries_Tenure_Governance"``) — matching the
     on-disk folder names under ``library/spatial/``.
 
     AGOL folders are a **flat namespace** — no nesting, no slashes in
@@ -149,7 +149,7 @@ def compute_agol_category(category: str) -> str:
 
     Identity by design: the AGOL "Content Categories" facet should
     carry the full display name verbatim (e.g.
-    ``"Jurisdictional & Political Boundaries"``), never the
+    ``"Boundaries, Tenure & Governance"``), never the
     underscored folder form. See DESIGN.md §15.
 
     Raises ``AgolError`` if the category isn't in the typology.
@@ -272,7 +272,7 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     #
     #   * AGOL stores categories VERBATIM — no server-side
     #     normalisation. Whatever string we send is what's stored.
-    #   * Bare top-level ("Climate Resilience") resolves and
+    #   * Bare top-level ("Climate Change") resolves and
     #     displays correctly (legacy items were pushed this way).
     #   * BUT a relative nested path ("Species/Other") does NOT
     #     resolve — the item page shows only the leaf ("Other"),

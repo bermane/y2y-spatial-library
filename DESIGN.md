@@ -222,7 +222,7 @@ exporter's layout is in `pipeline/export_xlsx.py`.
 | ------------- | ----------------- | --------------------------------------------------------------------- |
 | `dataset_id`  | string (opaque)   | Stable across renames/moves. Primary key. Format `ds_<26-char ULID>`; the schema CHECK enforces the `ds_` prefix. Assigned at scan. |
 | `dataset_type` | enum             | `'spatial'` (only value today). Reserved for future expansion to other library types — see §14. |
-| `category`    | enum              | One of the 10 taxonomy categories — stored as the **display name** (full name from `Spatial_Data_Typology.xlsx`, e.g. `Jurisdictional & Political Boundaries`). Schema CHECK enforces the 10-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Juris_Political_Boundaries`); the pipeline maps display↔folder. Migration 006 carried the 9→10 transition adopted at the 2026 director workshop. |
+| `category`    | enum              | One of the 10 taxonomy categories — stored as the **display name** (full name from `Spatial_Data_Typology.xlsx`, e.g. `Boundaries, Tenure & Governance`). Schema CHECK enforces the 10-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Boundaries_Tenure_Governance`); the pipeline maps display↔folder. Migration 006 carried the 9→10 director-workshop transition; migration 010 the 2026 mid-year revision (merge the two boundary/tenure categories, rename Climate Resilience→Climate Change and Human Dimensions→Human Dimensions of Conservation, add Demographics & Socioeconomic Data). |
 | `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`, `Multi-Species`); folder is `Grizzly_Bear` / `Multi_Species`. Only `Species` has subcategories in Phase A. Display names use **spaces or hyphens**, never underscores — the underscore is reserved for filesystem folder names. `Spatial_Data_Typology.xlsx` matches this convention; if a future revision of the typology document drifts back to underscored sub-category labels, treat it as a typo in the document, not a steward decision to change display naming. |
 | `file_path`   | string (relative) | Path of the **canonical** file relative to `library/spatial/`, using folder names. Set at approve. (Pre-migration-002 the path was relative to `library/`; the relative segments did not change.) |
 | `format`      | enum              | Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
@@ -1361,10 +1361,11 @@ detached leaf (verified live 2026-05-28). Multi-rendition (one dataset
 ### Item categories & folders
 
 - AGOL **folders** mirror the catalogue's underscored category folders
-  (`Species`, `Juris_Political_Boundaries`, …), flat namespace.
+  (`Species`, `Boundaries_Tenure_Governance`, …), flat namespace.
 - AGOL **content categories** mirror the full display names
-  (`Jurisdictional & Political Boundaries`). `init-categories` writes
-  the 10-category typology (+ Species' subcategories) to the org once.
+  (`Boundaries, Tenure & Governance`). `init-categories` writes
+  the 10-category typology (+ Species' subcategories) to the org once;
+  re-run it whenever the typology changes (e.g. migration 010).
 
 ### Adoption
 

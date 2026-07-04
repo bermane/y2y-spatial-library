@@ -13,16 +13,17 @@ from pipeline import taxonomy
 # --- structure ----------------------------------------------------------
 
 def test_categories_count_is_ten() -> None:
-    """Post-2026-workshop typology has 10 categories (added Human Dimensions
-    and Land Designations & Tenure; removed Protected Areas & Conservation
-    Lands which folded into the latter)."""
+    """The 2026 mid-year revision keeps 10 categories: −1 from merging the
+    two boundary/tenure categories into 'Boundaries, Tenure & Governance',
+    +1 from adding 'Demographics & Socioeconomic Data'."""
     assert len(taxonomy.CATEGORIES) == 10
 
 
 def test_categories_use_display_names() -> None:
-    assert "Jurisdictional & Political Boundaries" in taxonomy.CATEGORIES
+    assert "Boundaries, Tenure & Governance" in taxonomy.CATEGORIES
     assert "Species" in taxonomy.CATEGORIES
     assert "Connectivity & Wildlife Movement" in taxonomy.CATEGORIES
+    assert "Demographics & Socioeconomic Data" in taxonomy.CATEGORIES
 
 
 def test_category_folders_round_trip() -> None:
@@ -48,7 +49,7 @@ def test_subcategory_folders_round_trip() -> None:
 def test_category_requires_subcategory_only_for_species() -> None:
     assert taxonomy.category_requires_subcategory("Species")
     assert not taxonomy.category_requires_subcategory("Water")
-    assert not taxonomy.category_requires_subcategory("Climate Resilience")
+    assert not taxonomy.category_requires_subcategory("Climate Change")
 
 
 def test_is_valid_subcategory_for_species() -> None:
@@ -79,18 +80,15 @@ def test_ingest_statuses_exclude_tombstoned() -> None:
 
 # --- guess_category / guess_subcategory --------------------------------
 
-def test_guess_category_jurisdictional_boundaries() -> None:
-    assert taxonomy.guess_category("Y2Y_RegionBoundary") == "Jurisdictional & Political Boundaries"
-    assert taxonomy.guess_category("province_borders_2024") == "Jurisdictional & Political Boundaries"
-    assert taxonomy.guess_category("municipal_census_2021") == "Jurisdictional & Political Boundaries"
-
-
-def test_guess_category_first_nations_lands_is_tenure_not_boundary() -> None:
-    """Post-2026 typology: First Nations lands are land-tenure, not
-    political boundary. The keyword ``first_nations`` now resolves to
-    Land Designations & Tenure (was Administrative & Jurisdictional
-    Boundaries pre-revision)."""
-    assert taxonomy.guess_category("First_Nations_Reserves") == "Land Designations & Tenure"
+def test_guess_category_boundaries_tenure_governance() -> None:
+    """The 2026 mid-year revision merged the old boundary + tenure
+    categories into one, so boundaries, First Nations lands, parks, and
+    tenure keywords all resolve to 'Boundaries, Tenure & Governance'."""
+    btg = "Boundaries, Tenure & Governance"
+    assert taxonomy.guess_category("Y2Y_RegionBoundary") == btg
+    assert taxonomy.guess_category("province_borders_2024") == btg
+    assert taxonomy.guess_category("municipal_census_2021") == btg
+    assert taxonomy.guess_category("First_Nations_Reserves") == btg
 
 
 def test_guess_category_water() -> None:
@@ -105,12 +103,19 @@ def test_guess_category_species() -> None:
 
 
 def test_guess_category_climate() -> None:
-    assert taxonomy.guess_category("climate_refugia_2050") == "Climate Resilience"
+    assert taxonomy.guess_category("climate_refugia_2050") == "Climate Change"
 
 
 def test_guess_category_protected_areas() -> None:
-    assert taxonomy.guess_category("national_parks_canada") == "Land Designations & Tenure"
-    assert taxonomy.guess_category("conservation_easements") == "Land Designations & Tenure"
+    btg = "Boundaries, Tenure & Governance"
+    assert taxonomy.guess_category("national_parks_canada") == btg
+    assert taxonomy.guess_category("conservation_easements") == btg
+
+
+def test_guess_category_demographics() -> None:
+    demo = "Demographics & Socioeconomic Data"
+    assert taxonomy.guess_category("population_demographics_2021") == demo
+    assert taxonomy.guess_category("socioeconomic_indices") == demo
 
 
 def test_guess_category_threats() -> None:
@@ -144,17 +149,15 @@ def test_guess_subcategory_returns_none_when_no_match() -> None:
 
 # --- weighted keywords -------------------------------------------------
 
-def test_ipca_outweighs_boundary_for_protected_areas() -> None:
-    """Tied keyword counts: 'ipca' (high-signal, weight 2) beats 'boundary' (weight 1)."""
-    assert taxonomy.guess_category("ross_river_ipca_boundary") == "Land Designations & Tenure"
-
-
-def test_wma_outweighs_boundary() -> None:
-    assert taxonomy.guess_category("highwood_wma_boundary") == "Land Designations & Tenure"
-
-
-def test_iucn_outweighs_boundary() -> None:
-    assert taxonomy.guess_category("iucn_areas_boundary") == "Land Designations & Tenure"
+def test_tenure_keywords_resolve_to_boundaries_tenure_governance() -> None:
+    """The 2026 merge folds boundaries and land-designation/tenure into one
+    category, so high-signal tenure terms (ipca/wma/iucn) that co-occur with
+    'boundary' all resolve to 'Boundaries, Tenure & Governance' — no longer a
+    cross-category tiebreak, just the same category."""
+    btg = "Boundaries, Tenure & Governance"
+    assert taxonomy.guess_category("ross_river_ipca_boundary") == btg
+    assert taxonomy.guess_category("highwood_wma_boundary") == btg
+    assert taxonomy.guess_category("iucn_areas_boundary") == btg
 
 
 def test_gb_keyword_resolves_to_grizzly_bear_subcategory() -> None:

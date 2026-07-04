@@ -77,17 +77,43 @@ running `y2y`):
 
 ## 4. Connect to AGOL
 
-You publish to **your own** login in the shared Y2Y Conservation Atlas org.
+You publish to **your own** login in the shared Y2Y Conservation Atlas org. This
+uses named-user OAuth: a registered **OAuth application** (identified by a
+"client id") is the conduit, and *you* are the identity that signs in.
 
-1. Set the OAuth client id (Ethan gives you the value). For the current window:
-   ```powershell
-   > $env:Y2Y_AGOL_CLIENT_ID = "PASTE_VALUE_HERE"
+### 4a. Register your own OAuth application (one time, ~5 minutes)
+
+You want an app **you own**, so the integration doesn't depend on anyone else's
+account. In ArcGIS Online (signed in as yourself):
+
+1. **Content → New item → Developer credentials.**
+   *(Older orgs: **New item → Application**, then open its Settings.)*
+2. Choose **OAuth 2.0**.
+3. Add a **Redirect URL** of exactly:
    ```
-   To make it permanent (so you don't retype it), set a User environment
-   variable named `Y2Y_AGOL_CLIENT_ID` via **Start → "Edit environment variables
-   for your account"**, then reopen PowerShell.
+   urn:ietf:wg:oauth:2.0:oob
+   ```
+   This is the critical setting — it's the "out-of-band" redirect the Python
+   login flow uses. Without it, `login` fails.
+4. Save, then copy the **Client ID** (also called App ID) — a short string like
+   `aB3xY…`.
 
-2. Log in (opens a browser once; sign in as **yourself**):
+> If Ethan hands you a client id instead, you can use that to get started — but
+> registering your own (above) is the durable choice, since a client id tied to
+> someone else's account breaks if that account is ever removed.
+
+### 4b. Set the client id + log in
+
+1. Set the client id from step 4a. For the current window:
+   ```powershell
+   > $env:Y2Y_AGOL_CLIENT_ID = "PASTE_YOUR_CLIENT_ID_HERE"
+   ```
+   To make it permanent (so you don't retype it every session), set a User
+   environment variable named `Y2Y_AGOL_CLIENT_ID` via **Start → "Edit
+   environment variables for your account"**, then reopen PowerShell.
+
+2. Log in (opens a browser once; sign in as **yourself**, then paste the code
+   back into PowerShell):
    ```powershell
    > y2y agol-sync login
    ```
@@ -98,8 +124,16 @@ You publish to **your own** login in the shared Y2Y Conservation Atlas org.
    ```
    Should print your username with no browser popping up.
 
-> **Do NOT run `y2y agol-sync init-categories`.** The org's category schema
-> already exists (it's org-wide). That command is only for a brand-new org.
+> **AGOL org categories.** The org's category schema must match the current
+> typology (10 categories; see README "Taxonomy"). This is set **once, org-wide**
+> by someone with org-admin rights:
+> ```powershell
+> > y2y agol-sync init-categories --dry-run   # preview the changes
+> > y2y agol-sync init-categories             # apply
+> ```
+> If Ethan (or another admin) has already run it for the current typology, you
+> do **not** need to — check with him first. Re-running is only needed when the
+> typology itself changes.
 
 ---
 
