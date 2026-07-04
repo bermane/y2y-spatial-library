@@ -3,6 +3,12 @@
 Authoritative source for finalized spatial datasets used by the Yellowstone to
 Yukon Conservation Initiative (Y2Y).
 
+**Docs:** new operator on Windows → start with
+[ONBOARDING_WINDOWS.md](ONBOARDING_WINDOWS.md). Everyday commands →
+[CHEATSHEET.html](CHEATSHEET.html); full reference →
+[COMMAND_REFERENCE.html](COMMAND_REFERENCE.html); design →
+[DESIGN.md](DESIGN.md); operating/sync rules → [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Who this is for
 
 Primary user today: the Y2Y data steward. Eventually, Y2Y conservation and

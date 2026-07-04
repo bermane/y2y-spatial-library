@@ -28,7 +28,7 @@ how-to see `README.md`.
 ## 1. Environment & invocation
 
 ```bash
-cd /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data && source .venv/bin/activate
+cd /path/to/Spatial_Data && source .venv/bin/activate
 ```
 
 ```

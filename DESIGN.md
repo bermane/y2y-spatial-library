@@ -1417,7 +1417,7 @@ Not auto-installed — sample configs for the steward to wire up.
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
-    <string>cd /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data &amp;&amp; source .venv/bin/activate &amp;&amp; y2y agol-sync reconcile --actor reconcile-cron</string>
+    <string>cd /path/to/Spatial_Data &amp;&amp; source .venv/bin/activate &amp;&amp; y2y agol-sync reconcile --actor reconcile-cron</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>

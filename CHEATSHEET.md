@@ -4,7 +4,7 @@ Everyday commands. Full detail in `COMMAND_REFERENCE.md`. Design in `DESIGN.md`.
 
 ```bash
 # START OF SESSION (run once per new terminal)
-cd /Users/ethanberman/Dropbox/Earthline/Y2Y/Spatial_Data && source .venv/bin/activate
+cd /path/to/Spatial_Data && source .venv/bin/activate
 ```
 
 `inventory/inventory.db` is the source of truth. The xlsx is a read-only view. AGOL is downstream.
