@@ -100,6 +100,13 @@ That creates `library/` (with the category folders), `queue/`, `inventory/`,
 and `reports/` at that path. You drop source files into its `queue\incoming\`,
 and the catalogue (`inventory\inventory.db`) is created there on first use.
 
+**Set the data folder once so you never retype it.** The pipeline reads a
+`Y2Y_ROOT` environment variable as its default data root. Set it as a permanent
+User variable via **Start → "Edit environment variables for your account" →
+New…**, name `Y2Y_ROOT`, value = the same SharePoint path you used above. Reopen
+PowerShell afterward. From then on, every `y2y` command uses it automatically —
+no `--root`, no path retyping.
+
 > **The one sync rule:** the live `inventory.db` sits in SharePoint, so
 > **pause OneDrive/SharePoint sync while running `y2y` commands** and resume
 > after (system tray → OneDrive → gear → *Pause syncing*). The `library/` files
@@ -172,14 +179,13 @@ account. In ArcGIS Online (signed in as yourself):
 
 ## 5. Your first ingest (the tutorial)
 
-**Each work session** starts by activating the local venv and pointing the
-pipeline at the SharePoint data folder. Set a `$root` variable once so you don't
-retype the long path, and **pause OneDrive sync** before running commands:
+**Each work session:** activate the local venv, then **pause OneDrive sync**
+before running commands. (With `Y2Y_ROOT` set from §3b, `y2y` already knows where
+the data lives — no path to type.)
 
 ```powershell
-> C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
-> $root = "C:\Users\<you>\OneDrive - ...\Y2Y_Spatial_Library"
-# (pause OneDrive sync now: system tray -> OneDrive -> gear -> Pause syncing)
+C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
+# pause OneDrive sync now: system tray -> OneDrive -> gear -> Pause syncing
 ```
 
 The catalogue starts empty. Each layer goes **scan → review → approve →
@@ -190,12 +196,12 @@ publish**. Repeat for each tutorial layer.
 
 2. **Scan** — the pipeline inspects it and stages a review sheet:
    ```powershell
-   > y2y --root $root ingest
+   y2y ingest
    ```
 
 3. **Review** — open the sheet, fill the metadata, mark it ready:
    ```powershell
-   > start "$root\queue\processing\pending.xlsx"
+   start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"
    ```
    - Fill the required fields: `title`, `summary`, `description`, `tags`
      (semicolon-separated), `terms_of_use`, `acknowledgements`, `data_steward`.
@@ -207,19 +213,19 @@ publish**. Repeat for each tutorial layer.
 
 4. **Approve** — validate + file into the library + catalogue:
    ```powershell
-   > y2y --root $root ingest --approve
+   y2y ingest --approve
    ```
 
 5. **Publish to AGOL:**
    ```powershell
-   > y2y --root $root agol-sync status              # find the dataset_id
-   > y2y --root $root agol-sync push <dataset_id>   # add --dry-run first to preview
+   y2y agol-sync status              # find the dataset_id
+   y2y agol-sync push <dataset_id>   # add --dry-run first to preview
    ```
    Then open the item in ArcGIS Online to confirm it's in your content with the
    right category, sharing, and thumbnail.
 
-> Every `y2y` command takes `--root $root`. (If you'd rather not type it each
-> time, `cd $root` first — `--root` then defaults to the current folder.)
+> `y2y` uses `Y2Y_ROOT` automatically. To override for a one-off (e.g. testing
+> against a different folder), pass `--root "C:\some\other\path"`.
 
 ---
 

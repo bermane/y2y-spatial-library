@@ -65,13 +65,20 @@ def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
     "--root",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
-    help="Project root. Defaults to current working directory.",
+    help="Project/data root. Precedence: --root, then the Y2Y_ROOT "
+         "environment variable, then the current working directory.",
 )
 @click.pass_context
 def cli(ctx: click.Context, root: Path | None) -> None:
     """Y2Y Spatial Library pipeline CLI."""
     ctx.ensure_object(dict)
-    ctx.obj["root"] = (root or Path.cwd()).resolve()
+    # Resolve the data root: explicit --root wins; else the Y2Y_ROOT env
+    # var (set once, e.g. to a SharePoint library folder, so the steward
+    # never retypes the path); else the current working directory.
+    if root is None:
+        env_root = os.environ.get("Y2Y_ROOT")
+        root = Path(env_root) if env_root else Path.cwd()
+    ctx.obj["root"] = Path(root).resolve()
 
 
 def _auto_export_xlsx(ctx: click.Context) -> None:
