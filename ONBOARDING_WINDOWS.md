@@ -31,29 +31,35 @@ PowerShell"**. `>` marks a line you type.
 
 ---
 
-## 2. Get the code
+## 2. Get the code (on a LOCAL path, not SharePoint)
+
+The **code** lives on a short local path; the **data** (library + catalogue)
+lives in SharePoint (set up in §3b). Keeping the code — and especially its
+`.venv` — out of SharePoint avoids two real problems: Windows' 260-character
+path limit (a long SharePoint path + a deep `.venv` breaks installs) and
+syncing hundreds of MB of machine-specific files into the shared library.
 
 The repository is public, so no login is needed.
 
 **With Git (PowerShell):**
 ```powershell
-> cd $HOME\Documents
+> mkdir C:\Y2Y
+> cd C:\Y2Y
 > git clone https://github.com/bermane/y2y-spatial-library.git
 > cd y2y-spatial-library
 ```
 
-**Or with GitHub Desktop:** *File → Clone repository →* paste the URL above →
-Clone, then open the folder location.
+**Or with GitHub Desktop:** *File → Clone repository →* paste the URL, and set
+the **Local path** to `C:\Y2Y` (not a OneDrive/SharePoint folder).
 
-> **Where to put it:** pick a stable folder like `Documents\y2y-spatial-library`.
-> See `DEPLOYMENT.md` for how this relates to your SharePoint/OneDrive setup —
-> in short, the live catalogue must **not** be syncing while you run commands.
+> If you previously cloned into a SharePoint folder, delete that copy — the
+> code should not live there.
 
 ---
 
 ## 3. Install the pipeline
 
-From inside the `y2y-spatial-library` folder:
+From inside `C:\Y2Y\y2y-spatial-library`:
 
 ```powershell
 > powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
@@ -72,6 +78,33 @@ running `y2y`):
 
 > If activation is blocked by execution policy, run once:
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and try again.
+
+---
+
+## 3b. Set up the data folder (in SharePoint)
+
+The **data** — the `library/` files, the `inventory/` catalogue, and the
+`queue/` — lives in your SharePoint folder so the library is shared with the
+team. The pipeline reaches it via a `--root` pointer, so the local code and the
+SharePoint data stay cleanly separated.
+
+From inside `C:\Y2Y\y2y-spatial-library`, scaffold the data folder once (point
+it at your SharePoint library location):
+
+```powershell
+> powershell -ExecutionPolicy Bypass -File .\scripts\new_data_root.ps1 `
+    -DataRoot "C:\Users\<you>\OneDrive - ...\Y2Y_Spatial_Library"
+```
+
+That creates `library/` (with the category folders), `queue/`, `inventory/`,
+and `reports/` at that path. You drop source files into its `queue\incoming\`,
+and the catalogue (`inventory\inventory.db`) is created there on first use.
+
+> **The one sync rule:** the live `inventory.db` sits in SharePoint, so
+> **pause OneDrive/SharePoint sync while running `y2y` commands** and resume
+> after (system tray → OneDrive → gear → *Pause syncing*). The `library/` files
+> themselves are static after ingest and sync fine. Full rationale in
+> `DEPLOYMENT.md`.
 
 ---
 
@@ -139,19 +172,30 @@ account. In ArcGIS Online (signed in as yourself):
 
 ## 5. Your first ingest (the tutorial)
 
+**Each work session** starts by activating the local venv and pointing the
+pipeline at the SharePoint data folder. Set a `$root` variable once so you don't
+retype the long path, and **pause OneDrive sync** before running commands:
+
+```powershell
+> C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
+> $root = "C:\Users\<you>\OneDrive - ...\Y2Y_Spatial_Library"
+# (pause OneDrive sync now: system tray -> OneDrive -> gear -> Pause syncing)
+```
+
 The catalogue starts empty. Each layer goes **scan → review → approve →
 publish**. Repeat for each tutorial layer.
 
-1. **Drop a source file** (a `.gpkg`, `.shp`, `.tif`, …) into `queue\incoming\`.
+1. **Drop a source file** (a `.gpkg`, `.shp`, `.tif`, …) into the data folder's
+   `queue\incoming\`.
 
 2. **Scan** — the pipeline inspects it and stages a review sheet:
    ```powershell
-   > y2y ingest
+   > y2y --root $root ingest
    ```
 
 3. **Review** — open the sheet, fill the metadata, mark it ready:
    ```powershell
-   > start .\queue\processing\pending.xlsx
+   > start "$root\queue\processing\pending.xlsx"
    ```
    - Fill the required fields: `title`, `summary`, `description`, `tags`
      (semicolon-separated), `terms_of_use`, `acknowledgements`, `data_steward`.
@@ -163,16 +207,19 @@ publish**. Repeat for each tutorial layer.
 
 4. **Approve** — validate + file into the library + catalogue:
    ```powershell
-   > y2y ingest --approve
+   > y2y --root $root ingest --approve
    ```
 
 5. **Publish to AGOL:**
    ```powershell
-   > y2y agol-sync status                 # find the dataset_id (or note it from approve)
-   > y2y agol-sync push <dataset_id>      # add --dry-run first to preview
+   > y2y --root $root agol-sync status              # find the dataset_id
+   > y2y --root $root agol-sync push <dataset_id>   # add --dry-run first to preview
    ```
    Then open the item in ArcGIS Online to confirm it's in your content with the
    right category, sharing, and thumbnail.
+
+> Every `y2y` command takes `--root $root`. (If you'd rather not type it each
+> time, `cd $root` first — `--root` then defaults to the current folder.)
 
 ---
 
