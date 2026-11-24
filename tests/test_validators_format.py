@@ -54,7 +54,7 @@ def test_multipolygon_2d_is_not_falsely_rejected(tmp_path: Path) -> None:
     poly_b = Polygon([(2, 2), (3, 2), (3, 3), (2, 3), (2, 2)])
     gdf = gpd.GeoDataFrame(
         {"id": [1]},
-        geometry=[gpd.GeoSeries([poly_a, poly_b]).unary_union],
+        geometry=[gpd.GeoSeries([poly_a, poly_b]).union_all()],
         crs="ESRI:102008",
     )
     gdf.to_file(path, driver="GPKG")
