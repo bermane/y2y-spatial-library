@@ -157,6 +157,7 @@
 <ul>
   <li><code>--root DIRECTORY</code> — project root (default: cwd). All paths (<code>queue/</code>, <code>library/</code>, <code>inventory/</code>, <code>reports/</code>) resolve under it.</li>
   <li><code>y2y --help</code> — list all commands. <code>y2y &lt;command&gt; --help</code> — options for one.</li>
+  <li><code>y2y --version</code> — print the installed version (see <code>CHANGELOG.md</code>).</li>
 </ul>
 <div class="note"><strong>Source of truth:</strong> <code>inventory/inventory.db</code> (SQLite). <code>inventory.xlsx</code> is a rendered read-only view. AGOL is a downstream publication target — catalogue mutations never block on it.</div>
 <p><strong>Common option — <code>--actor NAME</code>:</strong> every mutating command accepts it to record who made the change in the changelog. Defaults to <code>$USER</code>.</p>
