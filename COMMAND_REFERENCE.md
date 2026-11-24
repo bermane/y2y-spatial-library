@@ -101,7 +101,8 @@ from the format and `authoritative` is pre-filled `yes`. Optional:
   empty. Enter `NA` (any letter case) on its own if the dataset should
   have no tags; `NA` is never published as a tag and cannot be mixed
   with real tags.
-- `authoritative`: `yes` or `no`.
+- `authoritative`: `yes` or `no`. `yes` gives the ArcGIS Online item the
+  "Authoritative" badge at push; `no` removes it.
 - `temporal_start` / `temporal_end`: the period the data covers, as
   `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. Leave empty if it does not apply.
 - `agol_item_id`: leave empty. It is filled in when the dataset is

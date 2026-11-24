@@ -228,6 +228,9 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     ``category`` (+subcategory)  ``categories`` (1 absolute path)
     ===========================  ================
 
+    ``authoritative`` is not an item property; push() applies it
+    separately as the content status (:func:`_apply_content_status`).
+
     The ``categories`` value is always a single-element list holding
     an absolute ``/Categories/<Parent>[/<Sub>]`` path — see the
     single-category invariant note at the categories block below.
@@ -912,6 +915,9 @@ def push(
 
     # ----- sharing -----------------------------------------------------
     _apply_sharing(item, sharing_payload)
+
+    # ----- authoritative badge (best-effort) ---------------------------
+    _apply_content_status(item, row, properties)
 
     # ----- catalogue update --------------------------------------------
     now = utc_now_iso()
@@ -2091,6 +2097,87 @@ def _resolve_sharing(
     return {"everyone": False, "org": True, "groups": [group_id]}
 
 
+# AGOL content-status values that show the "Authoritative" badge.
+_AUTHORITATIVE_STATUSES: frozenset[str] = frozenset({
+    "org_authoritative", "public_authoritative",
+})
+# What push() sets for an authoritative row. ``public_authoritative``
+# needs a verified organisation, so the pipeline never sets it; if the
+# steward has set it by hand, push leaves it alone.
+_AUTHORITATIVE_STATUS = "org_authoritative"
+
+
+def compute_content_status(row: dict[str, Any]) -> str | None:
+    """Return the AGOL content status the catalogue row asks for.
+
+    ``org_authoritative`` when the row's ``authoritative`` flag is set
+    (or missing, since the column defaults to yes), ``None`` when the
+    steward marked the dataset as not authoritative.
+    """
+    value = row.get("authoritative")
+    if value is None:
+        return _AUTHORITATIVE_STATUS
+    return _AUTHORITATIVE_STATUS if steward_fields.parse_authoritative(value) else None
+
+
+def _current_content_status(item: Any) -> str:
+    value = getattr(item, "content_status", "")
+    return value if isinstance(value, str) else ""
+
+
+def _apply_content_status(
+    item: Any, row: dict[str, Any], properties: dict[str, Any],
+) -> None:
+    """Make the item's "Authoritative" badge match the catalogue row.
+
+    * ``authoritative`` yes → set ``org_authoritative``, unless the item
+      already carries an authoritative status.
+    * ``authoritative`` no → clear an authoritative status. Any other
+      status (``deprecated``) is the steward's own and is left alone.
+
+    Marking content authoritative needs an administrator, or a role
+    with that privilege. AGOL is downstream, so a refusal must never
+    fail the push: it is recorded with ``_record_warning`` and reaches
+    ``internal_notes`` and the changelog. The SDK's setter does not
+    raise when AGOL declines, so the status is read back to confirm.
+    """
+    try:
+        wanted = compute_content_status(row)
+        current = _current_content_status(item)
+        if wanted is None:
+            if current not in _AUTHORITATIVE_STATUSES:
+                return
+        elif current in _AUTHORITATIVE_STATUSES:
+            return
+
+        item.content_status = wanted
+        after = _current_content_status(item)
+        ok = (after in _AUTHORITATIVE_STATUSES) if wanted else (
+            after not in _AUTHORITATIVE_STATUSES
+        )
+        if not ok:
+            raise AgolError("AGOL did not accept the change")
+    except Exception as exc:
+        action = (
+            "mark the item Authoritative" if compute_content_status_safe(row)
+            else "remove the item's Authoritative badge"
+        )
+        _record_warning(properties, (
+            f"could not {action} on AGOL. The signed-in account needs to "
+            f"be an administrator or have the privilege to mark content "
+            f"as authoritative. Set it by hand on the item page, or fix "
+            f"the role and re-push. Underlying: {exc}"
+        ))
+
+
+def compute_content_status_safe(row: dict[str, Any]) -> str | None:
+    """:func:`compute_content_status`, treating an unreadable flag as yes."""
+    try:
+        return compute_content_status(row)
+    except ValueError:
+        return _AUTHORITATIVE_STATUS
+
+
 def _apply_sharing(item: Any, payload: dict[str, Any]) -> None:
     """Apply a sharing payload to an item.
 
@@ -2185,6 +2272,9 @@ def _format_push_plan(
         f"sharing:   org={sharing_payload.get('org')}, "
         f"everyone={sharing_payload.get('everyone')}, "
         f"groups={sharing_payload.get('groups')}",
+        "authoritative: "
+        + ("yes (AGOL badge set)" if compute_content_status_safe(row)
+           else "no (AGOL badge cleared)"),
     ]
     return "\n".join(lines)
 

@@ -32,6 +32,11 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - New `authoritative` column (`yes` / `no`, pre-filled `yes`), in the review
   sheet, the inventory and `y2y update`. An existing catalogue needs
   migration 011; a new one already has the column.
+- Pushing to ArcGIS Online now sets the item's "Authoritative" badge from that
+  column, and removes it when the column says `no`. This needs an account
+  that is an administrator or has the privilege to mark content as
+  authoritative. Without it the push still succeeds and a warning is written
+  to `internal_notes` and the changelog.
 - `temporal_start` and `temporal_end` can now be filled, in the review sheet
   and with `y2y update`.
 - `agol_item_id` is no longer filled in the review sheet. The first push to

@@ -182,6 +182,13 @@ account. In ArcGIS Online (signed in as yourself):
 > do **not** need to — check with him first. Re-running is only needed when the
 > typology itself changes.
 
+> **Authoritative badge.** Each push marks the ArcGIS Online item
+> "Authoritative" when the dataset's `authoritative` column is `yes`. Your
+> account needs to be an administrator, or have a role with the privilege to
+> mark content as authoritative. If it does not, the push still works, the
+> badge is skipped, and a note starting with `[agol]` appears in the dataset's
+> `internal_notes`. Tell Ethan if you see that note.
+
 ---
 
 ## 5. Your first ingest (the tutorial)

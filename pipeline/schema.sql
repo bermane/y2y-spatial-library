@@ -156,7 +156,8 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- Steward-declared: is this dataset the authoritative copy? 1 = yes,
     -- 0 = no (INTEGER boolean, DESIGN.md §13). Defaults to yes because
     -- the library exists to hold authoritative datasets; the steward
-    -- sets no for the exceptions. Added by migration 011.
+    -- sets no for the exceptions. Added by migration 011. Pushed to AGOL
+    -- as the item's content status (agol_sync._apply_content_status).
     authoritative           INTEGER NOT NULL DEFAULT 1
                                 CHECK (authoritative IN (0, 1)),
 
