@@ -36,7 +36,7 @@ if (-not (Test-Path $venvPython)) {
     exit 1
 }
 Write-Host "Reconciling dependencies (only does work if they changed) ..." -ForegroundColor Cyan
-& $venvPython -m pip install -e ".[dev]"
+& $venvPython -m pip install -e ".[dev]" -c constraints-windows.txt
 
 # --- 3. Smoke test ----------------------------------------------------------
 Write-Host "-- CLI smoke --" -ForegroundColor Cyan

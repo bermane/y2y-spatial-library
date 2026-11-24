@@ -7,13 +7,14 @@ name = "y2y-spatial-library"
 dynamic = ["version"]
 description = "Pipeline tooling for the Yellowstone to Yukon (Y2Y) authoritative spatial data library."
 readme = "README.md"
-requires-python = ">=3.11"
+# fiona has no Python 3.14 build yet, so 3.14 cannot install the pipeline.
+requires-python = ">=3.11,<3.14"
 authors = [
     { name = "Y2Y Conservation Initiative" },
 ]
 license = { text = "Proprietary" }
 dependencies = [
-    "geopandas>=0.14",
+    "geopandas>=1.0",
     "rasterio>=1.3",
     "pyproj>=3.6",
     "fiona>=1.9",

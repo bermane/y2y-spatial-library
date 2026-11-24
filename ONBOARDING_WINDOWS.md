@@ -14,12 +14,14 @@ PowerShell"**. `>` marks a line you type.
 
 ## 1. Install the prerequisites (one time)
 
-1. **Python 3.12** — https://www.python.org/downloads/
+1. **Python 3.13** — https://www.python.org/downloads/
    During install, **tick "Add python.exe to PATH."** Verify:
    ```powershell
-   > py -3.12 --version
+   > py -3.13 --version
    ```
-   Should print `Python 3.12.x`.
+   Should print `Python 3.13.x`. (Python 3.12 also works. **Do not use 3.14 or
+   newer** — one of the mapping libraries has no build for it yet, and the
+   install fails.)
 
 2. **Git** — https://git-scm.com/download/win  (accept defaults).
    *(Or install **GitHub Desktop** — https://desktop.github.com — if you prefer
@@ -65,9 +67,14 @@ From inside `C:\Y2Y\y2y-spatial-library`:
 > powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
 ```
 
-This creates an isolated environment (`.venv`) and installs everything. It ends
-with smoke tests — you should see `OK: all core imports succeeded`. (First run
-downloads a few hundred MB; give it several minutes.)
+This creates an isolated environment (`.venv`) and installs everything, at the
+tested package versions pinned in `constraints-windows.txt`. It then runs smoke
+tests — you should see `OK: all core imports succeeded` — and the full test
+suite, which takes a couple of minutes, uses temporary folders only, and never
+touches your data or ArcGIS Online. It should end with
+`Setup complete - all tests passed`. If it reports failed tests instead, stop
+and send the output to Ethan. (First run downloads a few hundred MB; give it
+several minutes.)
 
 **Activate the environment** (do this in each new PowerShell window before
 running `y2y`):
