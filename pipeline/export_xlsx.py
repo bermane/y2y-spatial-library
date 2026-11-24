@@ -57,6 +57,8 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("internal_notes", "local_optional"),
     # grey: pipeline-filled. Identity, canonical location, intrinsic
     # snapshot, spatial properties, source provenance.
+    # ``source_filename`` leads the block, as in pending.xlsx.
+    ("source_filename", "system"),
     ("dataset_id", "system"),
     ("dataset_type", "system"),
     ("date_added", "system"),
@@ -75,7 +77,6 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("pixel_size_x", "system"),
     ("pixel_size_y", "system"),
     ("source_format", "system"),
-    ("source_filename", "system"),
     ("source_crs", "system"),
     ("source_layer", "system"),
     # mauve: written by the ArcGIS Online sync

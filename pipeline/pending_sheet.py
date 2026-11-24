@@ -84,9 +84,11 @@ COLUMNS: list[tuple[str, str]] = [
     ("notes", "local_optional"),
     # 4. grey: pipeline-filled (identity and source at scan; the
     #    snapshot columns at approve)
+    # ``source_filename`` leads the block: it is how the steward
+    # recognises which file a row is.
+    ("source_filename", "system"),
     ("dataset_id", "system"),
     ("source_format", "system"),
-    ("source_filename", "system"),
     ("source_crs", "system"),
     ("source_layer", "system"),
     ("format", "system"),

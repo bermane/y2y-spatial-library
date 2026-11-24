@@ -69,3 +69,11 @@ def test_columns_are_ordered_by_colour() -> None:
     assert _colour_blocks(export_xlsx._INVENTORY_LAYOUT) == [
         "blue", "orange", "grey", "mauve",
     ]
+
+
+def test_grey_block_starts_with_source_filename() -> None:
+    from pipeline import pending_sheet
+
+    for layout in (pending_sheet.COLUMNS, export_xlsx._INVENTORY_LAYOUT):
+        first_grey = next(name for name, role in layout if role == "system")
+        assert first_grey == "source_filename"
