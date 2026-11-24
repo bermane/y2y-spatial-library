@@ -42,3 +42,30 @@ def test_export_colours_legend_and_authoritative(project_tree, populate_dataset)
     assert rows[yes_id]["authoritative"] == "yes"
     assert rows[no_id]["authoritative"] == "no"
     assert rows[no_id]["tags"] == "NA"
+
+
+def _colour_blocks(layout: list[tuple[str, str]]) -> list[str]:
+    """Collapse a layout to its run of colour groups, shades merged."""
+    group = {
+        "control": "control", "error": "error",
+        "agol_required": "blue", "agol_optional": "blue",
+        "local_required": "orange", "local_optional": "orange",
+        "system": "grey", "agol_state": "mauve",
+    }
+    blocks: list[str] = []
+    for _, role in layout:
+        if not blocks or blocks[-1] != group[role]:
+            blocks.append(group[role])
+    return blocks
+
+
+def test_columns_are_ordered_by_colour() -> None:
+    from pipeline import pending_sheet
+
+    assert _colour_blocks(pending_sheet.COLUMNS) == [
+        "control", "error", "blue", "orange", "grey", "mauve",
+    ]
+    assert pending_sheet.COLUMN_NAMES[:2] == ["ready", "_validation_error"]
+    assert _colour_blocks(export_xlsx._INVENTORY_LAYOUT) == [
+        "blue", "orange", "grey", "mauve",
+    ]

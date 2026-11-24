@@ -4,9 +4,9 @@ The sheet is persistent across scans (DESIGN.md §8). On each scan the
 pipeline appends rows for newly-staged datasets; on approve it removes
 rows that have been promoted. Rows are identified by ``dataset_id``.
 
-Column layout: ``ready`` first (the steward's control), then every
-inventory column in canonical order (see ``inventory_manager``), then
-``_validation_error`` last as a pipeline-written error sink.
+Column layout: ``ready`` and ``_validation_error`` first, then the
+columns grouped by header colour: steward-filled and published to
+ArcGIS Online, steward-filled and catalogue-only, pipeline-filled.
 
 Header colours come from :mod:`pipeline.sheet_style` and are explained
 in the workbook's ``legend`` tab: blue columns are steward-filled and
@@ -39,37 +39,22 @@ ERROR_COLUMN = "_validation_error"
 TARGET_FILENAME_COLUMN = "target_filename"
 
 
-# Pending-sheet column order is *not* the inventory column order — it's
-# tuned for the steward's review workflow:
+# Columns are grouped by header colour, in the order the steward works
+# through a row (steward preference 2026-11-24):
 #
-#   1. control + error sink so the row's promote-state is visible at a glance
-#   2. source identity (what arrived) so the steward identifies the row
-#   3. transform inputs (what the pipeline will do with it)
-#   4. categorisation (auto-prefilled where possible; steward confirms/overrides)
-#   5. required extrinsic metadata (where the editing actually happens)
-#   6. optional / freeform
-#   7. derived / locked / will-be-populated-at-approve (tail; ignore during review)
+#   1. control + error sink, so the row's promote-state is visible first
+#   2. blue: steward-filled, published to ArcGIS Online
+#   3. orange: steward-filled, stays in the catalogue
+#   4. grey: pipeline-filled; nothing to do here during review
+#   5. mauve: written by the ArcGIS Online sync
 #
-# inventory.xlsx keeps the canonical-grouping order from inventory_manager;
-# this sheet's order is steward-facing only.
+# Within blue and orange the optional (lighter) columns sit next to the
+# column they belong with. inventory.xlsx follows the same grouping.
 COLUMNS: list[tuple[str, str]] = [
     # 1. control + error
     (READY_COLUMN, "control"),
     (ERROR_COLUMN, "error"),
-    # 2. identity & source provenance
-    ("dataset_id", "system"),
-    ("source_format", "system"),
-    ("source_filename", "system"),
-    ("source_crs", "system"),
-    ("source_layer", "system"),
-    # 3. transform inputs
-    (TARGET_FILENAME_COLUMN, "local_required"),
-    ("classification", "local_required"),
-    # 4. categorisation (auto-prefilled where possible)
-    ("category", "agol_required"),
-    ("subcategory", "agol_optional"),
-    ("status", "local_required"),
-    # 5. required extrinsic metadata
+    # 2. blue: steward-filled, published to ArcGIS Online
     ("title", "agol_required"),
     ("summary", "agol_required"),
     ("description", "agol_required"),
@@ -78,22 +63,32 @@ COLUMNS: list[tuple[str, str]] = [
     ("tags", "agol_required"),
     ("terms_of_use", "agol_required"),
     ("acknowledgements", "agol_required"),
-    # AGOL publish format sits with the steward-authored metadata
-    # block (immediately after acknowledgements, per steward
-    # preference 2026-05-27). Auto-prefilled from format:
-    # ``feature-layer`` for vectors, ``imagery-layer`` for rasters.
-    # Steward overrides to ``vector-tile-layer`` for large vectors
-    # that should be delivered as cached tiles. ingest.approve()
-    # rejects empty/invalid values. See DESIGN.md §15.
+    # Auto-prefilled where possible; the steward confirms or corrects.
+    ("category", "agol_required"),
+    ("subcategory", "agol_optional"),
+    # Auto-prefilled from format: ``feature-layer`` for vectors,
+    # ``imagery-layer`` for rasters. Steward overrides to
+    # ``vector-tile-layer`` for large vectors that should be delivered
+    # as cached tiles. ingest.approve() rejects empty/invalid values.
+    # See DESIGN.md §15.
     ("agol_format", "agol_required"),
     # Pre-filled ``yes``; the steward sets ``no`` for the exceptions.
     ("authoritative", "agol_required"),
+    # 3. orange: steward-filled, stays in the catalogue
+    (TARGET_FILENAME_COLUMN, "local_required"),
+    ("classification", "local_required"),
+    ("status", "local_required"),
     ("data_steward", "local_required"),
-    # 6. optional
     ("temporal_start", "local_optional"),
     ("temporal_end", "local_optional"),
     ("notes", "local_optional"),
-    # 7. derived / locked / will be populated at approve
+    # 4. grey: pipeline-filled (identity and source at scan; the
+    #    snapshot columns at approve)
+    ("dataset_id", "system"),
+    ("source_format", "system"),
+    ("source_filename", "system"),
+    ("source_crs", "system"),
+    ("source_layer", "system"),
     ("format", "system"),
     ("file_path", "system"),
     ("crs", "system"),
@@ -103,8 +98,8 @@ COLUMNS: list[tuple[str, str]] = [
     ("geographic_extent_bbox", "system"),
     ("date_added", "system"),
     ("date_modified", "system"),
-    # Written by the first AGOL push. Never filled in by the steward;
-    # ingest.approve() rejects a row where it has been typed in.
+    # 5. mauve: written by the first AGOL push. Never filled in by the
+    #    steward; ingest.approve() rejects a row where it has been typed in.
     ("agol_item_id", "agol_state"),
 ]
 COLUMN_NAMES: list[str] = [name for name, _ in COLUMNS]

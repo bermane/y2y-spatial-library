@@ -24,7 +24,8 @@ Pilot release for the first deployment on the data steward's Windows machine.
   tab in each. Blue columns are filled by the steward and published to ArcGIS
   Online, orange columns are filled by the steward and stay in the catalogue,
   grey columns are filled by the pipeline, and mauve columns are written by
-  the ArcGIS Online sync. A lighter shade marks an optional column.
+  the ArcGIS Online sync. A lighter shade marks an optional column. Columns
+  are laid out in that order, after `ready` and `_validation_error`.
 - `tags` can now say "no tags": enter `NA` (any letter case) on its own. The
   cell still cannot be empty, `NA` cannot be mixed with real tags, and it is
   never published as a tag. Tags may be separated with `;` or `,`, and

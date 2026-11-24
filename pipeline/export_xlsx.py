@@ -6,10 +6,11 @@ catalogue. Re-export overwrites it.
 
 Layout choices:
 
-* Column order roughly follows the legacy xlsx grouping (identity →
-  extrinsic → lifecycle → location → intrinsic → spatial → AGOL →
-  source) so the steward's muscle memory carries over, but every
-  schema column is included so the export is a faithful render.
+* Columns are grouped by header colour, in the same order as
+  ``pending.xlsx``: steward-filled and published to ArcGIS Online,
+  steward-filled and catalogue-only, pipeline-filled, then the
+  columns the ArcGIS Online sync writes. Every schema column is
+  included, so the export is a faithful render.
 * Header colour-coding matches ``pending.xlsx`` (see
   ``pipeline/sheet_style.py``): who fills a column and whether it is
   published to ArcGIS Online. Purely informational here, since the
@@ -36,60 +37,52 @@ CHANGELOG_SHEET_NAME = "changelog"
 # pipeline/sheet_style.py. The colours match pending.xlsx, so a column
 # looks the same in both workbooks.
 _INVENTORY_LAYOUT: list[tuple[str, str]] = [
-    # identity & taxonomy
-    ("dataset_id", "system"),
-    ("dataset_type", "system"),
-    ("category", "agol_required"),
-    ("subcategory", "agol_optional"),
-    # extrinsic metadata (steward-authored)
+    # blue: steward-filled, published to ArcGIS Online
     ("title", "agol_required"),
     ("summary", "agol_required"),
     ("description", "agol_required"),
     ("tags", "agol_required"),
     ("terms_of_use", "agol_required"),
     ("acknowledgements", "agol_required"),
-    # agol_format sits with the steward-authored metadata block
-    # (next to acknowledgements). The catalogue's CHECK enum rejects
-    # invalid values at insert, and ingest._validate_declarations
-    # rejects empty/invalid values at approve.
+    ("category", "agol_required"),
+    ("subcategory", "agol_optional"),
     ("agol_format", "agol_required"),
     ("authoritative", "agol_required"),
-    ("data_steward", "local_required"),
-    ("internal_notes", "local_optional"),
-    # lifecycle
+    # orange: steward-filled, stays in the catalogue
     ("classification", "local_required"),
     ("status", "local_required"),
+    ("data_steward", "local_required"),
+    ("temporal_start", "local_optional"),
+    ("temporal_end", "local_optional"),
+    ("internal_notes", "local_optional"),
+    # grey: pipeline-filled. Identity, canonical location, intrinsic
+    # snapshot, spatial properties, source provenance.
+    ("dataset_id", "system"),
+    ("dataset_type", "system"),
     ("date_added", "system"),
     ("date_modified", "system"),
-    # canonical location
     ("file_path", "system"),
     ("format", "system"),
-    # intrinsic snapshot
     ("crs", "system"),
     ("checksum_sha256", "system"),
     ("size_bytes", "system"),
     ("mtime", "system"),
     ("geographic_extent_bbox", "system"),
     ("footprint_wkt", "system"),
-    # spatial properties
-    ("temporal_start", "local_optional"),
-    ("temporal_end", "local_optional"),
     ("feature_count", "system"),
     ("raster_width", "system"),
     ("raster_height", "system"),
     ("pixel_size_x", "system"),
     ("pixel_size_y", "system"),
-    # AGOL linkage, written by the sync (agol_format lives up with
-    # the steward-authored metadata block)
-    ("agol_item_id", "agol_state"),
-    ("agol_published_at", "agol_state"),
-    ("last_synced_at", "agol_state"),
-    ("sync_status", "agol_state"),
-    # source provenance
     ("source_format", "system"),
     ("source_filename", "system"),
     ("source_crs", "system"),
     ("source_layer", "system"),
+    # mauve: written by the ArcGIS Online sync
+    ("agol_item_id", "agol_state"),
+    ("agol_published_at", "agol_state"),
+    ("last_synced_at", "agol_state"),
+    ("sync_status", "agol_state"),
 ]
 _INVENTORY_COLUMN_NAMES: list[str] = [c for c, _ in _INVENTORY_LAYOUT]
 

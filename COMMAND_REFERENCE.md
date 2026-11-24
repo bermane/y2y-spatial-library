@@ -84,7 +84,8 @@ Two phases of one command:
 from the format and `authoritative` is pre-filled `yes`. Optional:
 `temporal_start`, `temporal_end`, `notes`.
 
-**Header colours** (also in the sheet's `legend` tab):
+**Header colours** (also in the sheet's `legend` tab). Columns are laid out
+in this order, with `_validation_error` right after `ready`:
 
 | Colour | Meaning |
 | ------ | ------- |

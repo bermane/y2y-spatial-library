@@ -413,7 +413,8 @@ Column colouring in `pending.xlsx` (defined once in
 `pipeline/sheet_style.py`, shared with `inventory.xlsx`, and explained in
 a `legend` tab in both workbooks). The colour says who fills a column and
 whether its value is published to AGOL. Required and optional share a
-hue; required is the darker shade.
+hue; required is the darker shade. Columns are laid out in colour order:
+`ready`, `_validation_error`, blue, orange, grey, mauve.
 
 | Colour | Meaning | Columns | Steward action |
 | ------ | ------- | ------- | -------------- |
