@@ -639,7 +639,7 @@ def _build_row(
         "category": guessed_category,
         "subcategory": guessed_subcategory,
         "file_path": None,                    # set at approve
-        "format": _FORMAT_LABEL_BY_TARGET[target_ext],
+        "library_format": _FORMAT_LABEL_BY_TARGET[target_ext],
         # source provenance (locked at scan)
         "source_format": meta.source_format,
         "source_filename": meta.source_filename,
@@ -648,7 +648,7 @@ def _build_row(
         # transform inputs
         pending_sheet.TARGET_FILENAME_COLUMN: target_filename,
         # intrinsic snapshot (computed at approve)
-        "crs": None,
+        "library_crs": None,
         "checksum_sha256": None,
         "size_bytes": None,
         "mtime": None,
@@ -696,7 +696,7 @@ def _build_row(
 
 # Required-non-empty fields a steward must fill before approval.
 _REQUIRED_NON_EMPTY = (
-    "title", "category", "format",
+    "title", "category", "library_format",
     pending_sheet.TARGET_FILENAME_COLUMN,
     "status", "data_steward",
     "summary", "description", "terms_of_use", "acknowledgements",
@@ -906,7 +906,7 @@ def _populate_snapshot(row: dict[str, Any], target_path: Path) -> None:
             row["pixel_size_y"] = float(-ds.transform.e)
         row["feature_count"] = None
 
-    row["crs"] = utils.crs_to_authority_string(crs) if crs else None
+    row["library_crs"] = utils.crs_to_authority_string(crs) if crs else None
     row["checksum_sha256"] = checksum
     row["size_bytes"] = size_bytes
     row["mtime"] = mtime
@@ -973,11 +973,11 @@ def _normalize_for_insert(row: dict[str, Any]) -> dict[str, Any]:
     else:
         out.pop("notes", None)
 
-    fmt = out.get("format")
+    fmt = out.get("library_format")
     if isinstance(fmt, str):
         if fmt not in _FORMAT_TO_SCHEMA:
             raise ValueError(f"unknown format value {fmt!r}")
-        out["format"] = _FORMAT_TO_SCHEMA[fmt]
+        out["library_format"] = _FORMAT_TO_SCHEMA[fmt]
 
     src_fmt = out.get("source_format")
     if isinstance(src_fmt, str) and src_fmt:

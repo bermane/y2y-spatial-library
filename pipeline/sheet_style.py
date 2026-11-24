@@ -84,6 +84,11 @@ FIELD_NOTES: dict[str, str] = {
         "The period the data covers. Use YYYY, YYYY-MM or YYYY-MM-DD. "
         "Leave empty if it does not apply."
     ),
+    "source_* / library_*": (
+        "source_filename, source_format and source_crs describe the file as "
+        "it arrived. library_format and library_crs describe the file as "
+        "stored in the library."
+    ),
     "agol_item_id": (
         "Filled in automatically when the dataset is published to ArcGIS "
         "Online."

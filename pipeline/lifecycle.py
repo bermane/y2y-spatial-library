@@ -395,7 +395,7 @@ def tombstone(
 # Snapshot fields recomputed from disk. Other locked columns
 # (dataset_id, file_path, source_*, date_added) are not touched.
 _REFRESH_SNAPSHOT_FIELDS: tuple[str, ...] = (
-    "checksum_sha256", "size_bytes", "mtime", "crs", "geographic_extent_bbox",
+    "checksum_sha256", "size_bytes", "mtime", "library_crs", "geographic_extent_bbox",
 )
 
 
@@ -460,7 +460,7 @@ def refresh(
         "checksum_sha256": new_checksum,
         "size_bytes": new_size,
         "mtime": new_mtime,
-        "crs": new_crs,
+        "library_crs": new_crs,
         "geographic_extent_bbox": new_bbox,
     }
 

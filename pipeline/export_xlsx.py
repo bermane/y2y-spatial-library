@@ -55,17 +55,20 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("temporal_start", "local_optional"),
     ("temporal_end", "local_optional"),
     ("internal_notes", "local_optional"),
-    # grey: pipeline-filled. Identity, canonical location, intrinsic
-    # snapshot, spatial properties, source provenance.
-    # ``source_filename`` leads the block, as in pending.xlsx.
-    ("source_filename", "system"),
-    ("dataset_id", "system"),
-    ("dataset_type", "system"),
+    # grey: pipeline-filled, in the same order as pending.xlsx: dates,
+    # the file as it arrived (source_*), the file as stored in the
+    # library (library_*), then the technical snapshot.
     ("date_added", "system"),
     ("date_modified", "system"),
+    ("source_filename", "system"),
+    ("source_format", "system"),
+    ("source_crs", "system"),
+    ("source_layer", "system"),
     ("file_path", "system"),
-    ("format", "system"),
-    ("crs", "system"),
+    ("library_format", "system"),
+    ("library_crs", "system"),
+    ("dataset_id", "system"),
+    ("dataset_type", "system"),
     ("checksum_sha256", "system"),
     ("size_bytes", "system"),
     ("mtime", "system"),
@@ -76,9 +79,6 @@ _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     ("raster_height", "system"),
     ("pixel_size_x", "system"),
     ("pixel_size_y", "system"),
-    ("source_format", "system"),
-    ("source_crs", "system"),
-    ("source_layer", "system"),
     # mauve: written by the ArcGIS Online sync
     ("agol_item_id", "agol_state"),
     ("agol_published_at", "agol_state"),

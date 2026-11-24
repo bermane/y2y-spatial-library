@@ -201,7 +201,7 @@ belongs here in the first place:
 
 One narrow exception to "don't mirror intrinsic metadata": the inventory
 records a **known-good snapshot** of a short list of intrinsic fields
-(`crs`, `checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`).
+(`library_crs`, `checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`).
 These are not a live view — they exist so reconciliation can detect drift
 when the file has changed since ingestion. Everything else intrinsic is
 derived on read.
@@ -225,7 +225,7 @@ exporter's layout is in `pipeline/export_xlsx.py`.
 | `category`    | enum              | One of the 10 taxonomy categories — stored as the **display name** (full name from `Spatial_Data_Typology.xlsx`, e.g. `Boundaries, Tenure & Governance`). Schema CHECK enforces the 10-value enum verbatim. The on-disk folder uses the underscored abbreviation (`Boundaries_Tenure_Governance`); the pipeline maps display↔folder. Migration 006 carried the 9→10 director-workshop transition; migration 010 the 2026 mid-year revision (merge the two boundary/tenure categories, rename Climate Resilience→Climate Change and Human Dimensions→Human Dimensions of Conservation, add Demographics & Socioeconomic Data). |
 | `subcategory` | string (nullable) | Display sub-name (e.g. `Grizzly Bear`, `Multi-Species`); folder is `Grizzly_Bear` / `Multi_Species`. Only `Species` has subcategories in Phase A. Display names use **spaces or hyphens**, never underscores — the underscore is reserved for filesystem folder names. `Spatial_Data_Typology.xlsx` matches this convention; if a future revision of the typology document drifts back to underscored sub-category labels, treat it as a typo in the document, not a steward decision to change display naming. |
 | `file_path`   | string (relative) | Path of the **canonical** file relative to `library/spatial/`, using folder names. Set at approve. (Pre-migration-002 the path was relative to `library/`; the relative segments did not change.) |
-| `format`      | enum              | Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
+| `library_format` | enum              | Renamed from `format` by migration 012, to pair with `source_format`. Hard enum: `'geopackage'` or `'geotiff'` (lowercase per schema CHECK; rendered with display names in the exported xlsx for steward readability). The output of transformation; admitting another canonical format would be a deliberate schema change. |
 
 `title` is **not** a file-identity field — it's an AGOL display string
 authored by the steward — so it lives in the Dublin Core+ group below
@@ -253,7 +253,7 @@ land in inventory only after a successful approve.
 
 | Field                    | Type              | Notes                                                                  |
 | ------------------------ | ----------------- | ---------------------------------------------------------------------- |
-| `crs`                    | string (authority:code) | Canonical CRS. Always `ESRI:102008` for an admitted dataset (transformation reprojects). |
+| `library_crs`            | string (authority:code) | Renamed from `crs` by migration 012, to pair with `source_crs`. Canonical CRS. Always `ESRI:102008` for an admitted dataset (transformation reprojects). |
 | `checksum_sha256`        | string (64 hex)   | SHA-256 of the canonical file.                                         |
 | `size_bytes`             | integer           | File size in bytes at last known-good state.                           |
 | `mtime`                  | ISO-8601 datetime, UTC, `Z`-suffixed | Modification time at last known-good state. |
@@ -423,7 +423,7 @@ hue; required is the darker shade. Columns are laid out in colour order:
 | Light blue | Steward-filled, published to AGOL, optional | `subcategory` | Species only |
 | Orange | Steward-filled, stays in the catalogue, required | `target_filename` (auto-proposed), `classification` (auto-set to `vector`; required for raster), `status`, `data_steward` | Confirm; supply when needed |
 | Light orange | Steward-filled, stays in the catalogue, optional | `temporal_start`, `temporal_end`, `notes` | Fill in if applicable |
-| Grey | Filled by the pipeline | `dataset_id`, `source_*`, `format`, `date_added` (at scan); `file_path`, `crs`, `checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`, `date_modified` (at approve) | None. These are forensic; editing breaks audit |
+| Grey | Filled by the pipeline | In this order: `date_added`, `date_modified`; the file as it arrived (`source_filename`, `source_format`, `source_crs`, `source_layer`); the file as stored in the library (`file_path`, `library_format`, `library_crs`); then `dataset_id` and the technical snapshot (`checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`). The source columns and `date_added` are filled at scan, the rest at approve. | None. These are forensic; editing breaks audit |
 | Mauve | Written by the AGOL sync | `agol_item_id` | None. Approve rejects a row where it has been typed in |
 | Red | Pipeline error message | `_validation_error` | Read it, fix the row, set `ready` again |
 
@@ -467,14 +467,14 @@ For each row where `ready` is `TRUE`:
    `post-transform: <reason>`. The transformed file is deleted; the
    source remains in processing for the steward to investigate.
 4. **Compute the intrinsic snapshot** on the transformed file:
-   `checksum_sha256`, `size_bytes`, `mtime`, `crs` (`ESRI:102008`),
+   `checksum_sha256`, `size_bytes`, `mtime`, `library_crs` (`ESRI:102008`),
    `geographic_extent_bbox`. Update `date_modified`.
 5. **Promote.** Move the transformed file from processing to
    `library/spatial/<Category>/[<Subcategory>/]<target_filename>`.
    `INSERT` the finalised row into the `datasets` table of
    `inventory.db` (the pending-only fields `ready`, `target_filename`,
    `_validation_error` are stripped; `notes`→`internal_notes` is
-   renamed; `format` and `source_format` are lowercased to the schema
+   renamed; `library_format` and `source_format` are lowercased to the schema
    CHECK values; `dataset_type='spatial'`, `sync_status='unpublished'`
    are filled in). `INSERT` a corresponding `add` row into the
    `changelog` table that records both the source format and the
@@ -592,7 +592,7 @@ appends a corresponding action to the changelog table.
 | `y2y update`    | Non-locked fields on the row                                          | `update`         |
 | `y2y rename`    | The file's path within `library/`; inventory's `file_path`, `category`, and (if applicable) `subcategory` | `rename`         |
 | `y2y tombstone` | Sets `status=tombstoned` and deletes the file from `library/`         | `remove`         |
-| `y2y refresh`   | Re-stats the file on disk; updates the intrinsic snapshot (`checksum_sha256`, `size_bytes`, `mtime`, `crs`, `geographic_extent_bbox`) to match | `refresh`        |
+| `y2y refresh`   | Re-stats the file on disk; updates the intrinsic snapshot (`checksum_sha256`, `size_bytes`, `mtime`, `library_crs`, `geographic_extent_bbox`) to match | `refresh`        |
 
 ### What `update` may and may not change
 
@@ -610,7 +610,7 @@ The admitted fields are deliberately narrow:
   can be wired in before `y2y agol-sync adopt`; normally the push
   fills it.
 - **Rejected as locked** (filesystem-derived snapshot fields, §3):
-  `dataset_id`, `checksum_sha256`, `size_bytes`, `mtime`, `crs`,
+  `dataset_id`, `checksum_sha256`, `size_bytes`, `mtime`, `library_crs`,
   `geographic_extent_bbox`, `date_added`. Editing these in the
   inventory would defeat drift detection.
 - **Rejected as movement-bound:** `file_path`, `category`,

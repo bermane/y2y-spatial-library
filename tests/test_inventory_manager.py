@@ -30,7 +30,7 @@ def _row(dataset_id: str, **overrides: Any) -> dict[str, Any]:
         "category": "Water",
         "subcategory": None,
         "file_path": f"Water/{dataset_id}.gpkg",
-        "format": "geopackage",
+        "library_format": "geopackage",
         # extrinsic
         "summary": "Summary.",
         "description": "Description.",
@@ -52,7 +52,7 @@ def _row(dataset_id: str, **overrides: Any) -> dict[str, Any]:
         "checksum_sha256": "0" * 64,
         "size_bytes": 1024,
         "mtime": "2026-04-29T00:00:00Z",
-        "crs": "ESRI:102008",
+        "library_crs": "ESRI:102008",
         "geographic_extent_bbox": "0,0,1,1",
         "classification": "vector",
         # spatial properties
@@ -120,7 +120,7 @@ def test_insert_then_load_roundtrips(tmp_path: Path) -> None:
 
 def test_insert_rejects_invalid_format_via_check_constraint(tmp_path: Path) -> None:
     db = tmp_path / "inv.db"
-    bad = _row("ds_aaaaaaaaaaaaaaaaaaaaaaaaaa", format="GeoPackage")  # display-cased
+    bad = _row("ds_aaaaaaaaaaaaaaaaaaaaaaaaaa", library_format="GeoPackage")  # display-cased
     with pytest.raises(sqlite3.IntegrityError):
         im.insert_dataset(db, bad)
 

@@ -82,24 +82,25 @@ COLUMNS: list[tuple[str, str]] = [
     ("temporal_start", "local_optional"),
     ("temporal_end", "local_optional"),
     ("notes", "local_optional"),
-    # 4. grey: pipeline-filled (identity and source at scan; the
-    #    snapshot columns at approve)
-    # ``source_filename`` leads the block: it is how the steward
-    # recognises which file a row is.
+    # 4. grey: pipeline-filled (steward-chosen order, 2026-11-24):
+    #    dates, then the file as it arrived (source_*), then the file
+    #    as stored in the library (library_*), then the technical
+    #    snapshot. The source_* and date_added columns are filled at
+    #    scan; the rest at approve.
+    ("date_added", "system"),
+    ("date_modified", "system"),
     ("source_filename", "system"),
-    ("dataset_id", "system"),
     ("source_format", "system"),
     ("source_crs", "system"),
     ("source_layer", "system"),
-    ("format", "system"),
     ("file_path", "system"),
-    ("crs", "system"),
+    ("library_format", "system"),
+    ("library_crs", "system"),
+    ("dataset_id", "system"),
     ("checksum_sha256", "system"),
     ("size_bytes", "system"),
     ("mtime", "system"),
     ("geographic_extent_bbox", "system"),
-    ("date_added", "system"),
-    ("date_modified", "system"),
     # 5. mauve: written by the first AGOL push. Never filled in by the
     #    steward; ingest.approve() rejects a row where it has been typed in.
     ("agol_item_id", "agol_state"),

@@ -84,8 +84,10 @@ CREATE TABLE IF NOT EXISTS datasets (
                                 )),
     subcategory             TEXT,                            -- nullable; only Species has subs (enforced in code, not schema)
     file_path               TEXT NOT NULL,                   -- relative to library/spatial/
-    format                  TEXT NOT NULL
-                                CHECK (format IN ('geopackage', 'geotiff')),
+    -- The file as stored in the library (source_format is the file as
+    -- it arrived). Renamed from `format` by migration 012.
+    library_format          TEXT NOT NULL
+                                CHECK (library_format IN ('geopackage', 'geotiff')),
 
     -- [type-agnostic] Extrinsic metadata (Dublin Core+) ------------------
     -- description carries both the public-facing dataset description and
@@ -190,7 +192,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- Pre-filled by ingest._build_row() from format; editable later
     -- via `y2y update <id> --set agol_format=...`. Added as
     -- agol_target by migration 007; renamed to agol_format by
-    -- migration 008 (naming alignment with format / source_format).
+    -- migration 008 (naming alignment with library_format / source_format).
     agol_format             TEXT
                                 CHECK (agol_format IS NULL OR agol_format IN (
                                     'feature-layer',
@@ -205,7 +207,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     checksum_sha256         TEXT NOT NULL,
     size_bytes              INTEGER NOT NULL,
     mtime                   TEXT NOT NULL,                   -- ISO-8601 UTC
-    crs                     TEXT NOT NULL,                   -- canonical CRS (ESRI:102008 today)
+    library_crs             TEXT NOT NULL,                   -- canonical CRS (ESRI:102008 today); renamed from `crs` by migration 012
     geographic_extent_bbox  TEXT,                            -- 'minx,miny,maxx,maxy' in canonical CRS
     classification          TEXT NOT NULL
                                 CHECK (classification IN ('vector', 'continuous', 'categorical')),

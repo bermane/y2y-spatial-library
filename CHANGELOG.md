@@ -25,7 +25,8 @@ Pilot release for the first deployment on the data steward's Windows machine.
   Online, orange columns are filled by the steward and stay in the catalogue,
   grey columns are filled by the pipeline, and mauve columns are written by
   the ArcGIS Online sync. A lighter shade marks an optional column. Columns
-  are laid out in that order, after `ready` and `_validation_error`.
+  are laid out in that order, after `ready` and `_validation_error`. The grey
+  block runs dates, source columns, library columns, then checksum and sizes.
 - `tags` can now say "no tags": enter `NA` (any letter case) on its own. The
   cell still cannot be empty, `NA` cannot be mixed with real tags, and it is
   never published as a tag. Tags may be separated with `;` or `,`, and
@@ -40,6 +41,10 @@ Pilot release for the first deployment on the data steward's Windows machine.
   to `internal_notes` and the changelog.
 - `temporal_start` and `temporal_end` can now be filled, in the review sheet
   and with `y2y update`.
+- Renamed the catalogue columns `format` and `crs` to `library_format` and
+  `library_crs`, so they read clearly beside `source_format` and
+  `source_crs`. An existing catalogue needs migration 012; a new one already
+  has the new names.
 - `agol_item_id` is no longer filled in the review sheet. The first push to
   ArcGIS Online writes it.
 

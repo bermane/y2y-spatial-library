@@ -74,14 +74,14 @@ def test_scan_pending_row_captures_source_metadata(project_tree, valid_gpkg_fact
 
     # Target proposal — auto-derived from source stem
     assert row["target_filename"] == "streams_2024.gpkg"
-    assert row["format"] == "GeoPackage"
+    assert row["library_format"] == "GeoPackage"
 
     # Intrinsic snapshot — empty until approve
     assert row["file_path"] is None
     assert row["checksum_sha256"] is None
     assert row["size_bytes"] is None
     assert row["mtime"] is None
-    assert row["crs"] is None
+    assert row["library_crs"] is None
     assert row["geographic_extent_bbox"] is None
 
     # Category was auto-prefilled from filename keywords ("streams" → Water).
@@ -106,7 +106,7 @@ def test_scan_proposes_canonical_target_for_shapefile(project_tree) -> None:
     assert row["source_format"] == "Shapefile"
     assert row["source_crs"] == "EPSG:4326"
     assert row["target_filename"] == "roads_2024.gpkg"
-    assert row["format"] == "GeoPackage"
+    assert row["library_format"] == "GeoPackage"
 
 
 def test_scan_moves_shapefile_bundle(project_tree) -> None:

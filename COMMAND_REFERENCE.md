@@ -143,7 +143,7 @@ normally filled by the push; set it by hand only before
 `y2y agol-sync adopt`.
 
 Rejected: locked columns (`checksum_sha256`, `size_bytes`, `mtime`,
-`crs`, `geographic_extent_bbox` — only `refresh` changes these) and
+`library_crs`, `geographic_extent_bbox` — only `refresh` changes these) and
 movement-bound columns (`file_path`, `category`, `subcategory` — use
 `rename`). `status='tombstoned'` is rejected here — use `tombstone`.
 

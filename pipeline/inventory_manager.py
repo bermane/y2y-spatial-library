@@ -46,7 +46,7 @@ DB_FILENAME = "inventory.db"                 # source of truth
 DATASETS_COLUMNS: tuple[str, ...] = (
     # identity & taxonomy
     "dataset_id", "dataset_type", "title", "category", "subcategory",
-    "file_path", "format",
+    "file_path", "library_format",
     # extrinsic metadata
     "summary", "description", "tags", "terms_of_use",
     "acknowledgements", "data_steward", "internal_notes", "authoritative",
@@ -56,7 +56,7 @@ DATASETS_COLUMNS: tuple[str, ...] = (
     "agol_item_id", "agol_published_at", "last_synced_at", "sync_status",
     "agol_format",
     # intrinsic snapshot
-    "checksum_sha256", "size_bytes", "mtime", "crs",
+    "checksum_sha256", "size_bytes", "mtime", "library_crs",
     "geographic_extent_bbox", "classification",
     # spatial properties
     "footprint_wkt", "temporal_start", "temporal_end",

@@ -71,9 +71,15 @@ def test_columns_are_ordered_by_colour() -> None:
     ]
 
 
-def test_grey_block_starts_with_source_filename() -> None:
+def test_grey_block_order() -> None:
     from pipeline import pending_sheet
 
     for layout in (pending_sheet.COLUMNS, export_xlsx._INVENTORY_LAYOUT):
-        first_grey = next(name for name, role in layout if role == "system")
-        assert first_grey == "source_filename"
+        grey = [name for name, role in layout if role == "system"]
+        assert grey[:9] == [
+            "date_added", "date_modified",
+            "source_filename", "source_format", "source_crs", "source_layer",
+            "file_path", "library_format", "library_crs",
+        ]
+        tail = grey[9:]
+        assert tail.index("checksum_sha256") < tail.index("size_bytes") < tail.index("mtime")

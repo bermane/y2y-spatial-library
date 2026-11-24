@@ -749,7 +749,7 @@ def push(
             f"unknown agol_format {target!r} on {dataset_id!r}. "
             f"Expected one of: {sorted(_VALID_TARGET_FORMAT)}"
         )
-    source_format = row.get("format")
+    source_format = row.get("library_format")
     allowed_formats = _VALID_TARGET_FORMAT[target]
     if source_format not in allowed_formats:
         raise AgolError(

@@ -77,10 +77,10 @@ def test_approve_promotes_a_complete_ready_row(project_tree, valid_gpkg_factory)
     assert promoted["file_path"] == "Water/streams_2024.gpkg"
     # Schema CHECKs are lowercase enum values; the pending sheet's
     # display-cased values get mapped at insert.
-    assert promoted["format"] == "geopackage"
+    assert promoted["library_format"] == "geopackage"
     assert promoted["source_format"] == "geopackage"
     assert promoted["source_filename"] == "streams_2024.gpkg"
-    assert promoted["crs"] == "ESRI:102008"
+    assert promoted["library_crs"] == "ESRI:102008"
     assert promoted["checksum_sha256"]
     assert promoted["dataset_type"] == "spatial"
     assert promoted["sync_status"] == "unpublished"
@@ -132,8 +132,8 @@ def test_approve_converts_shapefile_to_gpkg(project_tree) -> None:
     inv = inventory_manager.load_inventory(project_tree["db"])
     assert inv[0]["source_format"] == "shapefile"
     assert inv[0]["source_crs"] == "EPSG:4326"
-    assert inv[0]["crs"] == "ESRI:102008"  # reprojected
-    assert inv[0]["format"] == "geopackage"
+    assert inv[0]["library_crs"] == "ESRI:102008"  # reprojected
+    assert inv[0]["library_format"] == "geopackage"
     # Inventory carries the display name, not the folder name
     assert inv[0]["category"] == "Connectivity & Wildlife Movement"
 
