@@ -49,7 +49,7 @@ DATASETS_COLUMNS: tuple[str, ...] = (
     "file_path", "format",
     # extrinsic metadata
     "summary", "description", "tags", "terms_of_use",
-    "acknowledgements", "data_steward", "internal_notes",
+    "acknowledgements", "data_steward", "internal_notes", "authoritative",
     # lifecycle state
     "status", "date_added", "date_modified",
     # AGOL linkage
@@ -154,8 +154,13 @@ def _row_for_insert(row: dict[str, Any]) -> tuple[Any, ...]:
 
     Missing keys → NULL. Unknown keys are silently dropped — callers
     sometimes hand us pending-sheet rows with extra columns.
+    ``authoritative`` is the exception: a row that doesn't say gets the
+    schema default (1 = yes), since the column is NOT NULL.
     """
-    return tuple(row.get(c) for c in DATASETS_COLUMNS)
+    return tuple(
+        1 if c == "authoritative" and row.get(c) is None else row.get(c)
+        for c in DATASETS_COLUMNS
+    )
 
 
 def insert_dataset(db_path: Path, row: dict[str, Any]) -> None:

@@ -148,11 +148,17 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- ====================================================================
     summary                 TEXT NOT NULL,
     description             TEXT NOT NULL,
-    tags                    TEXT NOT NULL,                   -- ';'-delimited
+    tags                    TEXT NOT NULL,                   -- ';'-delimited, or 'NA' for no tags
     terms_of_use            TEXT NOT NULL,
     acknowledgements        TEXT NOT NULL,
     data_steward            TEXT NOT NULL,
     internal_notes          TEXT,                            -- freeform; renamed from xlsx 'notes'
+    -- Steward-declared: is this dataset the authoritative copy? 1 = yes,
+    -- 0 = no (INTEGER boolean, DESIGN.md §13). Defaults to yes because
+    -- the library exists to hold authoritative datasets; the steward
+    -- sets no for the exceptions. Added by migration 011.
+    authoritative           INTEGER NOT NULL DEFAULT 1
+                                CHECK (authoritative IN (0, 1)),
 
     -- [type-agnostic] Lifecycle state & timestamps -----------------------
     status                  TEXT NOT NULL DEFAULT 'active'
@@ -205,8 +211,8 @@ CREATE TABLE IF NOT EXISTS datasets (
 
     -- [spatial-specific] Spatial properties ------------------------------
     footprint_wkt           TEXT,                            -- bbox/footprint as WKT in EPSG:4326
-    temporal_start          TEXT,                            -- ISO-8601 UTC
-    temporal_end            TEXT,                            -- ISO-8601 UTC
+    temporal_start          TEXT,                            -- ISO-8601 UTC; steward-declared coverage
+    temporal_end            TEXT,                            -- ISO-8601 UTC; steward-declared coverage
     feature_count           INTEGER,                         -- vectors only
     raster_width            INTEGER,                         -- rasters only
     raster_height           INTEGER,                         -- rasters only

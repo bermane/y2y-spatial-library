@@ -10,9 +10,10 @@ Layout choices:
   extrinsic → lifecycle → location → intrinsic → spatial → AGOL →
   source) so the steward's muscle memory carries over, but every
   schema column is included so the export is a faithful render.
-* Header colour-coding still distinguishes "auto-filled snapshot",
-  "categorical", "freeform", etc. — purely informational since the
-  whole sheet is read-only now.
+* Header colour-coding matches ``pending.xlsx`` (see
+  ``pipeline/sheet_style.py``): who fills a column and whether it is
+  published to ArcGIS Online. Purely informational here, since the
+  whole sheet is read-only. A ``legend`` tab explains the colours.
 * A second sheet ``changelog`` exposes the audit log so the whole
   catalogue is browsable in one workbook.
 * ``inventory.xlsx`` is rejected if Excel has it open (lock file
@@ -25,96 +26,85 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
-from . import inventory_manager
+from . import inventory_manager, sheet_style, steward_fields
 
 INVENTORY_SHEET_NAME = "inventory"
 CHANGELOG_SHEET_NAME = "changelog"
 
-# (column_name, role) — roles drive header colour. Roles preserved
-# from the legacy xlsx where applicable; new schema columns get
-# "snapshot" or "agol" or "computed" as appropriate.
+# (column_name, role). Roles drive the header colour and are defined in
+# pipeline/sheet_style.py. The colours match pending.xlsx, so a column
+# looks the same in both workbooks.
 _INVENTORY_LAYOUT: list[tuple[str, str]] = [
     # identity & taxonomy
-    ("dataset_id", "locked"),
-    ("dataset_type", "locked"),
-    ("category", "overridable"),
-    ("subcategory", "overridable"),
+    ("dataset_id", "system"),
+    ("dataset_type", "system"),
+    ("category", "agol_required"),
+    ("subcategory", "agol_optional"),
     # extrinsic metadata (steward-authored)
-    ("title", "required"),
-    ("summary", "required"),
-    ("description", "required"),
-    ("tags", "required"),
-    ("terms_of_use", "required"),
-    ("acknowledgements", "required"),
+    ("title", "agol_required"),
+    ("summary", "agol_required"),
+    ("description", "agol_required"),
+    ("tags", "agol_required"),
+    ("terms_of_use", "agol_required"),
+    ("acknowledgements", "agol_required"),
     # agol_format sits with the steward-authored metadata block
-    # (next to acknowledgements). Coloured "required" to match the
-    # other must-have steward inputs — the catalogue's CHECK enum
-    # rejects NULL/invalid values at insert, and ingest._validate_declarations
+    # (next to acknowledgements). The catalogue's CHECK enum rejects
+    # invalid values at insert, and ingest._validate_declarations
     # rejects empty/invalid values at approve.
-    ("agol_format", "required"),
-    ("data_steward", "required"),
-    ("internal_notes", "optional"),
+    ("agol_format", "agol_required"),
+    ("authoritative", "agol_required"),
+    ("data_steward", "local_required"),
+    ("internal_notes", "local_optional"),
     # lifecycle
-    ("classification", "overridable"),
-    ("status", "overridable"),
-    ("date_added", "locked"),
-    ("date_modified", "locked"),
+    ("classification", "local_required"),
+    ("status", "local_required"),
+    ("date_added", "system"),
+    ("date_modified", "system"),
     # canonical location
-    ("file_path", "locked"),
-    ("format", "locked"),
+    ("file_path", "system"),
+    ("format", "system"),
     # intrinsic snapshot
-    ("crs", "locked"),
-    ("checksum_sha256", "locked"),
-    ("size_bytes", "locked"),
-    ("mtime", "locked"),
-    ("geographic_extent_bbox", "locked"),
-    ("footprint_wkt", "locked"),
+    ("crs", "system"),
+    ("checksum_sha256", "system"),
+    ("size_bytes", "system"),
+    ("mtime", "system"),
+    ("geographic_extent_bbox", "system"),
+    ("footprint_wkt", "system"),
     # spatial properties
-    ("temporal_start", "optional"),
-    ("temporal_end", "optional"),
-    ("feature_count", "locked"),
-    ("raster_width", "locked"),
-    ("raster_height", "locked"),
-    ("pixel_size_x", "locked"),
-    ("pixel_size_y", "locked"),
-    # AGOL linkage (agol_format lives up with the steward-authored
-    # metadata block; the read-only AGOL state columns stay here)
-    ("agol_item_id", "agol"),
-    ("agol_published_at", "agol"),
-    ("last_synced_at", "agol"),
-    ("sync_status", "agol"),
+    ("temporal_start", "local_optional"),
+    ("temporal_end", "local_optional"),
+    ("feature_count", "system"),
+    ("raster_width", "system"),
+    ("raster_height", "system"),
+    ("pixel_size_x", "system"),
+    ("pixel_size_y", "system"),
+    # AGOL linkage, written by the sync (agol_format lives up with
+    # the steward-authored metadata block)
+    ("agol_item_id", "agol_state"),
+    ("agol_published_at", "agol_state"),
+    ("last_synced_at", "agol_state"),
+    ("sync_status", "agol_state"),
     # source provenance
-    ("source_format", "locked"),
-    ("source_filename", "locked"),
-    ("source_crs", "locked"),
-    ("source_layer", "locked"),
+    ("source_format", "system"),
+    ("source_filename", "system"),
+    ("source_crs", "system"),
+    ("source_layer", "system"),
 ]
 _INVENTORY_COLUMN_NAMES: list[str] = [c for c, _ in _INVENTORY_LAYOUT]
 
 _CHANGELOG_LAYOUT: list[tuple[str, str]] = [
-    ("id", "locked"),
-    ("timestamp", "locked"),
-    ("dataset_id", "locked"),
-    ("action", "locked"),
-    ("field_changed", "locked"),
-    ("old_value", "locked"),
-    ("new_value", "locked"),
-    ("note", "locked"),
-    ("actor", "locked"),
+    ("id", "system"),
+    ("timestamp", "system"),
+    ("dataset_id", "system"),
+    ("action", "system"),
+    ("field_changed", "system"),
+    ("old_value", "system"),
+    ("new_value", "system"),
+    ("note", "system"),
+    ("actor", "system"),
 ]
 _CHANGELOG_COLUMN_NAMES: list[str] = [c for c, _ in _CHANGELOG_LAYOUT]
-
-_FILLS: dict[str, PatternFill] = {
-    "locked": PatternFill("solid", start_color="D3D3D3"),       # grey
-    "overridable": PatternFill("solid", start_color="CFE2F3"),  # light blue
-    "required": PatternFill("solid", start_color="F4CCCC"),     # pink
-    "optional": PatternFill("solid", start_color="D9EAD3"),     # light green
-    "agol": PatternFill("solid", start_color="EAD1DC"),         # mauve (reserved)
-}
-
-_HEADER_FONT = Font(bold=True, color="000000")
 
 
 def _safety_check(out_path: Path) -> None:
@@ -147,8 +137,19 @@ def export(
     ws_log = wb.create_sheet(CHANGELOG_SHEET_NAME)
     _write_sheet(ws_log, _CHANGELOG_LAYOUT, _CHANGELOG_COLUMN_NAMES, changelog_rows)
 
+    sheet_style.write_legend_sheet(
+        wb, [role for _, role in _INVENTORY_LAYOUT + _CHANGELOG_LAYOUT],
+    )
+
     wb.save(out_path)
     return len(inventory_rows), len(changelog_rows)
+
+
+def _display(name: str, value: Any) -> Any:
+    """Render a catalogue value the way the steward reads it."""
+    if name == "authoritative":
+        return steward_fields.format_authoritative(value)
+    return value
 
 
 def _write_sheet(
@@ -159,14 +160,13 @@ def _write_sheet(
 ) -> None:
     """Render header (with role-coloured fill) + body for one sheet."""
     for col_idx, (name, role) in enumerate(layout, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=name)
-        cell.font = _HEADER_FONT
-        cell.fill = _FILLS.get(role, _FILLS["locked"])
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet_style.style_header_cell(
+            ws.cell(row=1, column=col_idx, value=name), role,
+        )
 
     for row_idx, row in enumerate(rows, start=2):
         for col_idx, name in enumerate(column_names, start=1):
-            ws.cell(row=row_idx, column=col_idx, value=row.get(name))
+            ws.cell(row=row_idx, column=col_idx, value=_display(name, row.get(name)))
 
     for col_idx, name in enumerate(column_names, start=1):
         letter = ws.cell(row=1, column=col_idx).column_letter

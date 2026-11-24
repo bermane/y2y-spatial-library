@@ -339,3 +339,130 @@ def test_approve_paired_vtpk_uses_target_stem_when_renamed(
     assert not (
         project_tree["library"].parent / "vtpk" / "source_name.vtpk"
     ).exists()
+
+
+# --- steward-typed fields: tags, authoritative, temporal, agol_item_id ---
+
+def _approve_one(project_tree, valid_gpkg_factory, **overrides):
+    pending_path, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    _fill_required(row, **overrides)
+    pending_sheet.save_pending(pending_path, [row])
+    result = _approve(project_tree)
+    return pending_path, result
+
+
+def test_scan_prefills_authoritative_yes(project_tree, valid_gpkg_factory) -> None:
+    _, row = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    assert row["authoritative"] == "yes"
+    assert row["temporal_start"] is None and row["temporal_end"] is None
+    assert row["agol_item_id"] is None
+
+
+def test_approve_stores_authoritative_default_and_normalised_tags(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    _, result = _approve_one(
+        project_tree, valid_gpkg_factory, tags="streams, test ; Streams;y2y",
+    )
+    assert result.promoted == 1
+    promoted = inventory_manager.load_inventory(project_tree["db"])[0]
+    assert promoted["authoritative"] == 1
+    assert promoted["tags"] == "streams;test;y2y"
+    assert promoted["temporal_start"] is None
+
+
+def test_approve_accepts_na_for_no_tags(project_tree, valid_gpkg_factory) -> None:
+    _, result = _approve_one(project_tree, valid_gpkg_factory, tags=" na ")
+    assert result.promoted == 1
+    promoted = inventory_manager.load_inventory(project_tree["db"])[0]
+    assert promoted["tags"] == "NA"
+
+
+def test_approve_rejects_empty_tags(project_tree, valid_gpkg_factory) -> None:
+    pending_path, result = _approve_one(project_tree, valid_gpkg_factory, tags=None)
+    assert result.failed == 1
+    row = pending_sheet.load_pending(pending_path)[0]
+    assert "enter NA" in row["_validation_error"]
+
+
+def test_approve_rejects_na_mixed_with_tags(project_tree, valid_gpkg_factory) -> None:
+    pending_path, result = _approve_one(project_tree, valid_gpkg_factory, tags="streams;NA")
+    assert result.failed == 1
+    assert "mixes" in pending_sheet.load_pending(pending_path)[0]["_validation_error"]
+
+
+def test_approve_stores_authoritative_no(project_tree, valid_gpkg_factory) -> None:
+    _, result = _approve_one(project_tree, valid_gpkg_factory, authoritative="No")
+    assert result.promoted == 1
+    assert inventory_manager.load_inventory(project_tree["db"])[0]["authoritative"] == 0
+
+
+def test_approve_rejects_blank_or_invalid_authoritative(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    pending_path, result = _approve_one(
+        project_tree, valid_gpkg_factory, authoritative="maybe",
+    )
+    assert result.failed == 1
+    assert "authoritative" in pending_sheet.load_pending(pending_path)[0]["_validation_error"]
+
+
+def test_approve_stores_temporal_coverage(project_tree, valid_gpkg_factory) -> None:
+    _, result = _approve_one(
+        project_tree, valid_gpkg_factory, temporal_start=2020, temporal_end="2021-06",
+    )
+    assert result.promoted == 1
+    promoted = inventory_manager.load_inventory(project_tree["db"])[0]
+    assert promoted["temporal_start"] == "2020-01-01T00:00:00Z"
+    assert promoted["temporal_end"] == "2021-06-30T00:00:00Z"
+
+
+def test_approve_rejects_bad_temporal_coverage(project_tree, valid_gpkg_factory) -> None:
+    pending_path, result = _approve_one(
+        project_tree, valid_gpkg_factory, temporal_start="2022", temporal_end="2020",
+    )
+    assert result.failed == 1
+    assert "temporal" in pending_sheet.load_pending(pending_path)[0]["_validation_error"]
+
+
+def test_approve_rejects_steward_typed_agol_item_id(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    pending_path, result = _approve_one(
+        project_tree, valid_gpkg_factory, agol_item_id="abc123",
+    )
+    assert result.failed == 1
+    assert "agol_item_id" in pending_sheet.load_pending(pending_path)[0]["_validation_error"]
+    assert inventory_manager.load_inventory(project_tree["db"]) == []
+
+
+def test_pending_sheet_has_role_colours_and_legend(
+    project_tree, valid_gpkg_factory,
+) -> None:
+    from openpyxl import load_workbook
+
+    from pipeline import sheet_style
+
+    pending_path, _ = _scan_then_load_row(project_tree, valid_gpkg_factory)
+    wb = load_workbook(pending_path)
+    assert wb.sheetnames == ["pending", "legend"]
+
+    ws = wb["pending"]
+    colour = {c.value: c.fill.start_color.rgb[-6:] for c in ws[1]}
+    hex_of = {role: v[0] for role, v in sheet_style.ROLES.items()}
+    assert colour["ready"] == hex_of["control"]
+    assert colour["tags"] == colour["title"] == colour["authoritative"] == hex_of["agol_required"]
+    assert colour["subcategory"] == hex_of["agol_optional"]
+    assert colour["data_steward"] == hex_of["local_required"]
+    assert colour["notes"] == colour["temporal_start"] == hex_of["local_optional"]
+    assert colour["dataset_id"] == hex_of["system"]
+    assert colour["agol_item_id"] == hex_of["agol_state"]
+    # The two columns that used to share green no longer share a colour.
+    assert colour["agol_item_id"] != colour["notes"]
+    # Every role has its own colour.
+    assert len(set(hex_of.values())) == len(hex_of)
+
+    legend_text = " ".join(
+        str(c.value) for r in wb["legend"].iter_rows() for c in r if c.value
+    )
+    assert "NA" in legend_text and "ArcGIS Online" in legend_text

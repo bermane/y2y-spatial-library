@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import inventory_manager, taxonomy
+from . import inventory_manager, steward_fields, taxonomy
 from .agol_config import AgolConfig, cache_group_id
 from .utils import utc_now_iso
 
@@ -222,7 +222,7 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     ``title``                    ``title``
     ``summary``                  ``snippet``
     ``description``              ``description``
-    ``tags`` (``;``-delimited)   ``tags`` (list)
+    ``tags`` (``;``-delimited)   ``tags`` (list; ``NA`` → empty)
     ``acknowledgements``         ``accessInformation``
     ``terms_of_use``             ``licenseInfo``
     ``category`` (+subcategory)  ``categories`` (1 absolute path)
@@ -236,8 +236,9 @@ def compute_item_properties(row: dict[str, Any]) -> dict[str, Any]:
     queries find Y2Y items (``Y2Y``, ``Y2Y:dataset_id:<id>``,
     ``Y2Y:category:<category>``).
     """
-    tags_raw = row.get("tags") or ""
-    tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
+    # The catalogue's "no tags" marker (NA) becomes an empty list; it
+    # is never published as a tag.
+    tags = steward_fields.tags_for_agol(row.get("tags"))
     category = row.get("category")
 
     type_keywords = ["Y2Y"]
@@ -2622,16 +2623,11 @@ def _tag_set(value: Any) -> set[str]:
     """Normalise a tags value to a set for set-equality comparison.
 
     Catalogue stores tags as a ``;``-delimited string. AGOL exposes
-    ``item.tags`` as a list. Trim/lowercase nothing — case matters
-    for AGOL search.
+    ``item.tags`` as a list. Lowercase nothing — case matters for
+    AGOL search. The catalogue's "no tags" marker (``NA``) counts as
+    no tags, so it equals an AGOL item with an empty tag list.
     """
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        return {t.strip() for t in value.split(";") if t.strip()}
-    if isinstance(value, (list, tuple)):
-        return {str(t).strip() for t in value if str(t).strip()}
-    return {str(value).strip()}
+    return set(steward_fields.tags_for_agol(value))
 
 
 def _diff_adoption_fields(
@@ -3240,7 +3236,12 @@ def pull(
         if field == "tags":
             # AGOL exposes tags as a sorted list (from _diff_adoption_fields);
             # catalogue stores them as ';'-delimited strings.
-            updates[column] = ";".join(agol_val)
+            # An AGOL item with no tags is stored as the NA marker.
+            agol_tags = steward_fields.tags_for_agol(agol_val)
+            updates[column] = (
+                steward_fields.normalize_tags(agol_tags) if agol_tags
+                else steward_fields.NO_TAGS_MARKER
+            )
         else:
             updates[column] = agol_val
         absorbed.append(f"{column} ← AGOL.{field}")

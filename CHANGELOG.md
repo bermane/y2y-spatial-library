@@ -20,6 +20,22 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - `setup_windows.ps1` now runs the full test suite and reports the result.
 - Replaced a deprecated geopandas call in the tests. geopandas 1.0 or newer is
   now required.
+- New header colours in `pending.xlsx` and `inventory.xlsx`, with a `legend`
+  tab in each. Blue columns are filled by the steward and published to ArcGIS
+  Online, orange columns are filled by the steward and stay in the catalogue,
+  grey columns are filled by the pipeline, and mauve columns are written by
+  the ArcGIS Online sync. A lighter shade marks an optional column.
+- `tags` can now say "no tags": enter `NA` (any letter case) on its own. The
+  cell still cannot be empty, `NA` cannot be mixed with real tags, and it is
+  never published as a tag. Tags may be separated with `;` or `,`, and
+  duplicates are dropped.
+- New `authoritative` column (`yes` / `no`, pre-filled `yes`), in the review
+  sheet, the inventory and `y2y update`. An existing catalogue needs
+  migration 011; a new one already has the column.
+- `temporal_start` and `temporal_end` can now be filled, in the review sheet
+  and with `y2y update`.
+- `agol_item_id` is no longer filled in the review sheet. The first push to
+  ArcGIS Online writes it.
 
 ## 0.1.0
 

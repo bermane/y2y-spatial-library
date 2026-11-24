@@ -114,6 +114,7 @@
 <pre><span class="k">y2y ingest</span>                              <span class="c"># scan queue/incoming/ → pending.xlsx</span>
 <span class="k">open</span> queue/processing/pending.xlsx      <span class="c"># fill fields, set ready=TRUE</span>
 <span class="k">y2y ingest --approve</span>                    <span class="c"># validate + promote into library/ + catalogue</span></pre>
+<div class="note">Sheet colours: <strong>blue</strong> = you fill, goes to ArcGIS Online · <strong>orange</strong> = you fill, stays in the catalogue · <strong>grey / mauve</strong> = don't touch (lighter shade = optional; see the <code>legend</code> tab). <code>tags</code>: separate with <code>;</code>, or enter <code>NA</code> for none.</div>
 
 <h2 class="sec">Edit · move · remove</h2>
 <pre><span class="k">y2y update</span> &lt;id&gt; --set summary=<span class="c">"…"</span> --set tags=<span class="c">"a;b;c"</span>   <span class="c"># change metadata fields</span>

@@ -316,7 +316,7 @@ placeholder metadata would erode that invariant over time.
 | `title`            | string                  | AGOL item title. Title Case display string authored by the steward — *not* derived from filename. The corresponding inventory record of the *file* is `file_path`; `title` is what AGOL users see. |
 | `summary`          | string (short)          | AGOL "snippet". One sentence; ~250 chars.                                 |
 | `description`      | string (plain text)     | AGOL description. Plain text only — no HTML, no rich formatting.          |
-| `tags`             | string (`;`-delimited)  | Flat list; not a join table. e.g., `caribou;telemetry;central_selkirks`.  |
+| `tags`             | string (`;`-delimited)  | Flat list; not a join table. e.g., `caribou;telemetry;central_selkirks`. Never empty: a dataset with no tags stores the marker `NA`, which is recognised in any letter case, cannot be mixed with real tags, and is never published to AGOL as a tag. The steward may type `;` or `,` between tags; the catalogue stores `;`. See `pipeline/steward_fields.py`. |
 | `terms_of_use`     | string                  | Data-sharing and privacy conditions: who may use the data, for what, with what restrictions (redistribution, attribution, sensitive-species buffering, First Nations data sovereignty, etc.). |
 | `acknowledgements` | string                  | Credit line for the data author(s) and any publications to cite when using the dataset. Separate from `source` (organization of origin) and from `terms_of_use` (sharing/privacy). |
 
@@ -329,6 +329,7 @@ placeholder metadata would erode that invariant over time.
 | `last_synced_at`     | ISO-8601 datetime | no       | AGOL integration (§15). Last successful catalogue↔AGOL sync; drives drift detection. |
 | `sync_status`        | enum              | yes      | One of `clean`, `pending_push`, `pending_pull`, `conflict`, `error`, `unpublished` (schema CHECK). Defaults to `unpublished`. AGOL integration (§15). |
 | `agol_format`        | enum              | no       | Publish-target intent: `feature-layer` / `vector-tile-layer` / `imagery-layer`. Pre-filled at ingest from format; editable via `y2y update`. AGOL integration (§15). |
+| `authoritative`      | boolean (INTEGER 0/1) | yes  | Whether this dataset is the authoritative copy. Defaults to yes (1): the library exists to hold authoritative datasets, and the steward sets no for the exceptions. Shown and typed as `yes` / `no`. Added by migration 011. Not yet pushed to AGOL (its "Authoritative" content status needs an admin-level privilege). |
 | `internal_notes`     | string            | no       | Free-form. Renamed from the pre-migration `notes` column to make its private-audience nature explicit (the steward writes here; AGOL never sees it). Don't encode structured data; add a column instead. |
 
 #### Spatial properties (computed at promote / refresh)
@@ -344,8 +345,8 @@ snapshot — not a free-text steward field.
 | `raster_height`  | integer | rasters    | Pixel height. Null for vectors.                                                    |
 | `pixel_size_x`   | real    | rasters    | Pixel size in CRS units (positive). Null for vectors.                              |
 | `pixel_size_y`   | real    | rasters    | Pixel size in CRS units (positive; sign-flipped from the rasterio affine for north-up rasters). Null for vectors. |
-| `temporal_start` | ISO-8601 datetime | both | Reserved. Datasets with explicit time coverage will populate this; null otherwise. |
-| `temporal_end`   | ISO-8601 datetime | both | Reserved. As above.                                                            |
+| `temporal_start` | ISO-8601 datetime | both | Optional, steward-declared: start of the period the data covers. Typed as `YYYY`, `YYYY-MM` or `YYYY-MM-DD` in the review sheet or via `y2y update`; stored as `YYYY-MM-DDT00:00:00Z`. Null when it does not apply. Not computed from the file. |
+| `temporal_end`   | ISO-8601 datetime | both | Optional, steward-declared: end of the period. A year or year-month is read as its last day. Must not be before `temporal_start`. |
 
 These were "intrinsic" all along — the file already knew them — but the
 xlsx-era inventory didn't capture them. The SQLite schema does so they
@@ -408,17 +409,26 @@ Run: `y2y ingest`.
    Phase 3 against the transformed file.
 6. Do not touch `library/` or `inventory/inventory.xlsx` in this phase.
 
-Column colouring in `pending.xlsx`:
+Column colouring in `pending.xlsx` (defined once in
+`pipeline/sheet_style.py`, shared with `inventory.xlsx`, and explained in
+a `legend` tab in both workbooks). The colour says who fills a column and
+whether its value is published to AGOL. Required and optional share a
+hue; required is the darker shade.
 
-| Colour / state | Columns                                                                  | Steward action |
-| -------------- | ------------------------------------------------------------------------ | -------------- |
-| Review control | `ready` (boolean, defaults to `FALSE`)                                    | Flip to `TRUE` when the row is fully filled in |
-| Auto-filled, locked at scan | `dataset_id`, `source_format`, `source_filename`, `source_crs`, `source_layer`, `format`, `date_added` | None — these are forensic; editing breaks audit |
-| Empty until approve, locked then | `file_path`, `crs`, `checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`, `date_modified` | None — these snapshot the *transformed* file |
-| Auto-filled, overridable | `category`, `subcategory`, `status` | Confirm or correct |
-| Transform inputs | `target_filename` (auto-proposed), `classification` (auto-set to `vector`; required for raster) | Confirm; supply when needed |
-| Empty, required | `title`, `data_steward`, `summary`, `description`, `tags`, `terms_of_use`, `acknowledgements` | Fill in before flipping `ready` |
-| Empty, optional | `agol_item_id`, `notes` | Fill in if applicable |
+| Colour | Meaning | Columns | Steward action |
+| ------ | ------- | ------- | -------------- |
+| Yellow | Review control | `ready` (defaults to `FALSE`) | Flip to `TRUE` when the row is fully filled in |
+| Blue | Steward-filled, published to AGOL, required | `category`, `title`, `summary`, `description`, `tags`, `terms_of_use`, `acknowledgements`, `agol_format`, `authoritative` | Fill in. `category`, `agol_format` and `authoritative` (yes) are pre-filled: confirm or correct. `tags` takes `NA` for none. |
+| Light blue | Steward-filled, published to AGOL, optional | `subcategory` | Species only |
+| Orange | Steward-filled, stays in the catalogue, required | `target_filename` (auto-proposed), `classification` (auto-set to `vector`; required for raster), `status`, `data_steward` | Confirm; supply when needed |
+| Light orange | Steward-filled, stays in the catalogue, optional | `temporal_start`, `temporal_end`, `notes` | Fill in if applicable |
+| Grey | Filled by the pipeline | `dataset_id`, `source_*`, `format`, `date_added` (at scan); `file_path`, `crs`, `checksum_sha256`, `size_bytes`, `mtime`, `geographic_extent_bbox`, `date_modified` (at approve) | None. These are forensic; editing breaks audit |
+| Mauve | Written by the AGOL sync | `agol_item_id` | None. Approve rejects a row where it has been typed in |
+| Red | Pipeline error message | `_validation_error` | Read it, fix the row, set `ready` again |
+
+`inventory.xlsx` uses the same colours for the same columns, plus mauve
+for the other sync-written columns (`agol_published_at`,
+`last_synced_at`, `sync_status`).
 
 `ready`, `target_filename`, and `_validation_error` are pipeline-only
 controls — they live in `pending.xlsx` only and are stripped when the
@@ -591,8 +601,13 @@ The admitted fields are deliberately narrow:
 
 - **Allowed:** `title`, `data_steward`, `summary`, `description`,
   `tags`, `terms_of_use`, `acknowledgements`, `agol_item_id`,
-  `internal_notes`, `classification`, plus `status` transitions
-  between `active` and `deprecated`.
+  `internal_notes`, `classification`, `agol_format`, `authoritative`,
+  `temporal_start`, `temporal_end`, plus `status` transitions
+  between `active` and `deprecated`. `tags`, `authoritative` and the
+  temporal columns follow the same rules as the review sheet.
+  `agol_item_id` stays updatable only so a manually published item
+  can be wired in before `y2y agol-sync adopt`; normally the push
+  fills it.
 - **Rejected as locked** (filesystem-derived snapshot fields, §3):
   `dataset_id`, `checksum_sha256`, `size_bytes`, `mtime`, `crs`,
   `geographic_extent_bbox`, `date_added`. Editing these in the

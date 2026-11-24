@@ -211,8 +211,14 @@ publish**. Repeat for each tutorial layer.
    start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"
    ```
    - Fill the required fields: `title`, `summary`, `description`, `tags`
-     (semicolon-separated), `terms_of_use`, `acknowledgements`, `data_steward`.
-     (`category` and `agol_format` are pre-filled — adjust if needed.)
+     (semicolon-separated, or `NA` if the dataset should have no tags),
+     `terms_of_use`, `acknowledgements`, `data_steward`.
+     (`category`, `agol_format` and `authoritative` are pre-filled; adjust if
+     needed.)
+   - The header colours tell you what to touch: **blue** and **orange** columns
+     are yours to fill (blue ones are published to ArcGIS Online), **grey** and
+     **mauve** columns are filled automatically. The `legend` tab in the sheet
+     explains them.
    - You can **copy-paste** these from the existing inventory spreadsheet Ethan
      has open (same column names).
    - Set **`ready` = TRUE**.
