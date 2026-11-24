@@ -39,6 +39,7 @@ y2y [--root DIRECTORY] COMMAND [ARGS]...
   directory. All paths (`queue/`, `library/`, `inventory/`, `reports/`)
   resolve under it.
 - `y2y --help` — list all commands.
+- `y2y --version` — print the installed version (see `CHANGELOG.md`).
 - `y2y <command> --help` — full options for any command.
 
 **Source of truth:** `inventory/inventory.db` (SQLite). `inventory.xlsx`

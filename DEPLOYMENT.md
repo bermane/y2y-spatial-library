@@ -108,6 +108,21 @@ mid-write**.
 
 ---
 
+## Releases and versions
+
+- The version is set in one place, `pipeline/__init__.py`. `y2y --version`
+  prints it.
+- Every change the operator should receive is a release: bump the version, add
+  an entry to `CHANGELOG.md`, merge to `main`, and tag the merge `vX.Y.Z`.
+- `main` only ever holds released code, so the operator's `git pull` (or
+  `scripts/update_windows.ps1`) always lands on a tagged version.
+- `0.9.x` is the pilot on the steward's machine. `1.0.0` is reserved for the
+  February 2027 launch to Y2Y staff.
+- To go back to an earlier release: `git checkout vX.Y.Z`, then re-run the
+  update script.
+
+---
+
 ## Handing the steward role to an internal operator
 
 Because the data isn't in git, a handoff needs a **one-time data

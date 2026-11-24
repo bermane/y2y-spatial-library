@@ -58,3 +58,5 @@ y2y --help                      # or: python -m pipeline
 - Tests must not touch a real data root or call AGOL; use the fixtures in
   `tests/conftest.py`.
 - When CLI behaviour changes, update CHEATSHEET and COMMAND_REFERENCE (.md and .html).
+- The version lives only in `pipeline/__init__.py`. Every release bumps it, adds a
+  `CHANGELOG.md` entry, and is tagged `vX.Y.Z` on `main` (see DEPLOYMENT.md).
