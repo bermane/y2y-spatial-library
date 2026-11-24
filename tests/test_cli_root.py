@@ -6,6 +6,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+from pipeline import __version__
 from pipeline.__main__ import cli
 
 
@@ -43,3 +44,11 @@ def test_explicit_root_flag_overrides_env(tmp_path, monkeypatch):
     monkeypatch.setenv("Y2Y_ROOT", str(env_root))
     r = _run(["--root", str(flag_root), "agol-sync", "status"])
     assert r.exit_code == 0
+
+
+def test_version_flag_prints_package_version():
+    """`y2y --version` reports the version set in pipeline/__init__.py, so
+    the operator can tell the maintainer which release is installed."""
+    r = _run(["--version"])
+    assert r.exit_code == 0
+    assert r.output.strip() == f"y2y, version {__version__}"

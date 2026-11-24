@@ -25,6 +25,8 @@ from pathlib import Path
 import click
 from rich.console import Console
 
+from pipeline import __version__
+
 console = Console()
 
 
@@ -68,6 +70,7 @@ def _resolve_paths(root: Path) -> tuple[Path, Path, Path]:
     help="Project/data root. Precedence: --root, then the Y2Y_ROOT "
          "environment variable, then the current working directory.",
 )
+@click.version_option(__version__, "--version", prog_name="y2y")
 @click.pass_context
 def cli(ctx: click.Context, root: Path | None) -> None:
     """Y2Y Spatial Library pipeline CLI."""

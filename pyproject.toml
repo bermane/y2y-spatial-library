@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "y2y-spatial-library"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Pipeline tooling for the Yellowstone to Yukon (Y2Y) authoritative spatial data library."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,10 @@ dependencies = [
     # Version pin matches the range arcgis 2.3+ supports — outside
     # this range the upload_imagery_to_agol_userstore call errors.
     "azure-storage-blob>=12.1,<=12.17",
+    # Imported by the arcgis imagery upload path but not declared by
+    # arcgis itself; without it a fresh install fails imagery-layer
+    # pushes with "No module named 'six'".
+    "six>=1.16",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +52,10 @@ dev = [
 
 [project.scripts]
 y2y = "pipeline.__main__:cli"
+
+# Single source of truth for the version: pipeline/__init__.py.
+[tool.setuptools.dynamic]
+version = { attr = "pipeline.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["pipeline*"]

@@ -6,4 +6,6 @@ is the canonical data store; this package is the only sanctioned way
 to mutate it.
 """
 
-__version__ = "0.1.0"
+# The one place the version is set. pyproject.toml reads it from here, and
+# `y2y --version` prints it. Bump it and add a CHANGELOG.md entry per release.
+__version__ = "0.9.0"

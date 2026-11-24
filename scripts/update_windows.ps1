@@ -41,6 +41,8 @@ Write-Host "Reconciling dependencies (only does work if they changed) ..." -Fore
 # --- 3. Smoke test ----------------------------------------------------------
 Write-Host "-- CLI smoke --" -ForegroundColor Cyan
 & $venvPython -m pipeline --help | Select-Object -First 3
+Write-Host "-- Installed version --" -ForegroundColor Cyan
+& $venvPython -m pipeline --version
 
 Write-Host ""
 Write-Host "=== Update complete ===" -ForegroundColor Green

@@ -248,6 +248,14 @@ Because the pipeline is installed in "editable" mode, a pull usually makes the
 new code live immediately — the script just covers the occasional case where
 dependencies changed.
 
+- **Check which version you are on** (do this after every update, and quote it
+  when you report a problem to Ethan):
+  ```powershell
+  > y2y --version
+  ```
+  It should match the newest entry in `CHANGELOG.md`, which also lists what
+  changed in each release.
+
 ---
 
 ## 7. Operating rules (read `DEPLOYMENT.md`)
