@@ -352,6 +352,11 @@ def _maybe_mark_dirty(
     row = get_dataset(db_path, dataset_id)
     if row is None:
         return None
+    if row.get("status") != "active":
+        # Deprecated / tombstoned rows are never pushed; marking them
+        # pending_push would strand them in that state. Their AGOL
+        # item is removed instead (see agol_sync.try_auto_remove).
+        return None
     prior = row.get("sync_status") or "unpublished"
     if prior != "clean":
         return None

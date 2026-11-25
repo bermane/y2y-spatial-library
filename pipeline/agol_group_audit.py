@@ -490,8 +490,9 @@ def render_markdown(audit: GroupAudit) -> list[str]:
             "### Layers of deprecated or tombstoned datasets",
             "",
             ("Still shared to the group although the dataset is no longer "
-            "active. Remove with `y2y agol-sync unpublish <id>` if the "
-            "layer should go."),
+            "active. Reconcile removes these layers, so one listed here "
+            "could not be deleted (see \"Removal from AGOL failed\" "
+            "above) or this was a dry run."),
             "",
             *[_item_line(e) for e in audit.should_be_gone],
             "",

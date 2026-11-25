@@ -290,8 +290,8 @@ land in inventory only after a successful approve.
 | Value         | File on disk? | Meaning                                                                  |
 | ------------- | ------------- | ------------------------------------------------------------------------ |
 | `active`      | present       | Normal state. Reconciliation applies drift checks.                       |
-| `deprecated`  | present       | Discouraged from new use but still available. Reconciliation still applies. |
-| `tombstoned`  | absent        | Dataset has been removed. Row is retained as an audit record; `dataset_id` stays reserved. Reconciliation expects the file to be absent and flags it as a violation if it reappears. |
+| `deprecated`  | present       | Superseded or retired from use. The file and the row are kept, and file reconciliation still applies, but the dataset is **not on AGOL**: deprecating a published dataset removes its AGOL item(s), and a deprecated dataset is never pushed (§15, "Retired datasets leave AGOL"). Setting it back to `active` publishes it again as a new item. |
+| `tombstoned`  | absent        | Dataset has been removed. Row is retained as an audit record; `dataset_id` stays reserved. Reconciliation expects the file to be absent and flags it as a violation if it reappears. Its AGOL item(s) are removed too (§15). |
 
 #### Extrinsic metadata — Dublin Core+ (required for every dataset)
 
@@ -591,7 +591,7 @@ appends a corresponding action to the changelog table.
 | --------------- | --------------------------------------------------------------------- | ---------------- |
 | `y2y update`    | Non-locked fields on the row                                          | `update`         |
 | `y2y rename`    | The file's path within `library/`; inventory's `file_path`, `category`, and (if applicable) `subcategory` | `rename`         |
-| `y2y tombstone` | Sets `status=tombstoned` and deletes the file from `library/`         | `remove`         |
+| `y2y tombstone` | Sets `status=tombstoned`, deletes the file from `library/`, and removes the dataset's AGOL item(s) | `remove`         |
 | `y2y refresh`   | Re-stats the file on disk; updates the intrinsic snapshot (`checksum_sha256`, `size_bytes`, `mtime`, `library_crs`, `geographic_extent_bbox`) to match | `refresh`        |
 
 ### What `update` may and may not change
@@ -670,6 +670,8 @@ when you don't want to wait for the next reconcile cycle.
 `status=tombstoned`. The `dataset_id` stays reserved forever —
 inventory rows are never deleted; the row remains as an audit record.
 The CLI prompts for confirmation; bypass with `--yes` if scripted.
+If the dataset is published on AGOL, the prompt says so, and its AGOL
+item(s) are removed as well (§15, "Retired datasets leave AGOL").
 
 If the file is already absent (e.g., the steward deleted it
 manually), `tombstone` proceeds anyway and records that fact in the
@@ -1236,6 +1238,9 @@ conflict ──(pull --reject)──> pending_push ─> clean
 error ──(reconcile retry succeeds)─────────> clean
 error ──(reconcile retry fails)────────────> error
 any-with-item ──(unpublish)────────────────> unpublished
+any-with-item ──(unpublish, AGOL refuses)──> error   (link kept)
+any-with-item ──(status → deprecated / tombstoned,
+                 removed by auto-sync or reconcile)──> unpublished
 ```
 
 The state machine lives in application code (`agol_sync.py`), not the
@@ -1256,9 +1261,9 @@ org's full content tree is never scanned. Consequences:
   edits or removes untracked AGOL items. Untracked layers inside the
   Conservation Atlas group are *reported* by the group audit (below);
   everything outside that group is ignored.
-- **Tombstoned rows** → filtered out of every iteration. Call
-  `y2y agol-sync unpublish <id>` before tombstoning if the AGOL item
-  should go too.
+- **Deprecated and tombstoned rows** → never pushed, pulled or
+  drift-checked. If one still has an `agol_item_id`, its AGOL item(s)
+  are removed (see "Retired datasets leave AGOL" below).
 
 Integration-created items are stamped with `typeKeywords` (`Y2Y`,
 `Y2Y:dataset_id:<id>`, `Y2Y:category:<category>`). The group audit
@@ -1319,12 +1324,53 @@ Catalogue mutations propagate to AGOL automatically:
   failure — no profile, offline, 5xx — is swallowed and audited in
   the changelog; the catalogue mutation always succeeds independent of
   AGOL state. The row stays `pending_push` for the next reconcile.
+- Only `active` rows are marked `pending_push`. For a row that has
+  just become `deprecated` or `tombstoned`, the hook removes its AGOL
+  item(s) instead (`agol_sync.try_auto_remove()`), under the same
+  swallow-and-audit contract.
 
-Set `Y2Y_AGOL_AUTO_PUSH=false` to make all pushes manual.
+Set `Y2Y_AGOL_AUTO_PUSH=false` to make all pushes and removals manual.
+
+### Retired datasets leave AGOL
+
+A dataset whose `status` is `deprecated` or `tombstoned` does not
+belong on AGOL. One rule drives everything: a row is **due for
+removal** when its status is one of those two **and** it still has an
+`agol_item_id`. No extra `sync_status` value exists for this.
+
+- **At the status change.** `y2y update <id> --set status=deprecated`
+  and `y2y tombstone <id>` warn that the dataset is published and ask
+  for confirmation (`--yes` skips it; answering no changes nothing).
+  With auto-sync on, the service and its linked source item are then
+  deleted through the same code as `unpublish`, the link is cleared
+  and `sync_status` becomes `unpublished`. With auto-sync off, only
+  the catalogue changes and the row stays due for removal.
+- **Safety net.** `y2y agol-sync reconcile` removes every row that is
+  still due for removal, so a removal that could not happen at the
+  status change (offline, expired sign-in, AGOL error) completes on
+  the next run. `--dry-run` lists what would be removed.
+  `y2y agol-sync status` lists the rows that are waiting.
+- **What is kept.** The catalogue row, the changelog (which records
+  the old item ID) and, for a deprecated dataset, the library file and
+  any `.vtpk` in `library/vtpk/`.
+- **What is lost.** Deletion is permanent (see "Unpublish"). Anything
+  that existed only on AGOL goes with the item: its item ID, styling
+  and pop-ups saved on the layer, usage statistics and comments. Edits
+  made on AGOL that were never pulled are discarded. Web maps and apps
+  that use the layer show it as broken; the pipeline does not look for
+  them (catalogue-centric scope), so the prompt states the consequence
+  and the steward checks on AGOL when in doubt.
+- **Re-activating.** `y2y update <id> --set status=active` makes the
+  row an ordinary `active` + `unpublished` row, so auto-sync (or
+  `y2y agol-sync push <id>`) publishes it again as a **new** item with
+  a new ID.
 
 ### Bidirectional reconcile
 
-`y2y agol-sync reconcile [--dry-run]` iterates every active row:
+`y2y agol-sync reconcile [--dry-run]` first removes the AGOL item(s)
+of every deprecated or tombstoned row that is still linked (report
+sections "Removed from AGOL" and "Removal from AGOL failed"), then
+iterates every active row:
 
 - `pending_push` → push (failures → `error`).
 - `clean` → compare AGOL's `modified` timestamp to `last_synced_at`;
@@ -1439,9 +1485,21 @@ Adoption never mutates AGOL.
 `y2y agol-sync unpublish <id>` (confirmation-gated) permanently deletes
 the service + linked source, then clears `agol_item_id` /
 `agol_published_at` / `last_synced_at` and sets `sync_status=
-'unpublished'`. The catalogue row stays active and can be re-pushed.
-`permanent=True` frees the service-name reservation immediately so a
-later re-push under the same name doesn't collide with the recycle bin.
+'unpublished'`. The catalogue row keeps its status; an active row can
+be re-pushed. `permanent=True` frees the service-name reservation
+immediately so a later re-push under the same name doesn't collide
+with the recycle bin.
+
+If AGOL refuses or fails to delete the **service** item (delete
+protection, a dependent hosted view, a network error), the layer is
+still live, so the link is **kept**, the row is set to `sync_status=
+'error'`, and the reason goes to `internal_notes` and the changelog.
+Clearing the link there would orphan a live layer that nothing tracks.
+A failure to delete only the linked source item is a warning and does
+not block the unlink.
+
+Deprecating or tombstoning a dataset runs this removal automatically.
+The command itself is for taking an **active** dataset off AGOL.
 
 ### Authentication & config
 
