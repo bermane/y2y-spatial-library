@@ -280,6 +280,15 @@ organization until you remove it in step 6.
    - it shows the **Authoritative** badge (when `authoritative` is `yes`);
    - for a feature layer, **Settings → "Allow others to export to different
      formats"** is ticked. (Vector tile and imagery layers are view-only.)
+   - opened in Map Viewer, it draws in the standard default style: polygons
+     as an outline with no fill, lines and points in the colour of the
+     dataset's category, rasters 30% transparent.
+
+   The default style is set once, when the layer is first published. You can
+   restyle a layer in Map Viewer and save it; later pushes keep your change.
+   To put a layer back on the default style, run
+   `y2y agol-sync restyle <dataset_id>` (it asks first, and saves the style it
+   replaces into `reports\`).
 
    If the badge is missing, see the Authoritative note in §4.
 
