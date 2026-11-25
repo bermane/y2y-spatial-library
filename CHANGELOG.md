@@ -31,6 +31,9 @@ Pilot release for the first deployment on the data steward's Windows machine.
   typed with backslashes.
 - Fixed: rasters are now published as tiled imagery layers. The dynamic
   imagery layers the pipeline made before did not open in Map Viewer.
+- Fixed: retiring a dataset marked authoritative failed, because ArcGIS
+  Online puts delete protection on authoritative layers. Removal now turns
+  the protection off first, and deletes nothing if that fails.
 - The version is now set in one place, `pipeline/__init__.py`.
 - Added `six` to the dependencies. A fresh install was missing it, which broke
   publishing rasters as imagery layers.

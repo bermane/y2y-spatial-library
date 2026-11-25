@@ -1373,6 +1373,25 @@ def _handle_target_switch(
     return note
 
 
+def _clear_delete_protection(item: Any) -> str | None:
+    """Turn off delete protection on ``item`` if it is on.
+
+    AGOL turns delete protection on for an item marked Authoritative,
+    and a protected item refuses ``delete()``. Returns ``None`` when
+    the item is unprotected afterwards (or never was), otherwise a
+    short description of why protection could not be turned off.
+    """
+    if getattr(item, "protected", False) is not True:
+        return None
+    try:
+        result = item.protect(enable=False)
+    except Exception as exc:
+        return str(exc)
+    if isinstance(result, dict) and result.get("success") is False:
+        return "AGOL reported success=false"
+    return None
+
+
 def _unpublish_agol_items(
     *,
     gis,
@@ -1404,7 +1423,21 @@ def _unpublish_agol_items(
     catalogue's ``agol_item_id`` is cleared by the caller after
     this returns; subsequent reconcile / push runs will surface
     any orphans on the AGOL side.
+
+    Delete protection on the service item is turned off first (AGOL
+    turns it on for Authoritative layers). If that fails, nothing is
+    deleted: removing the source while the layer stays live would
+    leave a layer with no source.
     """
+    problem = _clear_delete_protection(service_item)
+    if problem is not None:
+        _record_warning(properties, (
+            f"could not turn off delete protection on service item "
+            f"{getattr(service_item, 'id', '?')!r}, so nothing was "
+            f"deleted: {problem}"
+        ))
+        return False
+
     # Find and delete linked source(s) first. Walking Service2Data
     # before deleting the service preserves the relationship while
     # we still have a valid handle.
@@ -1420,6 +1453,7 @@ def _unpublish_agol_items(
         linked = []
 
     for src in linked:
+        _clear_delete_protection(src)
         try:
             src.delete(permanent=True)
         except TypeError:
