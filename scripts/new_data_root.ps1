@@ -11,11 +11,11 @@
         powershell -ExecutionPolicy Bypass -File .\scripts\new_data_root.ps1 `
             -DataRoot "C:\Users\<you>\OneDrive - ...\Y2Y_Spatial_Library"
 
-    After this, work by activating the local venv and pointing the pipeline
-    at the data root, e.g.:
+    After this, set the Y2Y_ROOT environment variable to the same path (see
+    ONBOARDING_WINDOWS.md), then work by activating the local venv:
 
         C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
-        y2y --root "C:\Users\<you>\OneDrive - ...\Y2Y_Spatial_Library" ingest
+        y2y ingest
 
     IMPORTANT: pause OneDrive/SharePoint sync while running y2y commands, so
     the live inventory.db is never synced mid-write. See DEPLOYMENT.md.
@@ -49,7 +49,10 @@ foreach ($d in $dirs) {
 # subcategories) from the code repo so the taxonomy is visible up front.
 $srcLib = Join-Path $CodeRoot "library"
 $dstLib = Join-Path $DataRoot "library"
-if (Test-Path $srcLib) {
+if (Test-Path $dstLib) {
+    Write-Host "  = library\ already exists - left as it is"
+}
+elseif (Test-Path $srcLib) {
     Copy-Item -Recurse -Force $srcLib $dstLib
     Write-Host "  + library\ (category skeleton copied from code repo)"
 }
@@ -61,5 +64,5 @@ else {
 Write-Host ""
 Write-Host "=== Data root ready ===" -ForegroundColor Green
 Write-Host "Drop source files into:  $(Join-Path $DataRoot 'queue\incoming')" -ForegroundColor White
-Write-Host "Run the pipeline with:   y2y --root `"$DataRoot`" <command>" -ForegroundColor White
+Write-Host "Next: set the Y2Y_ROOT environment variable to this path (see ONBOARDING_WINDOWS.md)." -ForegroundColor White
 Write-Host "Pause OneDrive sync while running y2y commands (see DEPLOYMENT.md)." -ForegroundColor Yellow

@@ -30,7 +30,7 @@ library/
 │   └── Water/
 └── vtpk/                          # derived publish artifacts (Vector Tile Packages)
     └── <gpkg_file_stem>.vtpk      # one per active row with
-                                   # agol_target='vector-tile-layer'
+                                   # agol_format='vector-tile-layer'
 ```
 
 ### `vtpk/` — derived publish artifacts
@@ -44,7 +44,7 @@ pairs with `library/vtpk/parks.vtpk`.
 
 The pipeline never writes VTPKs directly. Stewards build them
 manually in ArcGIS Pro's "Share As Vector Tile Package" workflow,
-drop the resulting file in `queue/incoming/`, and `y2y ingest scan`
+drop the resulting file in `queue/incoming/`, and `y2y ingest`
 moves it here + writes a `.sha256` sidecar. Reconcile flags VTL
 rows whose VTPK is missing or stale (source GPKG newer than the
 VTPK). Push uses the file here to upload + publish to AGOL.
@@ -119,5 +119,5 @@ will surface as orphans. Use the queue.
   matches.
 - **Deletion**: never `rm` from `library/spatial/`. Use
   `y2y tombstone <id>` — the row stays as audit history; the file is
-  removed; reconcile will keep flagging the path forever if it
+  removed, and so is its layer on ArcGIS Online; reconcile will keep flagging the path forever if it
   reappears.

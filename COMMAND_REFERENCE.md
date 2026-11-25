@@ -27,17 +27,26 @@ how-to see `README.md`.
 
 ## 1. Environment & invocation
 
-```bash
-cd /path/to/Spatial_Data && source .venv/bin/activate
+```powershell
+# Windows (the steward's machine): activate, then pause OneDrive sync
+C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
 ```
+
+Examples in this document are written for Windows PowerShell. On macOS or
+Linux, activate with `source .venv/bin/activate`, open files with `open`
+instead of `start`, and set variables with `export NAME=value` instead of
+`$env:NAME = "value"`.
 
 ```
 y2y [--root DIRECTORY] COMMAND [ARGS]...
 ```
 
-- `--root DIRECTORY` — project root. Defaults to the current working
-  directory. All paths (`queue/`, `library/`, `inventory/`, `reports/`)
-  resolve under it.
+- `--root DIRECTORY` — the data root. If it is not given, the `Y2Y_ROOT`
+  environment variable is used, and if that is not set, the current
+  working directory. All paths (`queue/`, `library/`, `inventory/`,
+  `reports/`) resolve under it.
+- `DATASET_ID` — every dataset has an ID like `ds_01ABC…`. Look it up in
+  the `dataset_id` column of `inventory/inventory.xlsx`.
 - `y2y --help` — list all commands.
 - `y2y --version` — print the installed version (see `CHANGELOG.md`).
 - `y2y <command> --help` — full options for any command.
@@ -47,7 +56,8 @@ is a rendered read-only view. AGOL is a downstream publication target;
 catalogue mutations never block on it.
 
 **Common option — `--actor NAME`:** every mutating command accepts it to
-record who made the change in the changelog. Defaults to `$USER`.
+record who made the change in the changelog. Defaults to `$USER`, your
+login name on the machine (`USERNAME` on Windows).
 
 ---
 
@@ -70,7 +80,9 @@ Two phases of one command:
   in `pending.xlsx` (transform → canonical validation → intrinsic
   snapshot), moves the file into `library/spatial/<category>/…`, inserts
   the catalogue row, archives the source bundle to `queue/archived/`,
-  and (if logged in) auto-pushes the new row to AGOL.
+  and (if logged in) publishes the new row to AGOL straight away. The
+  command does not print the result of that publish; check it with
+  `y2y agol-sync status` (`clean` = published).
 
 | Option      | Description |
 | ----------- | ----------- |
@@ -81,8 +93,11 @@ Two phases of one command:
 `description`, `category`, `subcategory` (Species only), `tags`,
 `terms_of_use`, `acknowledgements`, `data_steward`, `agol_format`,
 `authoritative`, and `ready` (set to `TRUE`). `agol_format` is pre-filled
-from the format and `authoritative` is pre-filled `yes`. Optional:
-`temporal_start`, `temporal_end`, `notes`.
+from the format and `authoritative` is pre-filled `yes`. `category` is
+guessed from the file name and is often empty. `target_filename` and
+`status` are pre-filled. For a raster, also fill `classification`
+(`continuous` or `categorical`). Optional: `temporal_start`,
+`temporal_end`, `notes`.
 
 **Header colours** (also in the sheet's `legend` tab). Columns are laid out
 in this order, with `_validation_error` right after `ready`:
@@ -98,6 +113,9 @@ in this order, with `_validation_error` right after `ready`:
 
 **Field rules**
 
+- `category`: exactly one of `Boundaries, Tenure & Governance`, `Biodiversity & Ecosystems`, `Climate Change`, `Connectivity & Wildlife Movement`, `Species`, `Water`, `Land Cover, Land Use & Disturbance`, `Human Dimensions of Conservation`, `Threats & Infrastructure`, `Demographics & Socioeconomic Data`. For `Species` only, `subcategory`
+  is one of `Caribou`, `Elk`, `Goat`, `Grizzly Bear`, `Multi-Species`,
+  `Wolverine`, `Other`.
 - `tags`: separate tags with `;` (a `,` also works). The cell cannot be
   empty. Enter `NA` (any letter case) on its own if the dataset should
   have no tags; `NA` is never published as a tag and cannot be mixed
@@ -114,10 +132,10 @@ in this order, with `_validation_error` right after `ready`:
 `ready=TRUE`, re-run `y2y ingest --approve`.
 
 **Typical flow**
-```bash
-# drop files into queue/incoming/
+```powershell
+# drop files into queue\incoming\
 y2y ingest
-open queue/processing/pending.xlsx     # edit + set ready=TRUE
+start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"   # edit + set ready=TRUE, close Excel
 y2y ingest --approve
 ```
 
@@ -305,8 +323,8 @@ Interactive OAuth. Requires the OAuth client id in
 `Y2Y_AGOL_CLIENT_ID` (or `~/.y2y/agol_config.yaml`). Opens a browser
 for consent once; caches credentials at `~/.arcgis/profile_y2y`.
 
-```bash
-export Y2Y_AGOL_CLIENT_ID="<oauth-client-id>"
+```powershell
+$env:Y2Y_AGOL_CLIENT_ID = "<oauth-client-id>"   # or set it once as a User environment variable
 y2y agol-sync login
 ```
 
@@ -339,7 +357,9 @@ y2y agol-sync init-categories
 y2y agol-sync status [--deep]
 ```
 
-Report `sync_status` distribution across every `active` row.
+Report how many `active` rows are in each `sync_status` and each
+`agol_format`, and list deprecated or tombstoned datasets whose layer is
+still on AGOL. It prints counts, not one line per dataset.
 
 | Option   | Description |
 | -------- | ----------- |
@@ -482,7 +502,9 @@ y2y agol-sync reconcile
 y2y agol-sync reconcile --actor reconcile-cron
 ```
 
-Scheduling samples (launchd / cron) are in `DESIGN.md §15`.
+Scheduling samples for macOS (launchd) and Linux (cron) are in
+`DESIGN.md §15`. There is no Windows sample yet; on Windows run it by
+hand once a week, with OneDrive sync paused.
 
 ---
 
@@ -643,6 +665,7 @@ any-with-item ──deprecate/tombstone─> unpublished (layer removed)
 
 | Variable              | Default | Purpose |
 | --------------------- | ------- | ------- |
+| `Y2Y_ROOT`            | —       | The data root, used when `--root` is not given. |
 | `Y2Y_AGOL_CLIENT_ID`  | —       | OAuth client id; required for `login`. Keep out of git. |
 | `Y2Y_AGOL_AUTO_PUSH`  | `true`  | Auto-push on catalogue edits / ingest approvals. `false` = all pushes manual. |
 | `Y2Y_AGOL_PROFILE`    | `y2y`   | Override the cached OAuth profile name. |
@@ -680,18 +703,18 @@ name, group name, client id). Resolved group id cached in
 ## 15. Workflows / recipes
 
 ### First-time AGOL setup
-```bash
-export Y2Y_AGOL_CLIENT_ID="<oauth-client-id>"
+```powershell
+$env:Y2Y_AGOL_CLIENT_ID = "<oauth-client-id>"
 y2y agol-sync login
 y2y agol-sync init-categories --dry-run
 y2y agol-sync init-categories
 ```
 
 ### Ingest a batch end-to-end
-```bash
-# drop files into queue/incoming/
+```powershell
+# drop files into queue\incoming\
 y2y ingest
-open queue/processing/pending.xlsx        # fill fields, set ready=TRUE
+start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"   # fill fields, set ready=TRUE
 y2y ingest --approve
 y2y reconcile --deep                       # confirm catalogue ↔ filesystem 1:1
 ```
@@ -704,10 +727,10 @@ y2y agol-sync reconcile                            # retry any errors, get repor
 ```
 
 ### Controlled first publish (no auto-sync noise during ingest)
-```bash
-export Y2Y_AGOL_AUTO_PUSH=false
+```powershell
+$env:Y2Y_AGOL_AUTO_PUSH = "false"        # this PowerShell window only
 # ... ingest the whole backlog ...
-unset Y2Y_AGOL_AUTO_PUSH
+Remove-Item Env:Y2Y_AGOL_AUTO_PUSH
 y2y agol-sync push --all-unpublished
 ```
 

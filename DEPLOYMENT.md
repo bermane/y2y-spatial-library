@@ -50,14 +50,24 @@ during a `y2y` write is enough.
    a second machine that also syncs the same folder. That's the
    conflicted-copy / corruption path that pausing doesn't protect against.
 
-3. **Sync is not backup.** Keep an independent copy of `inventory.db`
-   (Time Machine counts, or a periodic
-   `cp inventory/inventory.db ~/backups/inventory_$(date +%F).db`).
-   A bad ingest or fat-finger should be recoverable independent of sync.
+3. **Sync is not backup.** Keep an independent copy of `inventory.db`,
+   outside the synced folder. A bad ingest or fat-finger should be
+   recoverable independent of sync.
 
-### Set-and-forget alternative (macOS + Dropbox)
+   ```powershell
+   # Windows
+   mkdir C:\Y2Y\backups -Force
+   Copy-Item "$env:Y2Y_ROOT\inventory\inventory.db" "C:\Y2Y\backups\inventory_$(Get-Date -Format yyyy-MM-dd).db"
+   ```
+   ```bash
+   # macOS / Linux (Time Machine also counts)
+   cp inventory/inventory.db ~/backups/inventory_$(date +%F).db
+   ```
 
-Instead of pausing each session, tell Dropbox to ignore the DB files so
+### Set-and-forget alternative (macOS + Dropbox only)
+
+This does not apply to the steward's Windows + OneDrive setup, where
+pausing sync (rule 1) is the method. Instead of pausing each session, tell Dropbox to ignore the DB files so
 it never syncs them:
 
 ```bash
@@ -76,7 +86,13 @@ backup per rule 3.
 
 Confirm the catalogue is intact any time:
 
+```powershell
+# Windows, with the venv activated and OneDrive sync paused
+python -c "import os, sqlite3; print(sqlite3.connect(os.path.join(os.environ['Y2Y_ROOT'], 'inventory', 'inventory.db')).execute('PRAGMA integrity_check').fetchone()[0])"
+# expect: ok
+```
 ```bash
+# macOS / Linux, from the data root
 source .venv/bin/activate
 python -c "import sqlite3; print(sqlite3.connect('inventory/inventory.db').execute('PRAGMA integrity_check').fetchone()[0])"
 # expect: ok
@@ -97,7 +113,10 @@ After a session, copy `library/` + `inventory.xlsx` to the shared drive
 for the read/copy crowd.
 
 **B — Work in the synced folder, pause sync during runs (pragmatic).**
-The whole tree sits in the Dropbox/OneDrive/SharePoint folder so files are
+This is the steward's setup: the code and `.venv` are on a local path
+(`C:\Y2Y\y2y-spatial-library`) and the data root is in the
+OneDrive-synced SharePoint folder, selected with `Y2Y_ROOT`.
+The data tree sits in the Dropbox/OneDrive/SharePoint folder so files are
 "internal" automatically; the steward pauses sync during `y2y` commands
 (rules above). This is what most teams actually do; acceptable with a
 disciplined single steward and infrequent edits.
@@ -125,11 +144,16 @@ mid-write**.
 
 ## Handing the steward role to an internal operator
 
-Because the data isn't in git, a handoff needs a **one-time data
-transfer** (zip / drive / shared-folder grant) in addition to the code.
-Checklist:
+A new operator who starts with an empty library (the November 2026
+Windows deployment) needs no data transfer: follow
+`ONBOARDING_WINDOWS.md`, which creates an empty data root.
 
-1. **Code** — `git clone` the repo; `pip install -e .` into a fresh venv.
+To hand over an **existing** library, a handoff needs a **one-time data
+transfer** (zip / drive / shared-folder grant) in addition to the code,
+because the data isn't in git. Checklist:
+
+1. **Code** — `git clone` the repo; on Windows run
+   `scripts\setup_windows.ps1`, elsewhere `pip install -e .` into a fresh venv.
 2. **Data** — one-time copy of `library/` + `inventory/inventory.db` to
    the operator's machine.
 3. **AGOL** — their own `Y2Y_AGOL_CLIENT_ID` + `y2y agol-sync login`.

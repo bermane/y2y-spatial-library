@@ -106,15 +106,16 @@
 </header>
 
 <h2 class="sec">Start of session</h2>
-<p>Run once per new terminal (activates the venv + moves to the project):</p>
-<pre><span class="k">cd</span> /path/to/Spatial_Data &amp;&amp; <span class="k">source</span> .venv/bin/activate</pre>
-<div class="note"><code>inventory/inventory.db</code> is the source of truth · the xlsx is a read-only view · AGOL is downstream. Run <code>y2y &lt;command&gt; --help</code> for every option.</div>
+<p>Run once per new PowerShell window, then pause OneDrive sync (system tray → OneDrive → gear → Pause syncing):</p>
+<pre>C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1</pre>
+<div class="note"><code>inventory/inventory.db</code> is the source of truth · the xlsx is a read-only view · AGOL is downstream. Run <code>y2y &lt;command&gt; --help</code> for every option. Commands are shown for Windows PowerShell; the data folder is the one <code>Y2Y_ROOT</code> points to. <code>&lt;id&gt;</code> is a dataset's <code>dataset_id</code> (<code>ds_01…</code>): look it up in <code>inventory\inventory.xlsx</code>.</div>
 
 <h2 class="sec">Ingest new data &nbsp;·&nbsp; scan → review → approve</h2>
-<pre><span class="k">y2y ingest</span>                              <span class="c"># scan queue/incoming/ → pending.xlsx</span>
-<span class="k">open</span> queue/processing/pending.xlsx      <span class="c"># fill fields, set ready=TRUE</span>
-<span class="k">y2y ingest --approve</span>                    <span class="c"># validate + promote into library/ + catalogue</span></pre>
-<div class="note">Sheet colours: <strong>blue</strong> = you fill, goes to ArcGIS Online · <strong>orange</strong> = you fill, stays in the catalogue · <strong>grey / mauve</strong> = don't touch (lighter shade = optional; see the <code>legend</code> tab). <code>tags</code>: separate with <code>;</code>, or enter <code>NA</code> for none.</div>
+<pre><span class="k">y2y ingest</span>                                            <span class="c"># scan queue\incoming\ → pending.xlsx</span>
+<span class="k">start</span> "$env:Y2Y_ROOT\queue\processing\pending.xlsx"  <span class="c"># fill fields, set ready=TRUE, close Excel</span>
+<span class="k">y2y ingest --approve</span>                                  <span class="c"># validate + file into library + catalogue + publish</span>
+<span class="k">y2y agol-sync status</span>                                  <span class="c"># clean = published; unpublished = push it by hand</span></pre>
+<div class="note">Sheet colours: <strong>blue</strong> = you fill, goes to ArcGIS Online · <strong>orange</strong> = you fill, stays in the catalogue · <strong>grey / mauve</strong> = don't touch (lighter shade = optional; see the <code>legend</code> tab). <code>tags</code>: separate with <code>;</code>, or enter <code>NA</code> for none. <code>category</code> must be one of the 10 exact names (reference §2). Rasters need <code>classification</code>: <code>continuous</code> or <code>categorical</code>.</div>
 
 <h2 class="sec">Edit · move · remove</h2>
 <pre><span class="k">y2y update</span> &lt;id&gt; --set summary=<span class="c">"…"</span> --set tags=<span class="c">"a;b;c"</span>   <span class="c"># change metadata fields</span>
@@ -129,7 +130,7 @@
 <span class="k">y2y export-xlsx</span>              <span class="c"># re-render inventory.xlsx (usually automatic)</span></pre>
 
 <h2 class="sec">Publish to AGOL</h2>
-<pre><span class="k">y2y agol-sync status</span>                         <span class="c"># sync state of every active row</span>
+<pre><span class="k">y2y agol-sync status</span>                         <span class="c"># counts of active rows by sync state</span>
 <span class="k">y2y agol-sync push</span> &lt;id&gt; [--dry-run]          <span class="c"># publish/update one row</span>
 <span class="k">y2y agol-sync push --all-unpublished</span>         <span class="c"># initial bulk publish of the backlog</span>
 <span class="k">y2y agol-sync push --all-dirty</span>               <span class="c"># push every pending_push row</span>
@@ -143,7 +144,7 @@
 <span class="k">y2y agol-sync unpublish</span> &lt;id&gt;        <span class="c"># take an active dataset off AGOL; keep row</span></pre>
 
 <h2 class="sec">First-time AGOL setup</h2>
-<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<pre>$env:Y2Y_AGOL_CLIENT_ID = <span class="c">"&lt;oauth-client-id&gt;"</span>   <span class="c"># or set it once as a User environment variable</span>
 <span class="k">y2y agol-sync login</span>            <span class="c"># OAuth, browser, once</span>
 <span class="k">y2y agol-sync init-categories</span>  <span class="c"># write the org category schema</span></pre>
 
@@ -152,7 +153,8 @@
   <tbody>
     <tr><th>sync_status</th><td><code>unpublished</code> → <code>clean</code> ⇄ <code>pending_push</code> / <code>pending_pull</code> → <code>conflict</code> / <code>error</code></td></tr>
     <tr><th>agol_format</th><td><code>feature-layer</code> (vector) · <code>imagery-layer</code> (raster) · <code>vector-tile-layer</code> (vector + VTPK)</td></tr>
-    <tr><th>Auto-sync</th><td>Edits &amp; approvals auto-push when logged in. <code>Y2Y_AGOL_AUTO_PUSH=false</code> disables.</td></tr>
+    <tr><th>Auto-sync</th><td>Edits &amp; approvals publish to AGOL straight away when logged in. Deprecating or tombstoning deletes the layer from AGOL (asks first).</td></tr>
+    <tr><th>Weekly</th><td><code>y2y reconcile</code>, then <code>y2y agol-sync reconcile</code>. Keep a copy of <code>inventory\inventory.db</code> outside OneDrive.</td></tr>
     <tr><th>VTL</th><td>Set <code>agol_format=vector-tile-layer</code> → build <code>.vtpk</code> in Pro → drop in <code>queue/incoming/</code> → <code>y2y ingest</code> → push.</td></tr>
   </tbody>
 </table>
