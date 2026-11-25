@@ -243,6 +243,66 @@ def test_unpublish_keeps_link_when_service_deletion_fails(
     assert any("unpublish failed" in (r["note"] or "") for r in log)
 
 
+def test_unpublish_turns_off_delete_protection_first(
+    project_tree, config,
+) -> None:
+    """An Authoritative layer is delete-protected on AGOL; retire clears it."""
+    db = project_tree["db"]
+    _published_row(db)
+    gis, service_item, source_item = _fake_gis()
+    service_item.protected = True
+    service_item.protect.return_value = {"success": True}
+    calls: list[str] = []
+    service_item.protect.side_effect = (
+        lambda **kw: calls.append("unprotect") or {"success": True}
+    )
+    source_item.delete.side_effect = lambda **kw: calls.append("source") or True
+    service_item.delete.side_effect = lambda **kw: calls.append("service") or True
+
+    result = agol_sync.unpublish(db, "ds_old", gis, config, actor="tester")
+
+    assert result.error is None
+    service_item.protect.assert_called_once_with(enable=False)
+    assert calls == ["unprotect", "source", "service"]
+    assert inventory_manager.get_dataset(db, "ds_old")["agol_item_id"] is None
+
+
+def test_unpublish_leaves_unprotected_items_alone(project_tree, config) -> None:
+    db = project_tree["db"]
+    _published_row(db)
+    gis, service_item, _ = _fake_gis()
+    service_item.protected = False
+
+    agol_sync.unpublish(db, "ds_old", gis, config, actor="tester")
+
+    service_item.protect.assert_not_called()
+    service_item.delete.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["raises", "success_false"])
+def test_unpublish_deletes_nothing_when_protection_stays_on(
+    project_tree, config, failure,
+) -> None:
+    db = project_tree["db"]
+    _published_row(db)
+    gis, service_item, source_item = _fake_gis()
+    service_item.protected = True
+    if failure == "raises":
+        service_item.protect.side_effect = Exception("no privilege")
+    else:
+        service_item.protect.return_value = {"success": False}
+
+    result = agol_sync.unpublish(db, "ds_old", gis, config, actor="tester")
+
+    assert result.error
+    source_item.delete.assert_not_called()
+    service_item.delete.assert_not_called()
+    fresh = inventory_manager.get_dataset(db, "ds_old")
+    assert fresh["agol_item_id"] == "svc_ds_old"
+    assert fresh["sync_status"] == "error"
+    assert "delete protection" in (fresh["internal_notes"] or "")
+
+
 def test_unpublish_source_only_failure_still_clears_link(
     project_tree, config,
 ) -> None:

@@ -1373,6 +1373,25 @@ def _handle_target_switch(
     return note
 
 
+def _clear_delete_protection(item: Any) -> str | None:
+    """Turn off delete protection on ``item`` if it is on.
+
+    AGOL turns delete protection on for an item marked Authoritative,
+    and a protected item refuses ``delete()``. Returns ``None`` when
+    the item is unprotected afterwards (or never was), otherwise a
+    short description of why protection could not be turned off.
+    """
+    if getattr(item, "protected", False) is not True:
+        return None
+    try:
+        result = item.protect(enable=False)
+    except Exception as exc:
+        return str(exc)
+    if isinstance(result, dict) and result.get("success") is False:
+        return "AGOL reported success=false"
+    return None
+
+
 def _unpublish_agol_items(
     *,
     gis,
@@ -1404,7 +1423,21 @@ def _unpublish_agol_items(
     catalogue's ``agol_item_id`` is cleared by the caller after
     this returns; subsequent reconcile / push runs will surface
     any orphans on the AGOL side.
+
+    Delete protection on the service item is turned off first (AGOL
+    turns it on for Authoritative layers). If that fails, nothing is
+    deleted: removing the source while the layer stays live would
+    leave a layer with no source.
     """
+    problem = _clear_delete_protection(service_item)
+    if problem is not None:
+        _record_warning(properties, (
+            f"could not turn off delete protection on service item "
+            f"{getattr(service_item, 'id', '?')!r}, so nothing was "
+            f"deleted: {problem}"
+        ))
+        return False
+
     # Find and delete linked source(s) first. Walking Service2Data
     # before deleting the service preserves the relationship while
     # we still have a valid handle.
@@ -1420,6 +1453,7 @@ def _unpublish_agol_items(
         linked = []
 
     for src in linked:
+        _clear_delete_protection(src)
         try:
             src.delete(permanent=True)
         except TypeError:
@@ -1762,6 +1796,13 @@ def _publish_imagery_layer(
     infrastructure, not as a user-visible item in the steward's
     content browser.
 
+    The layer is a **tiled** imagery layer (``tiles_only=True``), the
+    same kind the AGOL web UI creates. Dynamic imagery layers
+    (``tiles_only=False``) published this way did not open in Map
+    Viewer in the 0.9.0 live test (2026-11-25): their service and
+    tile requests failed about half the time. A tiled layer still
+    takes the renderer and transparency saved in its item data.
+
     Data refresh: re-call the same function with ``output_name``
     set to the existing service item. AGOL replaces the underlying
     raster in place, preserving item ID, URL, sharing, categories.
@@ -1787,7 +1828,7 @@ def _publish_imagery_layer(
                 service_item = publish_hosted_imagery_layer(
                     input_data=[str(source_path)],
                     layer_configuration="ONE_IMAGE",
-                    tiles_only=False,
+                    tiles_only=True,
                     # AGOL service names allow only [A-Za-z0-9_], so
                     # we pass the sanitised name (compute_service_name).
                     # The human-readable title is preserved via
@@ -1820,7 +1861,7 @@ def _publish_imagery_layer(
                 publish_hosted_imagery_layer(
                     input_data=[str(source_path)],
                     layer_configuration="ONE_IMAGE",
-                    tiles_only=False,
+                    tiles_only=True,
                     output_name=service,  # existing Item → replace in place
                     gis=gis,
                 )

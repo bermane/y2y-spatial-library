@@ -227,6 +227,9 @@ def rename(
       This is the normal mode for ``y2y reconcile --fix-renames``.
     - file at both, or at neither: raise — operator must resolve.
     """
+    # A path typed on Windows may use backslashes. The catalogue stores
+    # forward slashes on every OS, so normalise before splitting or storing.
+    new_path = new_path.replace("\\", "/")
     new_path_obj = Path(new_path)
 
     ok, reason = validate_naming(new_path_obj)

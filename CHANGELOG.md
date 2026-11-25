@@ -26,6 +26,15 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - New `y2y agol-sync restyle <id>` resets one published layer to the standard
   default style, after a confirmation. It saves the style it replaces to
   `reports/restyle_<dataset_id>_<timestamp>.json` first.
+- Fixed: on Windows, ingest stored a dataset's `file_path` with backslashes, so
+  `y2y reconcile` reported every dataset as missing or orphaned. Paths are now
+  stored with forward slashes on every system, and `y2y rename` accepts a path
+  typed with backslashes.
+- Fixed: rasters are now published as tiled imagery layers. The dynamic
+  imagery layers the pipeline made before did not open in Map Viewer.
+- Fixed: retiring a dataset marked authoritative failed, because ArcGIS
+  Online puts delete protection on authoritative layers. Removal now turns
+  the protection off first, and deletes nothing if that fails.
 - The version is now set in one place, `pipeline/__init__.py`.
 - Added `six` to the dependencies. A fresh install was missing it, which broke
   publishing rasters as imagery layers.

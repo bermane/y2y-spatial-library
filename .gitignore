@@ -44,6 +44,8 @@ reports/**
 !reports/.gitkeep
 
 # --- Python ---
+# Written by scripts/setup_windows.ps1: the versions installed on this machine.
+requirements.lock.win
 __pycache__/
 *.py[cod]
 *$py.class

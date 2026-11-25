@@ -1274,7 +1274,9 @@ def test_push_imagery_create_uses_publish_hosted_imagery_layer(
     fake_publish.assert_called_once()
     call_kwargs = fake_publish.call_args.kwargs
     assert call_kwargs["layer_configuration"] == "ONE_IMAGE"
-    assert call_kwargs["tiles_only"] is False
+    # Tiled, not dynamic: dynamic imagery layers published this way do not
+    # open in Map Viewer on ArcGIS Online (found in the 0.9.0 live test).
+    assert call_kwargs["tiles_only"] is True
     assert call_kwargs["gis"] is gis
     input_data = call_kwargs["input_data"]
     assert isinstance(input_data, list) and len(input_data) == 1

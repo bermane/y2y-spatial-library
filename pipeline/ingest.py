@@ -533,7 +533,7 @@ def _maybe_promote_paired_vtpk(
         new_value=digest,
         detail=(
             f"ingested paired VTPK to "
-            f"{dest.relative_to(library_root.parent)} (sha256={digest})"
+            f"{dest.relative_to(library_root.parent).as_posix()} (sha256={digest})"
         ),
     )
 
@@ -1034,7 +1034,9 @@ def _promote(
     target_path.rename(library_full)
 
     finalized = dict(row)
-    finalized["file_path"] = str(rel_target)
+    # Always forward slashes, on Windows too: the catalogue is read on any OS
+    # and reconcile compares against forward-slash paths.
+    finalized["file_path"] = rel_target.as_posix()
     finalized["tags"] = steward_fields.normalize_tags(finalized.get("tags"))
     finalized["authoritative"] = steward_fields.parse_authoritative(
         finalized.get("authoritative")
@@ -1054,7 +1056,7 @@ def _promote(
         action="add",
         dataset_id=str(row["dataset_id"]),
         actor=actor,
-        path=str(rel_target),
+        path=rel_target.as_posix(),
         detail=(
             f"Ingested '{row.get('title', '')}'; "
             f"source: {row.get('source_format')} '{row.get('source_filename')}'."

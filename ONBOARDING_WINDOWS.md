@@ -15,21 +15,43 @@ PowerShell"**. `>` marks a line you type.
 ## 1. Install the prerequisites (one time)
 
 1. **Python 3.13** — https://www.python.org/downloads/
-   During install, **tick "Add python.exe to PATH."** Verify:
+   Use the standard **64-bit** installer ("Windows installer (64-bit)"). Do
+   not use the ARM64 or 32-bit installer, even on an ARM laptop: one of the
+   mapping libraries only has a 64-bit x64 build for Windows.
+   During install, **tick "Add python.exe to PATH."** Then **close PowerShell
+   and open a new window** (an open window does not see newly installed
+   programs) and verify:
    ```powershell
    > py -3.13 --version
+   > py -3.13 -c "import platform; print(platform.machine())"
    ```
-   Should print `Python 3.13.x`. (Python 3.12 also works. **Do not use 3.14 or
+   Should print `Python 3.13.x`, then `AMD64`. (Python 3.12 also works. **Do not use 3.14 or
    newer** — one of the mapping libraries has no build for it yet, and the
    install fails.)
 
-2. **Git** — https://git-scm.com/download/win  (accept defaults).
+2. **Git** — https://git-scm.com/download/win  (accept defaults). Open a
+   **new** PowerShell window afterwards and verify:
+   ```powershell
+   > git --version
+   ```
+   Should print `git version 2.x`. If PowerShell says `git` is not recognized,
+   close and reopen PowerShell; if it still fails, reinstall Git and keep the
+   default "Git from the command line" option.
    *(Or install **GitHub Desktop** — https://desktop.github.com — if you prefer
    clicking "Clone"/"Pull" over typing git commands. Either works.)*
+   With GitHub Desktop alone, `git --version` is expected to fail; that is
+   fine, pull updates in GitHub Desktop instead.
 
 3. **ArcGIS Pro** — you already have it. It is **not** needed to run this
    pipeline; you only use it separately to build a `.vtpk` when a layer is
    published as a *vector tile layer* (rare). Keep it out of this workflow.
+
+4. **Microsoft Visual C++ Redistributable (x64)** — only if the machine does
+   **not** have ArcGIS Pro (Pro installs it). The ArcGIS Online library needs
+   it; without it the install finishes but `y2y` fails with a "DLL load
+   failed" error. Download and run
+   https://aka.ms/vs/17/release/vc_redist.x64.exe (accept defaults). If it
+   says it is already installed, close it; nothing else to do.
 
 ---
 
@@ -61,7 +83,18 @@ the **Local path** to `C:\Y2Y` (not a OneDrive/SharePoint folder).
 
 ## 3. Install the pipeline
 
-From inside `C:\Y2Y\y2y-spatial-library`:
+**Step 1. Allow PowerShell to run local scripts** (one time per Windows
+account). A fresh Windows install blocks all scripts, which stops the
+`Activate.ps1` step below:
+
+```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Answer `Y` if asked. It changes the setting for your account only and needs
+no administrator rights.
+
+**Step 2. Run the setup script** from inside `C:\Y2Y\y2y-spatial-library`:
 
 ```powershell
 > powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
@@ -76,15 +109,16 @@ touches your data or ArcGIS Online. It should end with
 and send the output to Ethan. (First run downloads a few hundred MB; give it
 several minutes.)
 
-**Activate the environment** (do this in each new PowerShell window before
-running `y2y`):
+**Step 3. Activate the environment** (do this in each new PowerShell window
+before running `y2y`):
 ```powershell
 > .\.venv\Scripts\Activate.ps1
 > y2y --help
 ```
 
-> If activation is blocked by execution policy, run once:
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and try again.
+> If activation still says "running scripts is disabled on this system", Step 1
+> was skipped or did not take: run it again, then check with
+> `Get-ExecutionPolicy -Scope CurrentUser` (should print `RemoteSigned`).
 
 ---
 
@@ -282,14 +316,20 @@ organization until you remove it in step 6.
      formats"** is ticked. (Vector tile and imagery layers are view-only.)
    - opened in Map Viewer, it draws in the standard default style: polygons
      as an outline with no fill, lines and points in the colour of the
-     dataset's category, rasters 30% transparent. It stays visible at every
-     zoom level.
+     dataset's category, rasters 30% transparent. No zoom limits are set, so
+     vector layers stay visible at every zoom level.
+   - a raster is published as a tiled imagery layer. It stops drawing when
+     you zoom in far past the raster's own resolution; that is expected, so
+     zoom back out before deciding the layer is broken.
 
    The default style is set once, when the layer is first published. You can
    restyle a layer in Map Viewer and save it; later pushes keep your change.
    To put a layer back on the default style, run
    `y2y agol-sync restyle <dataset_id>` (it asks first, and saves the style it
-   replaces into `reports\`).
+   replaces into `reports\`). After a restyle, the next
+   `y2y agol-sync reconcile` flags that layer as changed on ArcGIS Online.
+   Run `y2y agol-sync pull <dataset_id>` once to accept the change and clear
+   the flag.
 
    If the badge is missing, see the Authoritative note in §4.
 
@@ -299,7 +339,9 @@ organization until you remove it in step 6.
    y2y update <dataset_id> --set status=deprecated
    ```
    It warns you, asks you to confirm, then permanently deletes the layer from
-   ArcGIS Online. The library file and the catalogue row are kept. Check that
+   ArcGIS Online. An authoritative layer has delete protection turned on in
+   ArcGIS Online; the command turns it off for you before deleting. The
+   library file and the catalogue row are kept. Check that
    the item is gone from your content. To also erase the test file from the
    library, run `y2y tombstone <dataset_id> --reason "install test"` (this
    cannot be undone; the catalogue row stays as a record).
@@ -356,8 +398,12 @@ The second command retries anything that did not publish, flags layers that
 were edited on ArcGIS Online, removes layers of retired datasets, and audits
 the Y2Y Conservation Atlas group. Each writes a report into the data folder's
 `reports\`. On a new install the group audit lists every layer already in the
-group as "not tracked"; that is expected, and it changes nothing. There is no
-scheduled task for this on Windows yet, so run it by hand.
+group as "not tracked"; that is expected, and it changes nothing. One of them
+is **"Y2Y Region Boundary (2013)"**, which you own and which an earlier version
+of this pipeline published in July 2026. Your new catalogue does not know
+about it, so leave it alone until Ethan and you decide whether to adopt or
+replace it. There is no scheduled task for this on Windows yet, so run it by
+hand.
 
 The catalogue is a live SQLite database. To keep it safe:
 
