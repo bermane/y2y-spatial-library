@@ -240,11 +240,14 @@ y2y agol-sync reconcile [--dry-run]      # weekly bidirectional sync + report
 y2y agol-sync pull <id> [--accept|--reject]   # resolve AGOL-side drift
 y2y agol-sync unpublish <id>             # take an active dataset off AGOL, keep catalogue row
 y2y agol-sync adopt <id>                 # bring a manually-published item under management
+y2y agol-sync restyle <id>               # reset one layer to the default style
 ```
 
-Newly published feature layers allow organization members to export the
-data, and a dataset whose `authoritative` column is `yes` gets the
-"Authoritative" badge. The weekly reconcile also removes layers of
+Newly published layers get a standard default style, set once on first
+publish and never touched again; `y2y agol-sync restyle <id>` resets one
+layer to it. Newly published feature layers allow organization members to
+export the data, and a dataset whose `authoritative` column is `yes` gets
+the "Authoritative" badge. The weekly reconcile also removes layers of
 deprecated or tombstoned datasets and audits the Y2Y Conservation Atlas
 group (report only).
 
