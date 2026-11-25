@@ -1762,6 +1762,13 @@ def _publish_imagery_layer(
     infrastructure, not as a user-visible item in the steward's
     content browser.
 
+    The layer is a **tiled** imagery layer (``tiles_only=True``), the
+    same kind the AGOL web UI creates. Dynamic imagery layers
+    (``tiles_only=False``) published this way did not open in Map
+    Viewer in the 0.9.0 live test (2026-11-25): their service and
+    tile requests failed about half the time. A tiled layer still
+    takes the renderer and transparency saved in its item data.
+
     Data refresh: re-call the same function with ``output_name``
     set to the existing service item. AGOL replaces the underlying
     raster in place, preserving item ID, URL, sharing, categories.
@@ -1787,7 +1794,7 @@ def _publish_imagery_layer(
                 service_item = publish_hosted_imagery_layer(
                     input_data=[str(source_path)],
                     layer_configuration="ONE_IMAGE",
-                    tiles_only=False,
+                    tiles_only=True,
                     # AGOL service names allow only [A-Za-z0-9_], so
                     # we pass the sanitised name (compute_service_name).
                     # The human-readable title is preserved via
@@ -1820,7 +1827,7 @@ def _publish_imagery_layer(
                 publish_hosted_imagery_layer(
                     input_data=[str(source_path)],
                     layer_configuration="ONE_IMAGE",
-                    tiles_only=False,
+                    tiles_only=True,
                     output_name=service,  # existing Item → replace in place
                     gis=gis,
                 )

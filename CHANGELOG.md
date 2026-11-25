@@ -29,6 +29,8 @@ Pilot release for the first deployment on the data steward's Windows machine.
   `y2y reconcile` reported every dataset as missing or orphaned. Paths are now
   stored with forward slashes on every system, and `y2y rename` accepts a path
   typed with backslashes.
+- Fixed: rasters are now published as tiled imagery layers. The dynamic
+  imagery layers the pipeline made before did not open in Map Viewer.
 - The version is now set in one place, `pipeline/__init__.py`.
 - Added `six` to the dependencies. A fresh install was missing it, which broke
   publishing rasters as imagery layers.
