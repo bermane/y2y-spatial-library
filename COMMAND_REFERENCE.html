@@ -330,8 +330,21 @@ C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1</pre>
 <p><strong>Rules:</strong> batch flags are mutually exclusive and can't take a <code>DATASET_ID</code>. Per-row failures mark that row <code>error</code> and the batch continues. VTL rows lacking a VTPK fail cleanly and are reported.</p>
 <div class="note"><strong>Per-row footprint:</strong> vectors and VTL produce two AGOL items — a private <em>source</em> in <code>_sources/</code> and the public <em>service</em> in the category folder (the <code>agol_item_id</code>). Imagery uses a no-source model (one item).</div>
 <div class="note"><strong>Data export:</strong> the first time a feature layer is published, push turns on "Allow others to export to different formats", so anyone in the organization can download the data from the layer's item page. Later pushes leave that setting as it is on AGOL, so you can turn it off by hand for a dataset that must not be downloaded. Vector tile and imagery layers have no export setting and stay view-only.</div>
+<div class="note"><strong>Default style:</strong> the first time any layer is published, push gives it a standard look: polygons as an outline with no fill, lines and points in the colour of the dataset's category, continuous rasters on a viridis ramp and categorical rasters in discrete class colours, both 30% transparent. Styling that came with the data is kept: a raster's own colour table is used, and a vector tile package you styled by attribute in ArcGIS Pro is published as built. Later pushes never touch the style, so anything you change in Map Viewer sticks. If the style cannot be set, push still succeeds and records an <code>[agol]</code> warning.</div>
+<h3>Reset a layer to the default style</h3>
+<pre>y2y agol-sync restyle [--actor TEXT] [--yes] DATASET_ID</pre>
+<p>Put one published layer back on the standard default style, replacing any styling saved on the layer in AGOL. Confirmation-prompted unless <code>--yes</code>. Only the drawing style changes: pop-ups and other layer settings are kept, and a style saved inside a web map is not changed.</p>
+<p>The style being replaced is saved first to <code>reports/restyle_&lt;dataset_id&gt;_&lt;timestamp&gt;.json</code>; if that file cannot be written, the layer is left unchanged. There is no undo command, but the file holds what is needed to put the old style back by hand. A vector tile layer built from a package styled by attribute in ArcGIS Pro is refused. The catalogue row is not changed; the run is recorded in the changelog.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+    <tr><td><code>--yes</code></td><td>Skip the confirmation prompt.</td></tr>
+  </tbody>
+</table>
 <pre><span class="k">y2y agol-sync push</span> ds_01ABC                       <span class="c"># one row</span>
 <span class="k">y2y agol-sync push</span> ds_01ABC --dry-run             <span class="c"># preview</span>
+<span class="k">y2y agol-sync restyle</span> ds_01ABC                    <span class="c"># reset to default style</span>
 <span class="k">y2y agol-sync push</span> ds_01ABC --target vector-tile-layer
 <span class="k">y2y agol-sync push</span> ds_01ABC --sharing private
 <span class="k">y2y agol-sync push --all-unpublished</span> --dry-run    <span class="c"># preview backlog</span>

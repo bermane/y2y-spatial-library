@@ -45,6 +45,7 @@ y2y agol-sync status                         # counts of active rows by sync sta
 y2y agol-sync push <id> [--dry-run]          # publish/update one row
 y2y agol-sync push --all-unpublished         # initial bulk publish of the backlog
 y2y agol-sync push --all-dirty               # push every pending_push row
+y2y agol-sync restyle <id>                   # reset one layer to the default style (backs up the old one)
 y2y agol-sync reconcile                      # weekly: push pending, flag drift, remove retired, audit the Atlas group
 ```
 

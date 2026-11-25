@@ -12,6 +12,19 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - Newly published feature layers now let organization members export the data
   ("Allow others to export to different formats"). Turning it off by hand on
   ArcGIS Online is respected by later pushes.
+- Newly published layers now get a standard default style: polygons as an
+  outline with no fill, lines and points in the colour of the dataset's
+  category, continuous rasters on a viridis ramp and categorical rasters in
+  colour-blind-friendly class colours, both 30% transparent. The style is set
+  once, on first publish. Later pushes and reconcile never touch it, so a
+  style changed by hand on ArcGIS Online is kept. The colours and defaults are
+  a first version, to be checked and reviewed with the data steward for 0.9.1.
+- Styling that comes with the data is kept. Ingest now copies a raster's
+  colour table into the library file, and publishing uses it. A vector tile
+  package styled by attribute in ArcGIS Pro is published as built.
+- New `y2y agol-sync restyle <id>` resets one published layer to the standard
+  default style, after a confirmation. It saves the style it replaces to
+  `reports/restyle_<dataset_id>_<timestamp>.json` first.
 - The version is now set in one place, `pipeline/__init__.py`.
 - Added `six` to the dependencies. A fresh install was missing it, which broke
   publishing rasters as imagery layers.
