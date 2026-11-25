@@ -387,9 +387,44 @@ pushes leave that setting as it is on AGOL, so you can turn it off by
 hand for a dataset that must not be downloaded. Vector tile and imagery
 layers have no export setting and stay view-only.
 
+**Default style:** the first time any layer is published, push gives it
+a standard look: polygons as an outline with no fill, lines and points
+in the colour of the dataset's category, continuous rasters on a
+viridis ramp and categorical rasters in discrete class colours, both
+30% transparent. Styling that came with the data is kept: a raster's
+own colour table is used, and a vector tile package you styled by
+attribute in ArcGIS Pro is published as built. Later pushes never touch
+the style, so anything you change in Map Viewer sticks. If the style
+cannot be set, push still succeeds and records an `[agol]` warning.
+
+### Reset a layer to the default style
+
+```
+y2y agol-sync restyle [--actor TEXT] [--yes] DATASET_ID
+```
+
+Put one published layer back on the standard default style, replacing
+any styling saved on the layer in AGOL. Confirmation-prompted unless
+`--yes`. Only the drawing style changes: pop-ups and other layer
+settings are kept, and a style saved inside a web map is not changed.
+
+The style being replaced is saved first to
+`reports/restyle_<dataset_id>_<timestamp>.json`; if that file cannot be
+written, the layer is left unchanged. There is no undo command, but the
+file holds what is needed to put the old style back by hand. A vector
+tile layer built from a package styled by attribute in ArcGIS Pro is
+refused. The catalogue row is not changed; the run is recorded in the
+changelog.
+
+| Option    | Description |
+| --------- | ----------- |
+| `--actor` | Changelog actor. Defaults to `$USER`. |
+| `--yes`   | Skip the confirmation prompt. |
+
 ```bash
 y2y agol-sync push ds_01ABC                       # one row
 y2y agol-sync push ds_01ABC --dry-run             # preview
+y2y agol-sync restyle ds_01ABC                    # reset to default style
 y2y agol-sync push ds_01ABC --target vector-tile-layer
 y2y agol-sync push ds_01ABC --sharing private
 y2y agol-sync push --all-unpublished --dry-run    # preview backlog

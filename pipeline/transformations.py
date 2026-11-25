@@ -271,6 +271,15 @@ def _crs_equals(a, b) -> bool:
 
 # --- raster ------------------------------------------------------------
 
+def _source_colormap(src) -> dict[int, tuple[int, int, int, int]] | None:
+    """Return band 1's colour table, or ``None`` when the source has none."""
+    try:
+        colormap = src.colormap(1)
+    except (ValueError, rasterio.errors.RasterioError):
+        return None
+    return dict(colormap) if colormap else None
+
+
 def raster_to_canonical(
     source: Path,
     target: Path,
@@ -368,6 +377,14 @@ def raster_to_canonical(
         # of allocating the whole destination as a numpy array — keeps
         # peak memory bounded for multi-billion-pixel rasters.
         with rasterio.open(target, "w", **profile) as dst:
+            # Keep the source's colour table (a colour per class value,
+            # common in land cover products). It is styling that came
+            # with the data, so the library file carries it and the
+            # AGOL push uses it (maintainer decision 2026-11-25). Set
+            # before any pixels are written; it does not change values.
+            colormap = _source_colormap(src)
+            if colormap:
+                dst.write_colormap(1, colormap)
             reproject(
                 source=rasterio.band(src, 1),
                 destination=rasterio.band(dst, 1),

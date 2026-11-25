@@ -1313,6 +1313,77 @@ those two layer types need a downloadable copy (for example the library
 GeoPackage or GeoTIFF uploaded as a separate item shared with the
 organization).
 
+### Default symbology on first publish
+
+Staff cannot restyle a layer inside the Conservation Atlas app, so a
+layer should look sensible the moment it is published. When push first
+publishes a layer it writes a standard default style to it. The rules
+and colours live in one file, `pipeline/agol_symbology.py`.
+
+**Styling that arrives with the data is kept.** The standards only
+fill the gap when a file brings no styling of its own:
+
+- A raster's **colour table** (a colour per class value, common in
+  land cover products) is copied into the library GeoTIFF at ingest
+  and used by push in place of the standard palette. Copying it does
+  not change any data value.
+- A **vector tile package styled by attribute** in ArcGIS Pro (several
+  rules per layer, labels, filters) is published as built.
+- Styles saved inside a GeoPackage by QGIS are not read. Class names
+  stored with a raster are not carried yet; legend labels show the
+  class value.
+
+**The standards.**
+
+| Layer | Default |
+| ----- | ------- |
+| Polygons | No fill, 1.5 pt outline in the category colour |
+| Lines | 1.5 pt line in the category colour |
+| Points | 7 pt circle in the category colour, thin white edge |
+| Continuous raster | Viridis ramp, stretched between the 2nd and 98th percentile, 30% transparent |
+| Categorical raster | The file's colour table if it has one; otherwise Okabe-Ito colours (up to 8 classes) or a 20-colour set (9 to 20, with a warning that it is no longer fully colour-blind safe); 30% transparent. More than 20 classes with no colour table: left on the AGOL default, with a warning |
+| Vector tile layer from a single-symbol package | Same as polygons / lines / points. Pro gives such a package one arbitrary colour, which is not a styling choice |
+
+Vector colour is by library category (maintainer decision 2026-11-25),
+so two layers from the same category look alike until one is restyled.
+
+**Where the style is stored.** Feature and imagery layers: the item's
+data (the same place Map Viewer's "Save layer" writes), so it survives
+a data refresh. Vector tile layers: an item-level copy of the style
+(`styles/root.json` item resource) that takes priority over the one in
+the package. The `.vtpk` in the library is never modified.
+
+**Set once, never policed.** Same pattern as the export setting above:
+
+- Push writes the style on first publish only. Later pushes do not
+  read, compare or rewrite it, so a style customised on AGOL sticks.
+- It is not in drift detection or reconcile and has no catalogue column.
+- A failure is an `[agol]` warning in `internal_notes`; it never blocks.
+- A style saved inside a web map is not affected. The default is what a
+  map picks up when the layer is added fresh.
+- When a rebuilt VTPK is re-pushed, the saved style stays. If the
+  rebuild renamed the layers inside the package, push warns that the
+  saved style no longer matches.
+
+**`y2y agol-sync restyle <id>`** is the one way to overwrite a style
+later: it resets a single layer to the standard, on request, after a
+confirmation. It first saves the style it replaces to
+`reports/restyle_<dataset_id>_<timestamp>.json` and stops without
+touching the layer if that file cannot be written. It changes the
+drawing style only, refuses an attribute-styled vector tile package,
+has no "all layers" mode, and records the run in the changelog.
+
+**To review in 0.9.1.** The colours and defaults are a first version.
+Check them (including a colour-blindness simulation of the ten category
+colours), review them with the data steward once real layers are
+stacked in the Atlas, and adjust `agol_symbology.py`. Also still to be
+confirmed on live AGOL, which only the steward's machine can do: that a
+hosted imagery layer accepts the renderer and transparency written to
+its item data, that the item-level vector tile style is honoured, and
+that a click inside an outline-only polygon still opens its pop-up.
+Whether colour should follow category or be chosen so that layers
+commonly viewed together differ is part of the same review.
+
 ### The three publish targets (`agol_format`)
 
 | `agol_format`       | Source format | Path |

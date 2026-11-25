@@ -292,3 +292,55 @@ def test_raster_uses_default_nodata_when_source_has_none(tmp_path: Path) -> None
     transformations.raster_to_canonical(src, target, "continuous")
     with rasterio.open(target) as ds:
         assert ds.nodata == -9999.0  # canonical default for float32
+
+
+def test_raster_to_canonical_keeps_the_source_colour_table(tmp_path: Path) -> None:
+    """A colour table is styling that came with the data; it is kept.
+
+    The values themselves must be untouched, and the output must still
+    pass the library's format checks.
+    """
+    from pipeline.validators import format as format_validator
+
+    source = tmp_path / "landcover_src.tif"
+    data = np.full((600, 600), 255, dtype="uint8")
+    data[:300] = 1
+    data[300:] = 2
+    colours = {1: (10, 20, 30, 255), 2: (200, 100, 50, 255)}
+    with rasterio.open(
+        source, "w", driver="GTiff", dtype="uint8", count=1,
+        width=600, height=600, crs="EPSG:26911",
+        transform=rasterio.transform.from_origin(500000, 5600000, 30, 30),
+        nodata=255,
+    ) as dst:
+        dst.write(data, 1)
+        dst.write_colormap(1, colours)
+
+    target = tmp_path / "landcover.tif"
+    transformations.raster_to_canonical(source, target, "categorical")
+
+    with rasterio.open(target) as out:
+        kept = out.colormap(1)
+        values = set(np.unique(out.read(1)).tolist())
+    assert kept[1] == (10, 20, 30, 255)
+    assert kept[2] == (200, 100, 50, 255)
+    assert values <= {1, 2, 255}
+    assert format_validator.validate_format(target) == (True, None)
+
+
+def test_raster_to_canonical_without_colour_table_adds_none(tmp_path: Path) -> None:
+    source = tmp_path / "plain_src.tif"
+    with rasterio.open(
+        source, "w", driver="GTiff", dtype="uint8", count=1,
+        width=600, height=600, crs="EPSG:26911",
+        transform=rasterio.transform.from_origin(500000, 5600000, 30, 30),
+        nodata=255,
+    ) as dst:
+        dst.write(np.ones((600, 600), dtype="uint8"), 1)
+
+    target = tmp_path / "plain.tif"
+    transformations.raster_to_canonical(source, target, "categorical")
+
+    with rasterio.open(target) as out:
+        with pytest.raises(ValueError):
+            out.colormap(1)

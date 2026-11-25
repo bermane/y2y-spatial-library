@@ -1464,5 +1464,81 @@ def agol_sync_unpublish(
     _auto_export_xlsx(ctx)
 
 
+@agol_sync_group.command("restyle")
+@click.argument("dataset_id")
+@click.option(
+    "--actor", default=None,
+    help="Name to record as the changelog actor. Defaults to $USER.",
+)
+@click.option(
+    "--yes", "skip_confirm", is_flag=True,
+    help="Skip the confirmation prompt.",
+)
+@click.pass_context
+def agol_sync_restyle(
+    ctx: click.Context, dataset_id: str, actor: str | None,
+    skip_confirm: bool,
+) -> None:
+    """Reset one published layer to the standard default style.
+
+    Push sets a standard style when a layer is first published and
+    never touches it again. This command puts that standard back on
+    one layer, replacing any styling saved on the layer in AGOL. It
+    changes the drawing style only: pop-ups and other layer settings
+    are kept, and a style saved inside a web map is not changed.
+
+    The style being replaced is saved first to
+    ``reports/restyle_<dataset_id>_<timestamp>.json``. If that file
+    cannot be written, the layer is left unchanged.
+
+    A vector tile layer built from a package that was styled by
+    attribute in ArcGIS Pro is refused, because that styling is kept.
+    """
+    from . import agol_config, agol_symbology, agol_sync, inventory_manager
+
+    root = ctx.obj["root"]
+    db_path, library_root, _ = _resolve_paths(root)
+
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None:
+        raise click.ClickException(f"dataset_id {dataset_id!r} not in catalogue")
+    if not row.get("agol_item_id"):
+        raise click.ClickException(
+            f"{dataset_id} is not published to AGOL; nothing to restyle"
+        )
+
+    console.print(
+        f"restyle [bold]{row.get('title') or dataset_id}[/bold] "
+        f"({row.get('agol_format')}, item {row.get('agol_item_id')})"
+    )
+    console.print(
+        "  will apply: "
+        + agol_symbology.describe_standard(row, row.get("agol_format") or "")
+    )
+    if not skip_confirm and not click.confirm(
+        "Replace the style saved on this AGOL layer with the standard "
+        "default? The current style is backed up to reports/ first.",
+        default=False,
+    ):
+        console.print("[yellow]cancelled[/yellow] - layer left unchanged")
+        return
+
+    cfg = agol_config.load_config()
+    try:
+        gis = agol_sync.get_gis(cfg)
+        backup_path, note = agol_symbology.restyle(
+            db_path, dataset_id, gis,
+            library_root=library_root,
+            reports_dir=root / "reports",
+            actor=actor or _default_actor(),
+        )
+    except agol_sync.AgolError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print(f"[green]restyle complete[/green] - {dataset_id}")
+    console.print(f"  previous style saved to {backup_path}")
+    console.print(f"  {note}")
+
+
 if __name__ == "__main__":
     cli()
