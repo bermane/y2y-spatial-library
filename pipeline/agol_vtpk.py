@@ -330,7 +330,7 @@ def ingest_one_vtpk(
         old_value=None,
         new_value=digest,
         detail=(
-            f"ingested VTPK to {dest.relative_to(library_root.parent)} "
+            f"ingested VTPK to {dest.relative_to(library_root.parent).as_posix()} "
             f"(sha256={digest})"
         ),
     )

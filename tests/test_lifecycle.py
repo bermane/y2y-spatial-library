@@ -179,6 +179,28 @@ def test_rename_moves_file_and_updates_inventory(project_tree, populate_dataset)
     assert rename_entries[0]["field_changed"] == "file_path"
 
 
+def test_rename_stores_forward_slashes_for_a_backslash_path(
+    project_tree, populate_dataset,
+) -> None:
+    """A path typed the Windows way is stored with forward slashes."""
+    dataset_id, old_rel = populate_dataset()  # Water/streams_2024.gpkg
+
+    row = lifecycle.rename(
+        project_tree["db"], project_tree["library"],
+        dataset_id=dataset_id, new_path="Water\\streams_v2.gpkg", actor="Ethan",
+    )
+
+    assert row["file_path"] == "Water/streams_v2.gpkg"
+    assert row["category"] == "Water"
+    assert (project_tree["library"] / "Water" / "streams_v2.gpkg").exists()
+    assert not (project_tree["library"] / old_rel).exists()
+
+    log = _changelog_for(project_tree["db"], dataset_id)
+    rename_entry = next(r for r in log if r["action"] == "rename")
+    assert rename_entry["new_value"] == "Water/streams_v2.gpkg"
+    assert "\\" not in rename_entry["note"]
+
+
 def test_rename_can_change_category(project_tree, populate_dataset) -> None:
     dataset_id, _ = populate_dataset()
 
