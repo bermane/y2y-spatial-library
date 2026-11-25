@@ -389,6 +389,22 @@ flag drifted ones `pending_pull`; retry `error` rows once; skip
 `unpublished` / `pending_pull` / `conflict`. Writes
 `reports/agol_reconcile_<ts>.md`. Intended for a weekly schedule.
 
+**Group audit.** Each run (including `--dry-run`) also compares the
+Y2Y Conservation Atlas group with the catalogue and adds a "Group
+audit" section to the report. It is read-only: nothing is changed in
+the catalogue or on AGOL. It lists:
+
+- catalogue datasets on AGOL that are not shared to the group;
+- catalogue datasets whose AGOL item no longer exists;
+- layers in the group that the catalogue does not track, split into
+  those hosted by Y2Y and those from outside providers;
+- layers published by the pipeline that no catalogue dataset links to;
+- layers of deprecated or tombstoned datasets;
+- a count of items that are not layers (web maps, apps, dashboards).
+
+If the group can't be read, the report says the audit did not run and
+the rest of the reconcile is unaffected.
+
 | Option      | Description |
 | ----------- | ----------- |
 | `--dry-run` | Compute outcomes + write the report without mutating or pushing. |

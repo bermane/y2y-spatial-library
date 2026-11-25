@@ -914,7 +914,8 @@ def push(
             )
 
     # ----- sharing -----------------------------------------------------
-    _apply_sharing(item, sharing_payload)
+    for sharing_warning in _apply_sharing(item, sharing_payload):
+        _record_warning(properties, sharing_warning)
 
     # ----- authoritative badge (best-effort) ---------------------------
     _apply_content_status(item, row, properties)
@@ -2178,13 +2179,19 @@ def compute_content_status_safe(row: dict[str, Any]) -> str | None:
         return _AUTHORITATIVE_STATUS
 
 
-def _apply_sharing(item: Any, payload: dict[str, Any]) -> None:
+def _apply_sharing(item: Any, payload: dict[str, Any]) -> list[str]:
     """Apply a sharing payload to an item.
 
     Uses the modern ``item.sharing.sharing_level`` + group-sharing
     API. Falls back to the legacy ``item.share(...)`` call on older
     SDK versions.
+
+    Returns a list of warning messages, one per group the item could
+    not be shared to. A failed group share never aborts the push (the
+    org-level sharing still applied), but the caller records the
+    warning so the steward sees it instead of it passing silently.
     """
+    warnings: list[str] = []
     everyone = bool(payload.get("everyone"))
     org = bool(payload.get("org"))
     groups = list(payload.get("groups") or [])
@@ -2204,12 +2211,16 @@ def _apply_sharing(item: Any, payload: dict[str, Any]) -> None:
             for gid in groups:
                 try:
                     groups_mgr.add(group=gid)
-                except Exception:  # pragma: no cover — defensive
+                except Exception as exc:
                     # Some SDK versions take an item arg, some don't.
                     # Best-effort: continue if this particular call shape
                     # isn't supported; the org-level sharing still applied.
-                    pass
-        return
+                    warnings.append(
+                        f"could not share the item to group {gid}: "
+                        f"{exc.__class__.__name__}: {exc}. Share it to "
+                        f"the group by hand on AGOL."
+                    )
+        return warnings
 
     # Legacy path: item.share(everyone=..., org=..., groups=...).
     try:
@@ -2222,6 +2233,7 @@ def _apply_sharing(item: Any, payload: dict[str, Any]) -> None:
         raise AgolError(
             f"could not apply sharing to item {item.id!r}: {exc}"
         ) from exc
+    return warnings
 
 
 # --- misc helpers ------------------------------------------------------
@@ -3571,6 +3583,9 @@ class ReconcileReport(NamedTuple):
     report_path: Path
     outcomes: list[ReconcileOutcome]
     counts_by_bucket: dict[str, int]
+    # Two-way check against the Conservation Atlas group (read-only).
+    # A ``pipeline.agol_group_audit.GroupAudit``; see that module.
+    group_audit: Any = None
 
 
 def _agol_modified_iso(item: Any) -> str | None:
@@ -3641,12 +3656,19 @@ def reconcile_bidirectional(
             catalogue or contacting AGOL for push attempts; still
             writes a report capturing the planned actions.
 
+    After the per-row pass, a read-only **group audit** compares the
+    Conservation Atlas group with the catalogue in both directions
+    (:mod:`pipeline.agol_group_audit`) and its findings are appended
+    to the same report. The audit runs in dry-run mode too, since it
+    changes nothing. If it cannot run (AGOL unreachable, group not
+    found) the report says so and the reconcile still completes.
+
     Returns the ``ReconcileReport`` with per-row outcomes + bucket
-    counts. Reports are catalogue-centric: items on AGOL that have
-    no corresponding catalogue row are explicitly ignored (see
-    DESIGN.md §15, "Reconciliation scope").
+    counts + the group audit. Row handling is catalogue-centric; the
+    audit is the one place the group's own contents are listed, and
+    it never looks beyond that group (see DESIGN.md §15).
     """
-    from . import inventory_manager
+    from . import agol_group_audit, inventory_manager
     from .utils import utc_now_iso
 
     rows = [
@@ -3849,6 +3871,15 @@ def reconcile_bidirectional(
             note=f"sync_status={status!r} not reconcile's territory",
         ))
 
+    # --- group audit (read-only; never blocks the reconcile) ----------
+    try:
+        group_audit = agol_group_audit.audit_group(db_path, gis, config)
+    except Exception as exc:  # defensive: audit_group already guards AGOL
+        group_audit = agol_group_audit.failed_audit(
+            config.conservation_atlas_group_name,
+            f"{exc.__class__.__name__}: {exc}",
+        )
+
     # --- write markdown report ---------------------------------------
     timestamp_iso = utc_now_iso()
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -3860,6 +3891,7 @@ def reconcile_bidirectional(
         outcomes=outcomes,
         buckets=buckets,
         dry_run=dry_run,
+        group_audit=group_audit,
     )
 
     return ReconcileReport(
@@ -3867,6 +3899,7 @@ def reconcile_bidirectional(
         report_path=report_path,
         outcomes=outcomes,
         counts_by_bucket=buckets,
+        group_audit=group_audit,
     )
 
 
@@ -3906,6 +3939,7 @@ def _write_agol_reconcile_report(
     outcomes: list[ReconcileOutcome],
     buckets: dict[str, int],
     dry_run: bool,
+    group_audit: Any = None,
 ) -> None:
     """Render the bidirectional-reconcile outcome to markdown."""
     mode = "dry-run" if dry_run else "applied"
@@ -3944,5 +3978,9 @@ def _write_agol_reconcile_report(
                 f"{o.sync_status_before} → {o.sync_status_after}: {o.note}"
             )
         lines.append("")
+
+    if group_audit is not None:
+        from . import agol_group_audit
+        lines.extend(agol_group_audit.render_markdown(group_audit))
 
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

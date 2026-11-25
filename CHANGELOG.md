@@ -49,6 +49,12 @@ Pilot release for the first deployment on the data steward's Windows machine.
   has the new names.
 - `agol_item_id` is no longer filled in the review sheet. The first push to
   ArcGIS Online writes it.
+- `y2y agol-sync reconcile` now audits the Y2Y Conservation Atlas group. The
+  weekly report lists layers in the group that the catalogue does not track,
+  and catalogue datasets on ArcGIS Online that are not shared to the group.
+  The audit only reports; it changes nothing.
+- A push that cannot share its layer to the group now records a warning
+  instead of passing silently.
 
 ## 0.1.0
 
