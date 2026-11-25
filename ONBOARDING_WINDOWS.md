@@ -318,9 +318,10 @@ organization until you remove it in step 6.
      as an outline with no fill, lines and points in the colour of the
      dataset's category, rasters 30% transparent. No zoom limits are set, so
      vector layers stay visible at every zoom level.
-   - a raster is published as a tiled imagery layer. It stops drawing when
-     you zoom in far past the raster's own resolution; that is expected, so
-     zoom back out before deciding the layer is broken.
+   - a raster is published as a tiled imagery layer. It can stop drawing
+     when you zoom very far out, most noticeably for a raster that covers a
+     small area; that is expected, so zoom back in before deciding the layer
+     is broken.
 
    The default style is set once, when the layer is first published. You can
    restyle a layer in Map Viewer and save it; later pushes keep your change.
