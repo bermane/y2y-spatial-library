@@ -39,7 +39,7 @@ y2y agol-sync status                         # sync state of every active row
 y2y agol-sync push <id> [--dry-run]          # publish/update one row
 y2y agol-sync push --all-unpublished         # initial bulk publish of the backlog
 y2y agol-sync push --all-dirty               # push every pending_push row
-y2y agol-sync reconcile                      # weekly: push pending + flag AGOL drift
+y2y agol-sync reconcile                      # weekly: push pending + flag AGOL drift + audit the Atlas group
 ```
 
 ### Resolve AGOL drift

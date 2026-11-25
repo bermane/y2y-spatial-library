@@ -305,6 +305,16 @@
 <h2 class="sec" id="s9"><span class="num">9.</span>AGOL: reconcile (bidirectional)</h2>
 <pre>y2y agol-sync reconcile [--dry-run] [--actor TEXT]</pre>
 <p>For every <code>active</code> row: push <code>pending_push</code> (failures → <code>error</code>); check <code>clean</code> rows for AGOL-side drift (item <code>modified</code> &gt; <code>last_synced_at</code>) and flag drifted ones <code>pending_pull</code>; retry <code>error</code> rows once; skip <code>unpublished</code> / <code>pending_pull</code> / <code>conflict</code>. Writes <code>reports/agol_reconcile_&lt;ts&gt;.md</code>.</p>
+<p><strong>Group audit.</strong> Each run (including <code>--dry-run</code>) also compares the Y2Y Conservation Atlas group with the catalogue and adds a "Group audit" section to the report. It is read-only: nothing is changed in the catalogue or on AGOL. It lists:</p>
+<ul>
+  <li>catalogue datasets on AGOL that are not shared to the group;</li>
+  <li>catalogue datasets whose AGOL item no longer exists;</li>
+  <li>layers in the group that the catalogue does not track, split into those hosted by Y2Y and those from outside providers;</li>
+  <li>layers published by the pipeline that no catalogue dataset links to;</li>
+  <li>layers of deprecated or tombstoned datasets;</li>
+  <li>a count of items that are not layers (web maps, apps, dashboards).</li>
+</ul>
+<p>If the group can't be read, the report says the audit did not run and the rest of the reconcile is unaffected.</p>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
   <tbody>

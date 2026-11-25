@@ -1230,21 +1230,24 @@ trail by `timestamp`.
 
 ### Catalogue-centric scope
 
-Every operation iterates rows in `datasets`; the org's full content
-tree is never scanned. Consequences:
+Every operation that changes anything iterates rows in `datasets`; the
+org's full content tree is never scanned. Consequences:
 
 - **In catalogue, not on AGOL** (`agol_item_id IS NULL`) → push candidate.
 - **In both** (linked rows) → reconciled bidirectionally.
 - **On AGOL, not in catalogue** (maps, dashboards, the steward's
-  experiments) → **ignored**. The integration never ingests or
-  classifies untracked AGOL items.
+  experiments) → **never acted on**. The integration never ingests,
+  edits or removes untracked AGOL items. Untracked layers inside the
+  Conservation Atlas group are *reported* by the group audit (below);
+  everything outside that group is ignored.
 - **Tombstoned rows** → filtered out of every iteration. Call
   `y2y agol-sync unpublish <id>` before tombstoning if the AGOL item
   should go too.
 
 Integration-created items are stamped with `typeKeywords` (`Y2Y`,
-`Y2Y:dataset_id:<id>`, `Y2Y:category:<category>`) so a future audit
-tool can find them — no v1 command consumes these.
+`Y2Y:dataset_id:<id>`, `Y2Y:category:<category>`). The group audit
+uses them to recognise pipeline-published items that no catalogue row
+links to.
 
 ### Per-row AGOL footprint: source + service
 
@@ -1313,8 +1316,48 @@ Set `Y2Y_AGOL_AUTO_PUSH=false` to make all pushes manual.
 - `error` → retry push once.
 - `unpublished` / `pending_pull` / `conflict` → skipped (steward's call).
 
-Writes a markdown report to `reports/agol_reconcile_<ts>.md`. Intended
-for a weekly schedule — see "Scheduling" below.
+It then runs the group audit (next section) and writes one markdown
+report to `reports/agol_reconcile_<ts>.md`. Intended for a weekly
+schedule — see "Scheduling" below.
+
+### Group audit
+
+The Conservation Atlas group is the AGOL home of the library, so its
+contents and the catalogue should agree. Every `agol-sync reconcile`
+run (dry-run included) lists the group once and compares it with the
+catalogue in both directions (`pipeline/agol_group_audit.py`). The
+findings are appended to the reconcile report:
+
+- **Catalogue datasets on AGOL but not in the group** — an active row
+  whose `agol_item_id` exists but is not shared to the group. Should
+  never happen; caused by `push --sharing ...` or a failed group share.
+- **Catalogue datasets whose AGOL item is gone** — deleted on AGOL
+  outside the pipeline.
+- **Untracked layers hosted by Y2Y** — a layer in the group that no
+  catalogue row links to.
+- **Untracked layers from outside providers** — a layer in the group
+  whose data is on another organisation's server (the item belongs to
+  another org, or its URL is not on ArcGIS Online). The report notes
+  whether the item carries terms of use.
+- **Pipeline-published layers with no catalogue dataset** — carries
+  the `Y2Y` keywords but no row links to it.
+- **Layers of deprecated or tombstoned datasets** — still shared.
+- **Items that are not layers** (web maps, apps, dashboards) — counted
+  by type, not flagged.
+
+The audit is **read-only**: it changes neither the catalogue nor AGOL,
+in keeping with "detect, never auto-fix" (§2). The steward acts on the
+report by hand. It is scoped to the one group and never looks at the
+rest of the org. If the group can't be listed, the report says the
+audit did not run and the rest of the reconcile is unaffected.
+
+A push that cannot share its item to the group still succeeds, and
+records an `[agol]` warning in `internal_notes` and the changelog.
+
+Planned for 0.9.1: a review sheet where the steward records a decision
+per untracked layer (ingest / link / keep as outside reference /
+remove from group), remembered between runs, and
+`reconcile --fix-sharing`.
 
 ### Pull + conflict resolution
 
@@ -1439,8 +1482,8 @@ Load with `launchctl load ~/Library/LaunchAgents/net.y2y.agol-reconcile.plist`.
 
 Multi-rendition (one dataset → both FS and VTL); persistent per-item
 sharing override column; async job-monitor for large-raster republish;
-multi-user contributor flow; Markdown / dual-column rich text; AGOL-side
-audit command for orphan detection.
+multi-user contributor flow; Markdown / dual-column rich text; an audit
+of AGOL content outside the Conservation Atlas group.
 
 ---
 

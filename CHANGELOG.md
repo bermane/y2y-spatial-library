@@ -20,6 +20,12 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - `setup_windows.ps1` now runs the full test suite and reports the result.
 - Replaced a deprecated geopandas call in the tests. geopandas 1.0 or newer is
   now required.
+- `y2y agol-sync reconcile` now audits the Y2Y Conservation Atlas group. The
+  weekly report lists layers in the group that the catalogue does not track,
+  and catalogue datasets on ArcGIS Online that are not shared to the group.
+  The audit only reports; it changes nothing.
+- A push that cannot share its layer to the group now records a warning
+  instead of passing silently.
 
 ## 0.1.0
 

@@ -1054,6 +1054,10 @@ def agol_sync_reconcile(
     * Retries ``error`` rows once.
     * Skips ``unpublished`` / ``pending_pull`` / ``conflict``.
 
+    It then audits the Conservation Atlas group (read-only): layers in
+    the group that the catalogue does not track, and catalogue
+    datasets on AGOL that are not shared to the group.
+
     Writes a markdown report to ``reports/agol_reconcile_<ts>.md``.
     Intended for a weekly cron / launchd schedule (see DESIGN.md
     §15 for sample configs).
@@ -1092,6 +1096,24 @@ def agol_sync_reconcile(
                 "yellow" if bucket == "pulled_flag" else "cyan"
             )
             console.print(f"  [{colour}]{n:3d}[/{colour}]  {bucket}")
+    audit = report.group_audit
+    if audit is not None:
+        if audit.error:
+            console.print(
+                f"  [yellow]group audit did not run:[/yellow] {audit.error}"
+            )
+        else:
+            colour = "yellow" if audit.findings_count else "green"
+            console.print(
+                f"  group audit ({audit.group_name}): "
+                f"[{colour}]{audit.findings_count}[/{colour}] to review — "
+                f"{len(audit.untracked_y2y) + len(audit.untracked_outside)} "
+                f"untracked layers, "
+                f"{len(audit.pipeline_orphans) + len(audit.should_be_gone)} "
+                f"leftover layers, "
+                f"{len(audit.not_in_group)} datasets not in the group, "
+                f"{len(audit.missing_on_agol)} missing on AGOL"
+            )
     console.print(f"  report: [cyan]{report.report_path}[/cyan]")
     if not dry_run:
         _auto_export_xlsx(ctx)
