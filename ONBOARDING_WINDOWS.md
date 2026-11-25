@@ -23,9 +23,18 @@ PowerShell"**. `>` marks a line you type.
    newer** — one of the mapping libraries has no build for it yet, and the
    install fails.)
 
-2. **Git** — https://git-scm.com/download/win  (accept defaults).
+2. **Git** — https://git-scm.com/download/win  (accept defaults). Open a
+   **new** PowerShell window afterwards and verify:
+   ```powershell
+   > git --version
+   ```
+   Should print `git version 2.x`. If PowerShell says `git` is not recognized,
+   close and reopen PowerShell; if it still fails, reinstall Git and keep the
+   default "Git from the command line" option.
    *(Or install **GitHub Desktop** — https://desktop.github.com — if you prefer
    clicking "Clone"/"Pull" over typing git commands. Either works.)*
+   With GitHub Desktop alone, `git --version` is expected to fail; that is
+   fine, pull updates in GitHub Desktop instead.
 
 3. **ArcGIS Pro** — you already have it. It is **not** needed to run this
    pipeline; you only use it separately to build a `.vtpk` when a layer is
