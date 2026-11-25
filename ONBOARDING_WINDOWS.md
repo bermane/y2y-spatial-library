@@ -1,7 +1,7 @@
 # Y2Y Spatial Library — Windows Onboarding (for Brynn)
 
 This gets the pipeline installed and running on a Windows machine, connects it
-to AGOL, and walks through publishing your first layer. Follow it top to bottom.
+to ArcGIS Online (AGOL), and walks through publishing your first layer. Follow it top to bottom.
 
 - **Quick daily reference:** `CHEATSHEET.html` (open in a browser).
 - **Every command + option:** `COMMAND_REFERENCE.html`.
@@ -105,7 +105,8 @@ it at your SharePoint library location):
 
 That creates `library/` (with the category folders), `queue/`, `inventory/`,
 and `reports/` at that path. You drop source files into its `queue\incoming\`,
-and the catalogue (`inventory\inventory.db`) is created there on first use.
+and the catalogue (`inventory\inventory.db`) is created there the first time
+you approve a dataset.
 
 **Set the data folder once so you never retype it.** The pipeline reads a
 `Y2Y_ROOT` environment variable as its default data root. Set it as a permanent
@@ -202,11 +203,16 @@ C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1
 # pause OneDrive sync now: system tray -> OneDrive -> gear -> Pause syncing
 ```
 
-The catalogue starts empty. Each layer goes **scan → review → approve →
-publish**. Repeat for each tutorial layer.
+The catalogue starts empty. Each layer goes **scan → review → approve**, and
+approving publishes it. For your very first run, use a small throwaway file and
+give it a title like `TEST - delete me`, because it will be visible to the
+organization until you remove it in step 6.
 
-1. **Drop a source file** (a `.gpkg`, `.shp`, `.tif`, …) into the data folder's
-   `queue\incoming\`.
+1. **Drop a source file** into the data folder's `queue\incoming\`. Accepted:
+   Shapefile (all its parts together), GeoPackage, GeoJSON, KML/KMZ, and
+   single-band GeoTIFF. A file with several layers (a file geodatabase, a
+   multi-layer GeoPackage) or no coordinate system is rejected, with the
+   reason written next to it in `queue\rejected\`.
 
 2. **Scan** — the pipeline inspects it and stages a review sheet:
    ```powershell
@@ -217,33 +223,81 @@ publish**. Repeat for each tutorial layer.
    ```powershell
    start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"
    ```
-   - Fill the required fields: `title`, `summary`, `description`, `tags`
-     (semicolon-separated, or `NA` if the dataset should have no tags),
-     `terms_of_use`, `acknowledgements`, `data_steward`.
-     (`category`, `agol_format` and `authoritative` are pre-filled; adjust if
-     needed. `title` is pre-filled with the file name, so rewrite it into a
-     proper title.)
    - The header colours tell you what to touch: **blue** and **orange** columns
      are yours to fill (blue ones are published to ArcGIS Online), **grey** and
-     **mauve** columns are filled automatically. The `legend` tab in the sheet
-     explains them.
-   - You can **copy-paste** these from the existing inventory spreadsheet Ethan
-     has open (same column names).
+     **mauve** columns are filled automatically. A lighter shade means
+     optional. The `legend` tab in the sheet explains them.
+   - Fill: `title` (pre-filled with the file name, so rewrite it into a proper
+     title), `summary`, `description`, `tags` (semicolon-separated, or `NA` if
+     the dataset should have no tags), `terms_of_use`, `acknowledgements`,
+     `data_steward`.
+   - `category` is guessed from the file name and is often empty. It must be
+     exactly one of:
+     `Boundaries, Tenure & Governance` · `Biodiversity & Ecosystems` ·
+     `Climate Change` · `Connectivity & Wildlife Movement` · `Species` ·
+     `Water` · `Land Cover, Land Use & Disturbance` ·
+     `Human Dimensions of Conservation` · `Threats & Infrastructure` ·
+     `Demographics & Socioeconomic Data`.
+     For `Species` only, also fill `subcategory`: `Caribou`, `Elk`, `Goat`,
+     `Grizzly Bear`, `Multi-Species`, `Wolverine` or `Other`.
+   - For a raster (`.tif`), fill `classification`: `continuous` (elevation, a
+     habitat score) or `categorical` (land cover classes). Vectors are
+     pre-filled.
+   - `agol_format`, `authoritative`, `target_filename` and `status` are
+     pre-filled; adjust if needed. Leave `agol_item_id` empty.
    - Set **`ready` = TRUE**.
    - **Save and CLOSE Excel** (approve fails if the file is still open).
 
-4. **Approve** — validate + file into the library + catalogue:
+4. **Approve** — validate, file into the library and catalogue, and publish:
    ```powershell
    y2y ingest --approve
    ```
+   If a row fails, its `ready` goes back to FALSE and the `_validation_error`
+   column says why. Fix it, set `ready` to TRUE and approve again.
 
-5. **Publish to AGOL:**
+   Because you are signed in to ArcGIS Online, approving also **publishes the
+   layer straight away**, shared with the organization and the Y2Y
+   Conservation Atlas group. The command does not print the result of that
+   publish, so check it:
    ```powershell
-   y2y agol-sync status              # find the dataset_id
-   y2y agol-sync push <dataset_id>   # add --dry-run first to preview
+   y2y agol-sync status
    ```
-   Then open the item in ArcGIS Online to confirm it's in your content with the
-   right category, sharing, and thumbnail.
+   `clean` means it is published. `unpublished` means the publish did not go
+   through; run the push yourself to see why (next step).
+
+5. **Find the dataset's ID, and push by hand when needed.** Every dataset has
+   an ID like `ds_01ABC...`. Look it up in the `dataset_id` column of
+   `inventory\inventory.xlsx` in the data folder (a read-only view, rewritten
+   after each command; close it before running `y2y`).
+   ```powershell
+   start "$env:Y2Y_ROOT\inventory\inventory.xlsx"
+   y2y agol-sync push <dataset_id> --dry-run   # preview
+   y2y agol-sync push <dataset_id>             # publish, or show the error
+   ```
+   Then open the item in ArcGIS Online and confirm:
+   - it is in your content, in the right category folder, with a thumbnail;
+   - it is shared with the organization and the Y2Y Conservation Atlas group;
+   - it shows the **Authoritative** badge (when `authoritative` is `yes`);
+   - for a feature layer, **Settings → "Allow others to export to different
+     formats"** is ticked. (Vector tile and imagery layers are view-only.)
+
+   If the badge is missing, see the Authoritative note in §4.
+
+6. **Remove the test layer.** Retiring a dataset takes its layer off ArcGIS
+   Online:
+   ```powershell
+   y2y update <dataset_id> --set status=deprecated
+   ```
+   It warns you, asks you to confirm, then permanently deletes the layer from
+   ArcGIS Online. The library file and the catalogue row are kept. Check that
+   the item is gone from your content. To also erase the test file from the
+   library, run `y2y tombstone <dataset_id> --reason "install test"` (this
+   cannot be undone; the catalogue row stays as a record).
+
+> **Later edits publish themselves too.** `y2y update`, `y2y rename` and
+> `y2y refresh` on a published dataset push the change to ArcGIS Online right
+> away. If ArcGIS Online cannot be reached, the catalogue change still
+> succeeds and the weekly reconcile (§7) catches up.
 
 > `y2y` uses `Y2Y_ROOT` automatically. To override for a one-off (e.g. testing
 > against a different folder), pass `--root "C:\some\other\path"`.
@@ -279,7 +333,21 @@ dependencies changed.
 
 ---
 
-## 7. Operating rules (read `DEPLOYMENT.md`)
+## 7. Weekly routine and operating rules (read `DEPLOYMENT.md`)
+
+**Once a week**, with OneDrive sync paused:
+
+```powershell
+y2y reconcile                 # catalogue vs. files in the library
+y2y agol-sync reconcile       # catalogue vs. ArcGIS Online
+```
+
+The second command retries anything that did not publish, flags layers that
+were edited on ArcGIS Online, removes layers of retired datasets, and audits
+the Y2Y Conservation Atlas group. Each writes a report into the data folder's
+`reports\`. On a new install the group audit lists every layer already in the
+group as "not tracked"; that is expected, and it changes nothing. There is no
+scheduled task for this on Windows yet, so run it by hand.
 
 The catalogue is a live SQLite database. To keep it safe:
 
@@ -287,9 +355,13 @@ The catalogue is a live SQLite database. To keep it safe:
   Never let the live `inventory.db` sync mid-write.
 - **One machine only** operates the catalogue.
 - **Sync is not backup** — keep an occasional separate copy of
-  `inventory\inventory.db`.
+  `inventory\inventory.db`, outside the synced folder:
+  ```powershell
+  mkdir C:\Y2Y\backups -Force
+  Copy-Item "$env:Y2Y_ROOT\inventory\inventory.db" "C:\Y2Y\backups\inventory_$(Get-Date -Format yyyy-MM-dd).db"
+  ```
 
-Full rationale and a set-and-forget option are in `DEPLOYMENT.md`.
+Full rationale is in `DEPLOYMENT.md`.
 
 ---
 

@@ -152,22 +152,25 @@
 </nav>
 
 <h2 class="sec" id="s1"><span class="num">1.</span>Environment &amp; invocation</h2>
-<pre><span class="k">cd</span> /path/to/Spatial_Data &amp;&amp; <span class="k">source</span> .venv/bin/activate</pre>
+<pre><span class="c"># Windows (the steward's machine): activate, then pause OneDrive sync</span>
+C:\Y2Y\y2y-spatial-library\.venv\Scripts\Activate.ps1</pre>
+<p>Examples in this document are written for Windows PowerShell. On macOS or Linux, activate with <code>source .venv/bin/activate</code>, open files with <code>open</code> instead of <code>start</code>, and set variables with <code>export NAME=value</code> instead of <code>$env:NAME = "value"</code>.</p>
 <pre>y2y [--root DIRECTORY] COMMAND [ARGS]...</pre>
 <ul>
-  <li><code>--root DIRECTORY</code> — project root (default: cwd). All paths (<code>queue/</code>, <code>library/</code>, <code>inventory/</code>, <code>reports/</code>) resolve under it.</li>
+  <li><code>--root DIRECTORY</code> — the data root. If it is not given, the <code>Y2Y_ROOT</code> environment variable is used, and if that is not set, the current working directory. All paths (<code>queue/</code>, <code>library/</code>, <code>inventory/</code>, <code>reports/</code>) resolve under it.</li>
+  <li><code>DATASET_ID</code> — every dataset has an ID like <code>ds_01ABC…</code>. Look it up in the <code>dataset_id</code> column of <code>inventory/inventory.xlsx</code>.</li>
   <li><code>y2y --help</code> — list all commands. <code>y2y &lt;command&gt; --help</code> — options for one.</li>
   <li><code>y2y --version</code> — print the installed version (see <code>CHANGELOG.md</code>).</li>
 </ul>
 <div class="note"><strong>Source of truth:</strong> <code>inventory/inventory.db</code> (SQLite). <code>inventory.xlsx</code> is a rendered read-only view. AGOL is a downstream publication target — catalogue mutations never block on it.</div>
-<p><strong>Common option — <code>--actor NAME</code>:</strong> every mutating command accepts it to record who made the change in the changelog. Defaults to <code>$USER</code>.</p>
+<p><strong>Common option — <code>--actor NAME</code>:</strong> every mutating command accepts it to record who made the change in the changelog. Defaults to <code>$USER</code>, your login name on the machine (<code>USERNAME</code> on Windows).</p>
 
 <h2 class="sec" id="s2"><span class="num">2.</span>Ingest</h2>
 <pre>y2y ingest [--approve] [--actor TEXT]</pre>
 <p>Two phases of one command:</p>
 <ul>
   <li><strong>Phase 1 (default) — scan.</strong> Walks <code>queue/incoming/</code>, stages accepted source datasets into <code>queue/processing/pending.xlsx</code>. Rejected files → <code>queue/rejected/</code> with a <code>.rejected.yaml</code> sidecar. <code>.vtpk</code> files are filed into <code>library/vtpk/</code> (matched to a row by file stem); a GPKG + same-stem <code>.vtpk</code> dropped together are auto-paired.</li>
-  <li><strong>Phase 2 (<code>--approve</code>) — promote.</strong> Validates each <code>ready=TRUE</code> row, moves the file into <code>library/spatial/…</code>, inserts the catalogue row, archives the source bundle, and (if logged in) auto-pushes to AGOL.</li>
+  <li><strong>Phase 2 (<code>--approve</code>) — promote.</strong> Validates each <code>ready=TRUE</code> row, moves the file into <code>library/spatial/…</code>, inserts the catalogue row, archives the source bundle, and (if logged in) publishes the new row to AGOL straight away. The command does not print the result of that publish; check it with <code>y2y agol-sync status</code> (<code>clean</code> = published).</li>
 </ul>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
@@ -176,7 +179,7 @@
     <tr><td><code>--actor</code></td><td>Changelog actor at promotion. Defaults to <code>$USER</code>.</td></tr>
   </tbody>
 </table>
-<p><strong>Review-sheet fields:</strong> <code>title</code>, <code>summary</code>, <code>description</code>, <code>category</code>, <code>subcategory</code> (Species only), <code>tags</code>, <code>terms_of_use</code>, <code>acknowledgements</code>, <code>data_steward</code>, <code>agol_format</code>, <code>authoritative</code>, <code>ready</code>. <code>agol_format</code> is pre-filled from the format and <code>authoritative</code> is pre-filled <code>yes</code>. Optional: <code>temporal_start</code>, <code>temporal_end</code>, <code>notes</code>.</p>
+<p><strong>Review-sheet fields:</strong> <code>title</code>, <code>summary</code>, <code>description</code>, <code>category</code>, <code>subcategory</code> (Species only), <code>tags</code>, <code>terms_of_use</code>, <code>acknowledgements</code>, <code>data_steward</code>, <code>agol_format</code>, <code>authoritative</code>, <code>ready</code>. <code>agol_format</code> is pre-filled from the format and <code>authoritative</code> is pre-filled <code>yes</code>. <code>category</code> is guessed from the file name and is often empty. <code>target_filename</code> and <code>status</code> are pre-filled. For a raster, also fill <code>classification</code> (<code>continuous</code> or <code>categorical</code>). Optional: <code>temporal_start</code>, <code>temporal_end</code>, <code>notes</code>.</p>
 <p><strong>Header colours</strong> (also in the sheet's <code>legend</code> tab). Columns are laid out in this order, with <code>_validation_error</code> right after <code>ready</code>:</p>
 <table>
   <thead><tr><th>Colour</th><th>Meaning</th></tr></thead>
@@ -191,6 +194,7 @@
 </table>
 <p><strong>Field rules</strong></p>
 <ul>
+  <li><code>category</code>: exactly one of <code>Boundaries, Tenure &amp; Governance</code>, <code>Biodiversity &amp; Ecosystems</code>, <code>Climate Change</code>, <code>Connectivity &amp; Wildlife Movement</code>, <code>Species</code>, <code>Water</code>, <code>Land Cover, Land Use &amp; Disturbance</code>, <code>Human Dimensions of Conservation</code>, <code>Threats &amp; Infrastructure</code>, <code>Demographics &amp; Socioeconomic Data</code>. For <code>Species</code> only, <code>subcategory</code> is one of <code>Caribou</code>, <code>Elk</code>, <code>Goat</code>, <code>Grizzly Bear</code>, <code>Multi-Species</code>, <code>Wolverine</code>, <code>Other</code>.</li>
   <li><code>tags</code>: separate tags with <code>;</code> (a <code>,</code> also works). The cell cannot be empty. Enter <code>NA</code> (any letter case) on its own if the dataset should have no tags; <code>NA</code> is never published as a tag and cannot be mixed with real tags.</li>
   <li><code>authoritative</code>: <code>yes</code> or <code>no</code>. <code>yes</code> gives the ArcGIS Online item the "Authoritative" badge at push; <code>no</code> removes it.</li>
   <li><code>temporal_start</code> / <code>temporal_end</code>: the period the data covers, as <code>YYYY</code>, <code>YYYY-MM</code> or <code>YYYY-MM-DD</code>. Leave empty if it does not apply.</li>
@@ -199,7 +203,7 @@
 <div class="note"><strong>On validation failure:</strong> the row's <code>ready</code> flips to <code>FALSE</code> and <code>_validation_error</code> explains why. Fix the issue, set <code>ready=TRUE</code>, re-run <code>y2y ingest --approve</code>.</div>
 <pre><span class="c"># drop files into queue/incoming/</span>
 <span class="k">y2y ingest</span>
-<span class="k">open</span> queue/processing/pending.xlsx     <span class="c"># edit + set ready=TRUE</span>
+<span class="k">start</span> "$env:Y2Y_ROOT\queue\processing\pending.xlsx"   <span class="c"># edit + set ready=TRUE, close Excel</span>
 <span class="k">y2y ingest --approve</span></pre>
 
 <h2 class="sec" id="s3"><span class="num">3.</span>Lifecycle</h2>
@@ -283,7 +287,7 @@
 <h3><code>y2y agol-sync login</code></h3>
 <pre>y2y agol-sync login</pre>
 <p>Interactive OAuth. Requires the OAuth client id in <code>Y2Y_AGOL_CLIENT_ID</code> (or <code>~/.y2y/agol_config.yaml</code>). Opens a browser once; caches credentials at <code>~/.arcgis/profile_y2y</code>.</p>
-<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<pre>$env:Y2Y_AGOL_CLIENT_ID = <span class="c">"&lt;oauth-client-id&gt;"</span>   <span class="c"># or set it once as a User environment variable</span>
 <span class="k">y2y agol-sync login</span></pre>
 
 <h3><code>y2y agol-sync init-categories</code></h3>
@@ -301,7 +305,7 @@
 
 <h2 class="sec" id="s7"><span class="num">7.</span>AGOL: status</h2>
 <pre>y2y agol-sync status [--deep]</pre>
-<p>Report <code>sync_status</code> distribution across every <code>active</code> row.</p>
+<p>Report how many <code>active</code> rows are in each <code>sync_status</code> and each <code>agol_format</code>, and list deprecated or tombstoned datasets whose layer is still on AGOL. It prints counts, not one line per dataset.</p>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
   <tbody><tr><td><code>--deep</code></td><td>Also query AGOL for each linked item's modified timestamp and flag rows where AGOL drifted past <code>last_synced_at</code>.</td></tr></tbody>
@@ -358,7 +362,7 @@
 <pre><span class="k">y2y agol-sync reconcile</span> --dry-run
 <span class="k">y2y agol-sync reconcile</span>
 <span class="k">y2y agol-sync reconcile</span> --actor reconcile-cron</pre>
-<p>Scheduling samples (launchd / cron) are in <code>DESIGN.md §15</code>.</p>
+<p>Scheduling samples for macOS (launchd) and Linux (cron) are in <code>DESIGN.md §15</code>. There is no Windows sample yet; on Windows run it by hand once a week, with OneDrive sync paused.</p>
 
 <h2 class="sec" id="s10"><span class="num">10.</span>AGOL: pull</h2>
 <pre>y2y agol-sync pull [OPTIONS] [DATASET_ID]</pre>
@@ -464,6 +468,7 @@ any-with-item ──deprecate/tombstone─&gt; unpublished (layer removed)</pre>
 <table>
   <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
   <tbody>
+    <tr><td><code>Y2Y_ROOT</code></td><td>—</td><td>The data root, used when <code>--root</code> is not given.</td></tr>
     <tr><td><code>Y2Y_AGOL_CLIENT_ID</code></td><td>—</td><td>OAuth client id; required for <code>login</code>. Keep out of git.</td></tr>
     <tr><td><code>Y2Y_AGOL_AUTO_PUSH</code></td><td><code>true</code></td><td>Auto-push on catalogue edits / ingest approvals. <code>false</code> = all pushes manual.</td></tr>
     <tr><td><code>Y2Y_AGOL_PROFILE</code></td><td><code>y2y</code></td><td>Override the cached OAuth profile name.</td></tr>
@@ -502,15 +507,15 @@ any-with-item ──deprecate/tombstone─&gt; unpublished (layer removed)</pre>
 <h2 class="sec" id="s15"><span class="num">15.</span>Workflows / recipes</h2>
 
 <h3>First-time AGOL setup</h3>
-<pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>
+<pre>$env:Y2Y_AGOL_CLIENT_ID = <span class="c">"&lt;oauth-client-id&gt;"</span>
 <span class="k">y2y agol-sync login</span>
 <span class="k">y2y agol-sync init-categories</span> --dry-run
 <span class="k">y2y agol-sync init-categories</span></pre>
 
 <h3>Ingest a batch end-to-end</h3>
-<pre><span class="c"># drop files into queue/incoming/</span>
+<pre><span class="c"># drop files into queue\incoming\</span>
 <span class="k">y2y ingest</span>
-<span class="k">open</span> queue/processing/pending.xlsx        <span class="c"># fill fields, set ready=TRUE</span>
+<span class="k">start</span> "$env:Y2Y_ROOT\queue\processing\pending.xlsx"   <span class="c"># fill fields, set ready=TRUE</span>
 <span class="k">y2y ingest --approve</span>
 <span class="k">y2y reconcile --deep</span>                       <span class="c"># confirm catalogue ↔ filesystem 1:1</span></pre>
 
@@ -520,9 +525,9 @@ any-with-item ──deprecate/tombstone─&gt; unpublished (layer removed)</pre>
 <span class="k">y2y agol-sync reconcile</span>                            <span class="c"># retry any errors, get report</span></pre>
 
 <h3>Controlled first publish (no auto-sync noise during ingest)</h3>
-<pre><span class="k">export</span> Y2Y_AGOL_AUTO_PUSH=false
+<pre>$env:Y2Y_AGOL_AUTO_PUSH = "false"        <span class="c"># this PowerShell window only</span>
 <span class="c"># ... ingest the whole backlog ...</span>
-<span class="k">unset</span> Y2Y_AGOL_AUTO_PUSH
+<span class="k">Remove-Item</span> Env:Y2Y_AGOL_AUTO_PUSH
 <span class="k">y2y agol-sync push --all-unpublished</span></pre>
 
 <h3>Edit metadata and let it propagate</h3>

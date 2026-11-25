@@ -25,15 +25,23 @@ This repository is split into two strictly separated concerns:
 | **Data**       | `library/`   | Canonical spatial datasets. Never mutated by hand.      |
 | **Tooling**    | `pipeline/`  | Python package that ingests, inventories, reconciles.   |
 
-`library/` is organized by taxonomy (see below) and is the filesystem-level
-source of truth for *what exists and where*. `inventory/inventory.xlsx` is the
-source of truth for *metadata and history*. See [DESIGN.md](DESIGN.md) for the
-full rationale (the "hybrid source of truth" model).
+`library/spatial/` is organized by taxonomy (see below) and holds the
+canonical files. The catalogue, `inventory/inventory.db` (SQLite), is the
+source of truth for *metadata and history*; `inventory/inventory.xlsx` is a
+read-only view regenerated from it. ArcGIS Online is downstream. See
+[DESIGN.md](DESIGN.md) for the full rationale.
+
+On the steward's machine the code and the data are in different places: the
+code is a local clone, and the data root (`library/`, `inventory/`, `queue/`,
+`reports/`) is a SharePoint folder selected with `Y2Y_ROOT` or `--root`. See
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 Supporting directories:
 
-- `queue/` — staging for new data (`incoming/` → `processing/` → `rejected/`)
-- `inventory/` — `inventory.xlsx` (generated) and `changelog.md` (append-only)
+- `queue/` — staging for new data (`incoming/` → `processing/` → `archived/`
+  or `rejected/`)
+- `inventory/` — `inventory.db` (the catalogue and its append-only changelog)
+  and `inventory.xlsx` (generated view)
 - `reports/` — timestamped reconciliation reports
 - `tests/` — tests for the `pipeline` package
 
@@ -73,7 +81,7 @@ extracted with `ogr2ogr` first.
 3. **Steward review:** open `pending.xlsx` and fill in:
 
    - **Extrinsic metadata** (required): `title` (AGOL display title),
-     `summary`, `description`, `tags`, `terms_of_use`,
+     `summary`, `description`, `tags` (or `NA` for none), `terms_of_use`,
      `acknowledgements`, `data_steward`. Versioning is handled via
      `target_filename` (e.g. `streams_2024.gpkg`); originating-org info
      belongs in `acknowledgements`; sharing/license terms in
@@ -88,8 +96,9 @@ extracted with `ogr2ogr` first.
    Sources that arrive without a valid CRS (e.g. a Shapefile missing
    its `.prj`) are **rejected at scan** — fix the source CRS
    (`gdal_edit -a_srs …` or QGIS) before re-dropping.
-   - **Auto-filled overrides**: confirm or correct `category`,
-     `subcategory`, `status`.
+   - **Auto-filled overrides**: confirm or correct `category` (a guess
+     from the file name, often empty), `subcategory`, `status`,
+     `agol_format`, `authoritative`.
 
    Flip `ready` to `TRUE` on rows that are fully complete.
 
@@ -103,9 +112,11 @@ extracted with `ogr2ogr` first.
    transformation (vector → GPKG, raster → COG, both reprojected to
    ESRI:102008) → run strict canonical validators on the result →
    compute the intrinsic snapshot (checksum, size, mtime, bbox) on the
-   transformed file → promote to `library/<Category>/[<Subcategory>/]/`
-   → append to inventory and changelog → archive the source bundle to
-   `queue/archived/<dataset_id>/`. Failing rows have their `ready`
+   transformed file → promote to
+   `library/spatial/<Category>/[<Subcategory>/]` → append to inventory
+   and changelog → archive the source bundle to
+   `queue/archived/<dataset_id>/` → publish to AGOL when signed in (see
+   "Publishing to AGOL"). Failing rows have their `ready`
    flag reset and a `_validation_error` populated.
 
 See [DESIGN.md §8](DESIGN.md) for the full rationale, including why a
@@ -116,8 +127,9 @@ reconciliation run. Don't do that.
 
 ## Editing, moving, and removing datasets
 
-Once a dataset is in `library/`, three commands handle its lifecycle.
-All three append a matching entry to `changelog.md`; the actor is
+Once a dataset is in `library/`, four commands handle its lifecycle.
+Each appends a matching entry to the changelog (a table in
+`inventory.db`, shown as a tab in `inventory.xlsx`); the actor is
 `$USER` by default and can be overridden with `--actor "Full Name"`.
 
 ```
@@ -129,7 +141,8 @@ y2y refresh <dataset_id>
 
 - **`update`** changes non-locked fields on a row — `title`,
   `classification`, `data_steward`, `summary`, `description`, `tags`,
-  `terms_of_use`, `acknowledgements`, `agol_item_id`, `notes`, plus
+  `terms_of_use`, `acknowledgements`, `agol_item_id`, `internal_notes`,
+  `agol_format`, `authoritative`, `temporal_start`, `temporal_end`, plus
   `status` between `active` and `deprecated` (deprecating a published
   dataset removes its layer from AGOL; the file and row stay). Locked columns
   (checksum, size, mtime, CRS, bbox, `dataset_id`, `file_path`,
@@ -142,8 +155,8 @@ y2y refresh <dataset_id>
   path, and validates the new path against the naming convention and
   taxonomy. Use it for renames *and* for re-categorising a dataset.
 - **`tombstone`** sets `status=tombstoned`, deletes the file from
-  `library/`, and retains the row as an audit record. Irreversible;
-  prompts for confirmation.
+  `library/`, removes its layer from AGOL, and retains the row as an
+  audit record. Irreversible; prompts for confirmation.
 - **`refresh`** re-stats the file in `library/` and updates the
   inventory's intrinsic snapshot (`checksum_sha256`, `size_bytes`,
   `mtime`, `library_crs`, `geographic_extent_bbox`) to match. Use after
@@ -155,7 +168,7 @@ y2y refresh <dataset_id>
 
 ## Reconciliation
 
-Reconciliation detects drift between `library/` and `inventory.xlsx`.
+Reconciliation detects drift between `library/` and the catalogue.
 It is read-only by default and writes a timestamped markdown report
 into `reports/`.
 
@@ -229,6 +242,12 @@ y2y agol-sync unpublish <id>             # take an active dataset off AGOL, keep
 y2y agol-sync adopt <id>                 # bring a manually-published item under management
 ```
 
+Newly published feature layers allow organization members to export the
+data, and a dataset whose `authoritative` column is `yes` gets the
+"Authoritative" badge. The weekly reconcile also removes layers of
+deprecated or tombstoned datasets and audits the Y2Y Conservation Atlas
+group (report only).
+
 **Auto-sync is on by default.** Editing a published row
 (`y2y update` / `rename` / `refresh`) or approving a new ingest marks
 it `pending_push` and attempts an immediate best-effort push. AGOL
@@ -243,7 +262,7 @@ The pipeline never runs arcpy. To publish a vector as a VTL:
 1. Set `agol_format=vector-tile-layer` on the row.
 2. In ArcGIS Pro: open the GPKG → Share As → Vector Tile Package →
    save as `<file_stem>.vtpk` (matching the GPKG stem).
-3. Drop the `.vtpk` in `queue/incoming/` and run `y2y ingest scan` —
+3. Drop the `.vtpk` in `queue/incoming/` and run `y2y ingest` —
    it files the VTPK to `library/vtpk/`.
 4. `y2y agol-sync push <id>`.
 
@@ -254,7 +273,8 @@ than the source GPKG.
 
 `y2y agol-sync reconcile` is meant to run weekly. Sample launchd
 (macOS) and cron (Linux) configs are in DESIGN.md §15 — not
-auto-installed.
+auto-installed. There is no Windows sample yet; the steward runs it by
+hand, with OneDrive sync paused.
 
 ## Taxonomy
 
@@ -277,7 +297,7 @@ AGOL content categories use the Title Case display names.
 
 ### Species sub-categories
 
-`library/Species/` is further subdivided. These come from the `SUB` block in
+`library/spatial/Species/` is further subdivided. These come from the `SUB` block in
 the typology file:
 
 - `Caribou`
@@ -299,14 +319,14 @@ ever deleted (use `tombstone` for soft delete, which keeps the row).
 
 ## Python environment
 
-Dependencies are declared in `pyproject.toml`: `geopandas`, `rasterio`,
-`pyproj`, `fiona`, `openpyxl`, `pyyaml`, `click`, `rich`. Requires
-Python 3.11+. Geospatial wheels are not yet published for Python 3.14
-on PyPI; the project is developed against 3.12 (install via
-`brew install python@3.12` on macOS).
+Dependencies are declared in `pyproject.toml`. Requires Python 3.11 to
+3.13; 3.13 is recommended. Python 3.14 does not work yet, because fiona
+has no build for it. On Windows, use `scripts/setup_windows.ps1` (see
+[ONBOARDING_WINDOWS.md](ONBOARDING_WINDOWS.md)), which installs the
+tested versions pinned in `constraints-windows.txt`. On macOS or Linux:
 
 ```
-python3.12 -m venv .venv && source .venv/bin/activate
+python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
@@ -314,10 +334,11 @@ Run tests with `pytest`; run the CLI with `y2y` (or `python -m pipeline`).
 
 ## Status
 
-Functional end-to-end. Two-phase ingestion (scan + approve), full
-post-ingest lifecycle (update / rename / tombstone), and read-only
-reconciliation with `--fix-renames` are all implemented and covered by
-~90 tests. Format validators enforce the canonical-format rules in
+Version 0.9.x is the pilot on the steward's machine; 1.0.0 is reserved
+for the February 2027 launch to Y2Y staff. See
+[CHANGELOG.md](CHANGELOG.md). Ingestion, the post-ingest lifecycle,
+reconciliation and the ArcGIS Online sync are implemented and covered by
+about 500 tests. Format validators enforce the canonical-format rules in
 DESIGN.md §9 (GeoPackage in `ESRI:102008` for vector; Cloud Optimized
 GeoTIFF in `ESRI:102008` with ZSTD + 512×512 blocks + overviews +
 NoData for raster).
