@@ -1284,7 +1284,10 @@ Linked via `Service2Data`. `unpublish` walks that link to delete both.
 **Imagery is the exception** — published via
 `arcgis.raster.publish_hosted_imagery_layer` in a **no-source model**:
 no separate source TIFF item exists. Refreshing imagery re-runs the
-hosted-imagery publish.
+hosted-imagery publish. The layer is published as a **tiled** imagery
+layer (`tiles_only=True`), the kind the AGOL web UI creates. Dynamic
+imagery layers published this way did not open in Map Viewer in the
+0.9.0 live test (2026-11-25).
 
 ### Downloading data: feature layer export
 
