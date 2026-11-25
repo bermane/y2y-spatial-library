@@ -3,7 +3,8 @@
 # operator gets the exact versions the test suite last passed against,
 # not whatever is newest on the day of install.
 #
-# Last verified: 2026-11-24 (366 tests passing, no known vulnerabilities).
+# Last verified: 2026-11-25 (556 tests passing). Checked for known
+# vulnerabilities on 2026-11-24.
 # To refresh: re-resolve pyproject.toml (with the dev extra) for Windows,
 # run the full test suite against the result, then replace this file.
 affine==3.0.1
