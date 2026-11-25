@@ -1007,6 +1007,10 @@ def push(
 # design 2026-05-22.
 _SOURCES_FOLDER_NAME = "_sources"
 
+# The hosted feature layer capability behind the AGOL setting "Allow
+# others to export to different formats".
+_EXPORT_CAPABILITY = "Extract"
+
 _SOURCE_DESCRIPTION = (
     "Source data for the hosted service. Managed by Y2Y pipeline; "
     "do not edit directly. The user-facing item is the hosted "
@@ -1446,6 +1450,72 @@ def _find_source_item(service_item: Any) -> Any | None:
     return related[0] if related else None
 
 
+def _read_capabilities(service_item: Any) -> str | None:
+    """Return a hosted feature layer's capabilities string, or ``None``.
+
+    The string is comma-separated (for example ``"Query"`` or
+    ``"Query,Extract"``). ``None`` means it could not be read; callers
+    then leave the layer's settings alone.
+    """
+    try:
+        from arcgis.features import FeatureLayerCollection
+        flc = FeatureLayerCollection.fromitem(service_item)
+        capabilities = flc.properties.capabilities
+    except Exception:
+        return None
+    return capabilities if isinstance(capabilities, str) else None
+
+
+def _write_capabilities(
+    service_item: Any, capabilities: str, properties: dict[str, Any],
+) -> None:
+    """Set a hosted feature layer's capabilities; warn on failure."""
+    try:
+        from arcgis.features import FeatureLayerCollection
+        flc = FeatureLayerCollection.fromitem(service_item)
+        flc.manager.update_definition({"capabilities": capabilities})
+    except Exception as exc:
+        _record_warning(properties, (
+            f"could not set feature layer capabilities to "
+            f"{capabilities!r}; check 'Allow others to export to "
+            f"different formats' on the item's Settings tab in AGOL. "
+            f"Underlying: {exc}"
+        ))
+
+
+def _capabilities_with_export(capabilities: str | None) -> str:
+    """Add ``Extract`` to a capabilities string, keeping what is there."""
+    parts = [c.strip() for c in (capabilities or "").split(",") if c.strip()]
+    if not parts:
+        parts = ["Query"]
+    if _EXPORT_CAPABILITY not in parts:
+        parts.append(_EXPORT_CAPABILITY)
+    return ",".join(parts)
+
+
+def _enable_export(service_item: Any, properties: dict[str, Any]) -> None:
+    """Turn on "Allow others to export to different formats".
+
+    Library data is authoritative, so every newly published hosted
+    feature layer lets organization members export it (maintainer
+    decision 2026-11-25). Called on first publish only: a steward who
+    later turns the setting off by hand on AGOL (for example for a
+    third-party licence) is not overridden by later pushes. Never
+    raises; a failure is recorded as an ``[agol]`` warning.
+    """
+    current = _read_capabilities(service_item)
+    if current is None:
+        _record_warning(properties, (
+            "could not read feature layer capabilities, so export was "
+            "not turned on; turn on 'Allow others to export to "
+            "different formats' on the item's Settings tab in AGOL."
+        ))
+        return
+    wanted = _capabilities_with_export(current)
+    if wanted != current:
+        _write_capabilities(service_item, wanted, properties)
+
+
 def _publish_feature_layer(
     *,
     gis,
@@ -1507,11 +1577,19 @@ def _publish_feature_layer(
         # default) and apply the full metadata.
         _safe_move(service_item, folder_obj or folder, properties)
         service_item.update(item_properties=item_props)
+        _enable_export(service_item, properties)
         return service_item
 
     # ----- update path -----
     service = _resolve_service_item(gis, existing_item_id)
     source = _find_source_item(service)
+
+    # Remember the export setting before any data refresh so it can be
+    # put back afterwards. The update path never turns export on by
+    # itself: whatever the steward has set on AGOL stays.
+    capabilities_before = (
+        _read_capabilities(service) if checksum_changed else None
+    )
 
     # Data refresh first (before metadata reapply), so any service-
     # metadata side effects of the publish are overridden by our
@@ -1556,6 +1634,16 @@ def _publish_feature_layer(
                     f"updated but the service's data may be stale. "
                     f"Underlying: {exc}"
                 ))
+
+    # If the refresh changed the capabilities (and with them the
+    # export setting), restore what was there before.
+    if capabilities_before is not None:
+        capabilities_after = _read_capabilities(service)
+        if (
+            capabilities_after is not None
+            and capabilities_after != capabilities_before
+        ):
+            _write_capabilities(service, capabilities_before, properties)
 
     # Apply / re-apply the full steward-authored metadata to the
     # service. Idempotent — running this on an already-correct

@@ -326,6 +326,13 @@ and are reported.
 private *source* in `_sources/` and the public *service* in the category
 folder (the `agol_item_id`). Imagery uses a no-source model (one item).
 
+**Data export:** the first time a feature layer is published, push turns
+on "Allow others to export to different formats", so anyone in the
+organization can download the data from the layer's item page. Later
+pushes leave that setting as it is on AGOL, so you can turn it off by
+hand for a dataset that must not be downloaded. Vector tile and imagery
+layers have no export setting and stay view-only.
+
 ```bash
 y2y agol-sync push ds_01ABC                       # one row
 y2y agol-sync push ds_01ABC --dry-run             # preview

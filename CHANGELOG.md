@@ -9,6 +9,9 @@ version that is installed.
 Pilot release for the first deployment on the data steward's Windows machine.
 
 - Added `y2y --version`.
+- Newly published feature layers now let organization members export the data
+  ("Allow others to export to different formats"). Turning it off by hand on
+  ArcGIS Online is respected by later pushes.
 - The version is now set in one place, `pipeline/__init__.py`.
 - Added `six` to the dependencies. A fresh install was missing it, which broke
   publishing rasters as imagery layers.
