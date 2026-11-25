@@ -207,3 +207,22 @@ def populate_dataset(project_tree, valid_gpkg_factory):
         return row["dataset_id"], rel
 
     return _populate
+
+
+@pytest.fixture(autouse=True)
+def _no_default_style_on_push(request, monkeypatch):
+    """Keep push tests about push.
+
+    ``agol_sync.push`` gives a newly published layer the standard
+    default style (``agol_symbology.apply_default_style``). The mocked
+    GIS used across the push tests has no real layers to style, so the
+    step is switched off everywhere except in the symbology tests,
+    which exercise it on purpose.
+    """
+    if request.module.__name__.endswith("test_agol_symbology"):
+        return
+    from pipeline import agol_symbology
+
+    monkeypatch.setattr(
+        agol_symbology, "apply_default_style", lambda **kwargs: False,
+    )

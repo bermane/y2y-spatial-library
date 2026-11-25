@@ -901,6 +901,19 @@ def push(
         # Should be unreachable given the validation above.
         raise AgolError(f"internal: unhandled target {target!r}")
 
+    # ---- 5a. Default symbology, first publish only -------------------
+    # A newly published layer gets the standard default style (see
+    # agol_symbology). Later pushes never read or rewrite the style,
+    # so anything customised by hand on AGOL sticks. Never raises.
+    if not row.get("agol_item_id"):
+        from . import agol_symbology
+        agol_symbology.apply_default_style(
+            item=item, row=row, target=target,
+            source_path=source_path,
+            vtpk_path=vtpk_path if target == "vector-tile-layer" else None,
+            warn=lambda message: _record_warning(properties, message),
+        )
+
     # ----- thumbnail attach (post-publish) -----------------------------
     if thumb_path is not None:
         try:
@@ -1827,6 +1840,40 @@ def _publish_imagery_layer(
     return service
 
 
+def _warn_if_saved_style_is_stale(
+    service: Any, vtpk_path: Path, dataset_id: str,
+    properties: dict[str, Any],
+) -> None:
+    """Warn when a rebuilt VTPK no longer matches the item's saved style.
+
+    The style saved on a vector tile layer item (the default written
+    on first publish, or a manual edit) is kept through a rebuild. If
+    the rebuilt package names its layers differently, that saved style
+    points at layers that no longer exist and the layer can draw
+    blank. Push does not change the style; it only says so.
+    """
+    from . import agol_symbology
+    try:
+        saved = agol_symbology.read_item_vector_tile_style(service)
+        if not saved:
+            return
+        package = agol_symbology.read_vtpk_style(vtpk_path)
+        missing = (
+            agol_symbology.vtpk_layer_names(saved)
+            - agol_symbology.vtpk_layer_names(package)
+        )
+    except Exception:
+        return
+    if missing:
+        _record_warning(properties, (
+            f"the rebuilt VTPK no longer contains layer(s) "
+            f"{sorted(missing)} that the style saved on the AGOL item "
+            f"draws, so the layer may draw blank. Run `y2y agol-sync "
+            f"restyle {dataset_id}` to reset the style, or fix it in "
+            f"the Vector Tile Style Editor."
+        ))
+
+
 def _publish_vector_tile_layer(
     *,
     gis,
@@ -1950,6 +1997,10 @@ def _publish_vector_tile_layer(
                     f"VTPK re-publish failed; metadata updated but "
                     f"tile cache may be stale. Underlying: {exc}"
                 ))
+            else:
+                _warn_if_saved_style_is_stale(
+                    service, vtpk_path, dataset_id, properties,
+                )
 
     # Apply / re-apply the full steward-authored metadata to the
     # service. Idempotent.
