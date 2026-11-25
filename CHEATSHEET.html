@@ -120,7 +120,8 @@
 <pre><span class="k">y2y update</span> &lt;id&gt; --set summary=<span class="c">"…"</span> --set tags=<span class="c">"a;b;c"</span>   <span class="c"># change metadata fields</span>
 <span class="k">y2y rename</span> &lt;id&gt; <span class="c">"Water/streams_v2.gpkg"</span>                <span class="c"># move within library/</span>
 <span class="k">y2y refresh</span> &lt;id&gt;                                       <span class="c"># re-stat after in-place edit</span>
-<span class="k">y2y tombstone</span> &lt;id&gt; --reason <span class="c">"…"</span>                       <span class="c"># soft-delete + erase file</span></pre>
+<span class="k">y2y update</span> &lt;id&gt; --set status=deprecated                <span class="c"># retire: off AGOL, file + row kept</span>
+<span class="k">y2y tombstone</span> &lt;id&gt; --reason <span class="c">"…"</span>                       <span class="c"># soft-delete + erase file, off AGOL</span></pre>
 
 <h2 class="sec">Check integrity</h2>
 <pre><span class="k">y2y reconcile</span>                <span class="c"># fast: catalogue ↔ filesystem</span>
@@ -132,13 +133,13 @@
 <span class="k">y2y agol-sync push</span> &lt;id&gt; [--dry-run]          <span class="c"># publish/update one row</span>
 <span class="k">y2y agol-sync push --all-unpublished</span>         <span class="c"># initial bulk publish of the backlog</span>
 <span class="k">y2y agol-sync push --all-dirty</span>               <span class="c"># push every pending_push row</span>
-<span class="k">y2y agol-sync reconcile</span>                      <span class="c"># weekly: push pending + flag AGOL drift</span></pre>
+<span class="k">y2y agol-sync reconcile</span>                      <span class="c"># weekly: push pending, flag drift, remove retired, audit the Atlas group</span></pre>
 
 <h2 class="sec">Resolve AGOL drift</h2>
 <pre><span class="k">y2y agol-sync pull</span> &lt;id&gt;             <span class="c"># show diff, mark conflict</span>
 <span class="k">y2y agol-sync pull</span> &lt;id&gt; --accept    <span class="c"># catalogue absorbs AGOL's text fields</span>
 <span class="k">y2y agol-sync pull</span> &lt;id&gt; --reject    <span class="c"># re-push catalogue, overwrite AGOL</span>
-<span class="k">y2y agol-sync unpublish</span> &lt;id&gt;        <span class="c"># delete AGOL item(s); keep catalogue row</span></pre>
+<span class="k">y2y agol-sync unpublish</span> &lt;id&gt;        <span class="c"># take an active dataset off AGOL; keep row</span></pre>
 
 <h2 class="sec">First-time AGOL setup</h2>
 <pre><span class="k">export</span> Y2Y_AGOL_CLIENT_ID=<span class="c">"&lt;oauth-client-id&gt;"</span>

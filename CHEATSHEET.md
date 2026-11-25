@@ -24,7 +24,8 @@ Sheet colours: **blue** = you fill, goes to ArcGIS Online · **orange** = you fi
 y2y update <id> --set summary="…" --set tags="a;b;c"   # change metadata fields
 y2y rename <id> "Water/streams_v2.gpkg"                # move within library/
 y2y refresh <id>                                       # re-stat after in-place edit
-y2y tombstone <id> --reason "…"                        # soft-delete + erase file
+y2y update <id> --set status=deprecated                # retire: off AGOL, file + row kept
+y2y tombstone <id> --reason "…"                        # soft-delete + erase file, off AGOL
 ```
 
 ### Check integrity
@@ -40,7 +41,7 @@ y2y agol-sync status                         # sync state of every active row
 y2y agol-sync push <id> [--dry-run]          # publish/update one row
 y2y agol-sync push --all-unpublished         # initial bulk publish of the backlog
 y2y agol-sync push --all-dirty               # push every pending_push row
-y2y agol-sync reconcile                      # weekly: push pending + flag AGOL drift
+y2y agol-sync reconcile                      # weekly: push pending, flag drift, remove retired, audit the Atlas group
 ```
 
 ### Resolve AGOL drift
@@ -48,7 +49,7 @@ y2y agol-sync reconcile                      # weekly: push pending + flag AGOL 
 y2y agol-sync pull <id>             # show diff, mark conflict
 y2y agol-sync pull <id> --accept   # catalogue absorbs AGOL's text fields
 y2y agol-sync pull <id> --reject   # re-push catalogue, overwrite AGOL
-y2y agol-sync unpublish <id>       # delete AGOL item(s); keep catalogue row
+y2y agol-sync unpublish <id>       # take an active dataset off AGOL; keep row
 ```
 
 ---

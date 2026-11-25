@@ -128,10 +128,16 @@ y2y ingest --approve
 ### `y2y update`
 
 ```
-y2y update [--set KEY=VALUE]... [--actor TEXT] DATASET_ID
+y2y update [--set KEY=VALUE]... [--actor TEXT] [--yes] DATASET_ID
 ```
 
 Update non-locked metadata fields. Repeat `--set` per field.
+
+| Option    | Description |
+| --------- | ----------- |
+| `--set`   | Field to update, as `KEY=VALUE`. Repeatable. |
+| `--actor` | Changelog actor. Defaults to `$USER`. |
+| `--yes`   | Skip the confirmation asked before deprecating a dataset that is published on AGOL. |
 
 **Updatable fields:** `title`, `status` (`active` / `deprecated`),
 `classification` (raster only), `data_steward`, `summary`,
@@ -147,12 +153,24 @@ Rejected: locked columns (`checksum_sha256`, `size_bytes`, `mtime`,
 movement-bound columns (`file_path`, `category`, `subcategory` — use
 `rename`). `status='tombstoned'` is rejected here — use `tombstone`.
 
+**Deprecating removes the layer from AGOL.** `--set status=deprecated`
+on a published dataset warns you, asks for confirmation, then
+permanently deletes its AGOL item(s). The library file and the
+catalogue row are kept. Answering no changes nothing. If AGOL cannot be
+reached, the status still changes and the next
+`y2y agol-sync reconcile` removes the layer. Web maps and apps that use
+the layer will show it as broken, and styling saved on the layer is
+lost, so check on AGOL first when in doubt. `--set status=active`
+publishes the dataset again as a **new** item with a new ID.
+
 ```bash
 y2y update ds_01ABC --set summary="Revised text"
 y2y update ds_01ABC --set tags="caribou;telemetry" --set data_steward="Ethan"
 y2y update ds_01ABC --set agol_format=vector-tile-layer
 y2y update ds_01ABC --set tags=NA --set authoritative=no
 y2y update ds_01ABC --set temporal_start=2020 --set temporal_end=2020
+y2y update ds_01ABC --set status=deprecated     # also removes it from AGOL
+y2y update ds_01ABC --set status=active         # publishes it again (new item)
 ```
 
 ### `y2y rename`
@@ -198,7 +216,10 @@ y2y tombstone [--reason TEXT] [--actor TEXT] [--yes] DATASET_ID
 Soft-delete: set `status='tombstoned'` and delete the file from
 `library/`. The row stays permanently as an audit record;
 `dataset_id` stays reserved. Reconcile thereafter expects the file
-absent. Confirmation-prompted unless `--yes`.
+absent. Confirmation-prompted unless `--yes`. If the dataset is
+published on AGOL, the prompt says so and its AGOL item(s) are
+permanently deleted as well; if AGOL cannot be reached, the next
+`y2y agol-sync reconcile` removes them.
 
 | Option     | Description |
 | ---------- | ----------- |
@@ -212,8 +233,8 @@ y2y tombstone ds_01ABC --reason "superseded by 2025 update"
 
 **Auto-sync note:** `update` / `rename` / `refresh` on a published row
 auto-mark it `pending_push` and attempt a best-effort AGOL push (see §8).
-To also remove the AGOL item when tombstoning, run
-`y2y agol-sync unpublish <id>` *before* tombstoning.
+Deprecating or tombstoning a published row removes its AGOL item(s)
+instead.
 
 ---
 
@@ -390,15 +411,34 @@ row waits for the next `reconcile` / `push --all-dirty`. Set
 y2y agol-sync reconcile [--dry-run] [--actor TEXT]
 ```
 
-For every `active` row: push `pending_push` (failures → `error`); check
+First, remove the AGOL item(s) of every `deprecated` or `tombstoned`
+row that is still linked to AGOL (the safety net for a removal that
+could not happen when the status changed). Then, for every `active`
+row: push `pending_push` (failures → `error`); check
 `clean` rows for AGOL-side drift (item `modified` > `last_synced_at`) and
 flag drifted ones `pending_pull`; retry `error` rows once; skip
 `unpublished` / `pending_pull` / `conflict`. Writes
 `reports/agol_reconcile_<ts>.md`. Intended for a weekly schedule.
 
+**Group audit.** Each run (including `--dry-run`) also compares the
+Y2Y Conservation Atlas group with the catalogue and adds a "Group
+audit" section to the report. It is read-only: nothing is changed in
+the catalogue or on AGOL. It lists:
+
+- catalogue datasets on AGOL that are not shared to the group;
+- catalogue datasets whose AGOL item no longer exists;
+- layers in the group that the catalogue does not track, split into
+  those hosted by Y2Y and those from outside providers;
+- layers published by the pipeline that no catalogue dataset links to;
+- layers of deprecated or tombstoned datasets;
+- a count of items that are not layers (web maps, apps, dashboards).
+
+If the group can't be read, the report says the audit did not run and
+the rest of the reconcile is unaffected.
+
 | Option      | Description |
 | ----------- | ----------- |
-| `--dry-run` | Compute outcomes + write the report without mutating or pushing. |
+| `--dry-run` | Compute outcomes + write the report without mutating, pushing or deleting. Lists the layers that would be removed. |
 | `--actor`   | Changelog actor. Defaults to `$USER` (use `reconcile-cron` for scheduled runs). |
 
 ```bash
@@ -470,10 +510,18 @@ y2y agol-sync unpublish [--actor TEXT] [--yes] DATASET_ID
 
 Permanently delete the AGOL service + any linked source item, then clear
 `agol_item_id` / `agol_published_at` / `last_synced_at` and set
-`sync_status='unpublished'`. The catalogue row stays `active` and can be
-re-pushed. Confirmation-prompted unless `--yes`. Partial-deletion
-failures are recorded as `[agol]` warnings (in `internal_notes` + the
-changelog) rather than aborting.
+`sync_status='unpublished'`. The catalogue row keeps its status; an
+`active` row can be re-pushed. Confirmation-prompted unless `--yes`.
+
+Use this to take an **active** dataset off AGOL. Deprecating or
+tombstoning a dataset does the same removal automatically.
+
+If AGOL refuses to delete the layer (delete protection, a dependent
+hosted view, a network error), the command fails, the link is **kept**
+and the row is set to `sync_status='error'`, because the layer is still
+live. Fix the cause on AGOL and run it again. A failure to delete only
+the linked source item is recorded as an `[agol]` warning (in
+`internal_notes` + the changelog) and does not block the unlink.
 
 | Option    | Description |
 | --------- | ----------- |
@@ -544,6 +592,8 @@ conflict ──pull --accept───────────> clean
 conflict ──pull --reject───────────> clean (via pending_push)
 error ──reconcile retry ok─────────> clean
 any-with-item ──unpublish──────────> unpublished
+any-with-item ──unpublish refused──> error (link kept)
+any-with-item ──deprecate/tombstone─> unpublished (layer removed)
 ```
 
 ### `agol_format` values
@@ -630,6 +680,13 @@ y2y agol-sync push --all-unpublished
 ```bash
 y2y update ds_01ABC --set summary="Revised" --set tags="a;b;c"
 # auto-pushes if logged in; otherwise next reconcile picks it up
+```
+
+### Replace a dataset with a new edition
+```bash
+# ingest the new edition as its own dataset, then retire the old one
+y2y update ds_01OLD --set status=deprecated
+# confirms, then removes the old layer from AGOL; file + row are kept
 ```
 
 ### Resolve AGOL-side edits

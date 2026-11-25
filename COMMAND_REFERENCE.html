@@ -205,15 +205,26 @@
 <h2 class="sec" id="s3"><span class="num">3.</span>Lifecycle</h2>
 
 <h3><code>y2y update</code></h3>
-<pre>y2y update [--set KEY=VALUE]... [--actor TEXT] DATASET_ID</pre>
+<pre>y2y update [--set KEY=VALUE]... [--actor TEXT] [--yes] DATASET_ID</pre>
 <p>Update non-locked metadata fields. Repeat <code>--set</code> per field.</p>
+<table>
+  <thead><tr><th>Option</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--set</code></td><td>Field to update, as <code>KEY=VALUE</code>. Repeatable.</td></tr>
+    <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code>.</td></tr>
+    <tr><td><code>--yes</code></td><td>Skip the confirmation asked before deprecating a dataset that is published on AGOL.</td></tr>
+  </tbody>
+</table>
 <p><strong>Updatable fields:</strong> <code>title</code>, <code>status</code> (<code>active</code>/<code>deprecated</code>), <code>classification</code> (raster only), <code>data_steward</code>, <code>summary</code>, <code>description</code>, <code>tags</code> (<code>;</code>-delimited, or <code>NA</code> for none), <code>terms_of_use</code>, <code>acknowledgements</code>, <code>agol_item_id</code>, <code>internal_notes</code>, <code>agol_format</code>, <code>authoritative</code> (<code>yes</code>/<code>no</code>), <code>temporal_start</code>, <code>temporal_end</code> (<code>YYYY</code>, <code>YYYY-MM</code> or <code>YYYY-MM-DD</code>; empty clears). <code>agol_item_id</code> is normally filled by the push; set it by hand only before <code>y2y agol-sync adopt</code>.</p>
 <p>Rejected: locked columns (<code>checksum_sha256</code>, <code>size_bytes</code>, <code>mtime</code>, <code>library_crs</code>, <code>geographic_extent_bbox</code> — only <code>refresh</code> changes these) and movement-bound columns (<code>file_path</code>, <code>category</code>, <code>subcategory</code> — use <code>rename</code>). <code>status='tombstoned'</code> is rejected here — use <code>tombstone</code>.</p>
+<div class="note"><strong>Deprecating removes the layer from AGOL.</strong> <code>--set status=deprecated</code> on a published dataset warns you, asks for confirmation, then permanently deletes its AGOL item(s). The library file and the catalogue row are kept. Answering no changes nothing. If AGOL cannot be reached, the status still changes and the next <code>y2y agol-sync reconcile</code> removes the layer. Web maps and apps that use the layer will show it as broken, and styling saved on the layer is lost, so check on AGOL first when in doubt. <code>--set status=active</code> publishes the dataset again as a <strong>new</strong> item with a new ID.</div>
 <pre><span class="k">y2y update</span> ds_01ABC --set summary=<span class="c">"Revised text"</span>
 <span class="k">y2y update</span> ds_01ABC --set tags=<span class="c">"caribou;telemetry"</span> --set data_steward=<span class="c">"Ethan"</span>
 <span class="k">y2y update</span> ds_01ABC --set agol_format=vector-tile-layer
 <span class="k">y2y update</span> ds_01ABC --set tags=NA --set authoritative=no
-<span class="k">y2y update</span> ds_01ABC --set temporal_start=2020 --set temporal_end=2020</pre>
+<span class="k">y2y update</span> ds_01ABC --set temporal_start=2020 --set temporal_end=2020
+<span class="k">y2y update</span> ds_01ABC --set status=deprecated     <span class="c"># also removes it from AGOL</span>
+<span class="k">y2y update</span> ds_01ABC --set status=active         <span class="c"># publishes it again (new item)</span></pre>
 
 <h3><code>y2y rename</code></h3>
 <pre>y2y rename [--actor TEXT] DATASET_ID NEW_PATH</pre>
@@ -228,7 +239,7 @@
 
 <h3><code>y2y tombstone</code></h3>
 <pre>y2y tombstone [--reason TEXT] [--actor TEXT] [--yes] DATASET_ID</pre>
-<p>Soft-delete: set <code>status='tombstoned'</code> and delete the file. The row stays as an audit record; <code>dataset_id</code> stays reserved. Confirmation-prompted unless <code>--yes</code>.</p>
+<p>Soft-delete: set <code>status='tombstoned'</code> and delete the file. The row stays as an audit record; <code>dataset_id</code> stays reserved. Confirmation-prompted unless <code>--yes</code>. If the dataset is published on AGOL, the prompt says so and its AGOL item(s) are permanently deleted as well; if AGOL cannot be reached, the next <code>y2y agol-sync reconcile</code> removes them.</p>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
   <tbody>
@@ -238,7 +249,7 @@
   </tbody>
 </table>
 <pre><span class="k">y2y tombstone</span> ds_01ABC --reason <span class="c">"superseded by 2025 update"</span></pre>
-<div class="note"><strong>Auto-sync:</strong> <code>update</code>/<code>rename</code>/<code>refresh</code> on a published row auto-mark it <code>pending_push</code> and attempt a best-effort push (§8). To also remove the AGOL item when tombstoning, run <code>y2y agol-sync unpublish &lt;id&gt;</code> <em>before</em> tombstoning.</div>
+<div class="note"><strong>Auto-sync:</strong> <code>update</code>/<code>rename</code>/<code>refresh</code> on a published row auto-mark it <code>pending_push</code> and attempt a best-effort push (§8). Deprecating or tombstoning a published row removes its AGOL item(s) instead.</div>
 
 <h2 class="sec" id="s4"><span class="num">4.</span>Reconcile (filesystem)</h2>
 <pre>y2y reconcile [--deep] [--fix-renames] [--actor TEXT]</pre>
@@ -326,11 +337,21 @@
 
 <h2 class="sec" id="s9"><span class="num">9.</span>AGOL: reconcile (bidirectional)</h2>
 <pre>y2y agol-sync reconcile [--dry-run] [--actor TEXT]</pre>
-<p>For every <code>active</code> row: push <code>pending_push</code> (failures → <code>error</code>); check <code>clean</code> rows for AGOL-side drift (item <code>modified</code> &gt; <code>last_synced_at</code>) and flag drifted ones <code>pending_pull</code>; retry <code>error</code> rows once; skip <code>unpublished</code> / <code>pending_pull</code> / <code>conflict</code>. Writes <code>reports/agol_reconcile_&lt;ts&gt;.md</code>.</p>
+<p>First, remove the AGOL item(s) of every <code>deprecated</code> or <code>tombstoned</code> row that is still linked to AGOL (the safety net for a removal that could not happen when the status changed). Then, for every <code>active</code> row: push <code>pending_push</code> (failures → <code>error</code>); check <code>clean</code> rows for AGOL-side drift (item <code>modified</code> &gt; <code>last_synced_at</code>) and flag drifted ones <code>pending_pull</code>; retry <code>error</code> rows once; skip <code>unpublished</code> / <code>pending_pull</code> / <code>conflict</code>. Writes <code>reports/agol_reconcile_&lt;ts&gt;.md</code>.</p>
+<p><strong>Group audit.</strong> Each run (including <code>--dry-run</code>) also compares the Y2Y Conservation Atlas group with the catalogue and adds a "Group audit" section to the report. It is read-only: nothing is changed in the catalogue or on AGOL. It lists:</p>
+<ul>
+  <li>catalogue datasets on AGOL that are not shared to the group;</li>
+  <li>catalogue datasets whose AGOL item no longer exists;</li>
+  <li>layers in the group that the catalogue does not track, split into those hosted by Y2Y and those from outside providers;</li>
+  <li>layers published by the pipeline that no catalogue dataset links to;</li>
+  <li>layers of deprecated or tombstoned datasets;</li>
+  <li>a count of items that are not layers (web maps, apps, dashboards).</li>
+</ul>
+<p>If the group can't be read, the report says the audit did not run and the rest of the reconcile is unaffected.</p>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td><code>--dry-run</code></td><td>Compute outcomes + write the report without mutating or pushing.</td></tr>
+    <tr><td><code>--dry-run</code></td><td>Compute outcomes + write the report without mutating, pushing or deleting. Lists the layers that would be removed.</td></tr>
     <tr><td><code>--actor</code></td><td>Changelog actor. Defaults to <code>$USER</code> (use <code>reconcile-cron</code> for scheduled runs).</td></tr>
   </tbody>
 </table>
@@ -369,7 +390,9 @@
 
 <h2 class="sec" id="s12"><span class="num">12.</span>AGOL: unpublish</h2>
 <pre>y2y agol-sync unpublish [--actor TEXT] [--yes] DATASET_ID</pre>
-<p>Permanently delete the AGOL service + any linked source, then clear <code>agol_item_id</code> / <code>agol_published_at</code> / <code>last_synced_at</code> and set <code>sync_status='unpublished'</code>. The catalogue row stays <code>active</code> and can be re-pushed. Confirmation-prompted unless <code>--yes</code>. Partial-deletion failures are recorded as <code>[agol]</code> warnings rather than aborting.</p>
+<p>Permanently delete the AGOL service + any linked source, then clear <code>agol_item_id</code> / <code>agol_published_at</code> / <code>last_synced_at</code> and set <code>sync_status='unpublished'</code>. The catalogue row keeps its status; an <code>active</code> row can be re-pushed. Confirmation-prompted unless <code>--yes</code>.</p>
+<p>Use this to take an <strong>active</strong> dataset off AGOL. Deprecating or tombstoning a dataset does the same removal automatically.</p>
+<p>If AGOL refuses to delete the layer (delete protection, a dependent hosted view, a network error), the command fails, the link is <strong>kept</strong> and the row is set to <code>sync_status='error'</code>, because the layer is still live. Fix the cause on AGOL and run it again. A failure to delete only the linked source item is recorded as an <code>[agol]</code> warning (in <code>internal_notes</code> + the changelog) and does not block the unlink.</p>
 <table>
   <thead><tr><th>Option</th><th>Description</th></tr></thead>
   <tbody>
@@ -423,7 +446,9 @@ pending_pull ──pull (no flag)──────&gt; conflict
 conflict ──pull --accept───────────&gt; clean
 conflict ──pull --reject───────────&gt; clean (via pending_push)
 error ──reconcile retry ok─────────&gt; clean
-any-with-item ──unpublish──────────&gt; unpublished</pre>
+any-with-item ──unpublish──────────&gt; unpublished
+any-with-item ──unpublish refused──&gt; error (link kept)
+any-with-item ──deprecate/tombstone─&gt; unpublished (layer removed)</pre>
 
 <h3><code>agol_format</code> values</h3>
 <table>
@@ -503,6 +528,11 @@ any-with-item ──unpublish──────────&gt; unpublished</pre
 <h3>Edit metadata and let it propagate</h3>
 <pre><span class="k">y2y update</span> ds_01ABC --set summary=<span class="c">"Revised"</span> --set tags=<span class="c">"a;b;c"</span>
 <span class="c"># auto-pushes if logged in; otherwise next reconcile picks it up</span></pre>
+
+<h3>Replace a dataset with a new edition</h3>
+<pre><span class="c"># ingest the new edition as its own dataset, then retire the old one</span>
+<span class="k">y2y update</span> ds_01OLD --set status=deprecated
+<span class="c"># confirms, then removes the old layer from AGOL; file + row are kept</span></pre>
 
 <h3>Resolve AGOL-side edits</h3>
 <pre><span class="k">y2y agol-sync reconcile</span>           <span class="c"># flags drifted rows pending_pull</span>
