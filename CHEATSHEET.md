@@ -17,6 +17,7 @@ y2y ingest                              # scan queue/incoming/ → pending.xlsx
 open queue/processing/pending.xlsx      # fill fields, set ready=TRUE
 y2y ingest --approve                    # validate + promote into library/ + catalogue
 ```
+Sheet colours: **blue** = you fill, goes to ArcGIS Online · **orange** = you fill, stays in the catalogue · **grey / mauve** = don't touch (lighter shade = optional; see the `legend` tab). `tags`: separate with `;`, or enter `NA` for none.
 
 ### Edit / move / remove
 ```bash

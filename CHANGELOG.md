@@ -20,6 +20,35 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - `setup_windows.ps1` now runs the full test suite and reports the result.
 - Replaced a deprecated geopandas call in the tests. geopandas 1.0 or newer is
   now required.
+- New header colours in `pending.xlsx` and `inventory.xlsx`, with a `legend`
+  tab in each. Blue columns are filled by the steward and published to ArcGIS
+  Online, orange columns are filled by the steward and stay in the catalogue,
+  grey columns are filled by the pipeline, and mauve columns are written by
+  the ArcGIS Online sync. A lighter shade marks an optional column. Columns
+  are laid out in that order, after `ready` and `_validation_error`. The grey
+  block runs dates, source columns, library columns, then checksum and sizes.
+- `tags` can now say "no tags": enter `NA` (any letter case) on its own. The
+  cell still cannot be empty, `NA` cannot be mixed with real tags, and it is
+  never published as a tag. Tags may be separated with `;` or `,`, and
+  duplicates are dropped.
+- New `authoritative` column (`yes` / `no`, pre-filled `yes`), in the review
+  sheet, the inventory and `y2y update`. An existing catalogue needs
+  migration 011; a new one already has the column.
+- Pushing to ArcGIS Online now sets the item's "Authoritative" badge from that
+  column, and removes it when the column says `no`. This needs an account
+  that is an administrator or has the privilege to mark content as
+  authoritative. Without it the push still succeeds and a warning is written
+  to `internal_notes` and the changelog.
+- `title` is pre-filled in the review sheet with the source file name, minus
+  its extension, as a starting point to edit.
+- `temporal_start` and `temporal_end` can now be filled, in the review sheet
+  and with `y2y update`.
+- Renamed the catalogue columns `format` and `crs` to `library_format` and
+  `library_crs`, so they read clearly beside `source_format` and
+  `source_crs`. An existing catalogue needs migration 012; a new one already
+  has the new names.
+- `agol_item_id` is no longer filled in the review sheet. The first push to
+  ArcGIS Online writes it.
 - `y2y agol-sync reconcile` now audits the Y2Y Conservation Atlas group. The
   weekly report lists layers in the group that the catalogue does not track,
   and catalogue datasets on ArcGIS Online that are not shared to the group.

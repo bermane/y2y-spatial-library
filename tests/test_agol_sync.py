@@ -173,6 +173,19 @@ def test_compute_item_properties_maps_extrinsic_fields() -> None:
     assert props["licenseInfo"] == "Internal use only."
 
 
+def test_compute_item_properties_sends_no_tags_for_na_marker() -> None:
+    for marker in ("NA", "na", "N/A"):
+        row = {**_sample_row(), "tags": marker}
+        assert agol_sync.compute_item_properties(row)["tags"] == []
+
+
+def test_tag_comparison_treats_na_as_no_tags() -> None:
+    assert agol_sync._tag_set("NA") == set() == agol_sync._tag_set([])
+    assert agol_sync._tag_set("rivers;lakes") == agol_sync._tag_set(["lakes", "rivers"])
+    # A real tag that merely contains "na" is kept.
+    assert agol_sync._tag_set("Canada;national parks") == {"Canada", "national parks"}
+
+
 def test_compute_item_properties_splits_tags_on_semicolon() -> None:
     props = agol_sync.compute_item_properties(_sample_row())
     assert props["tags"] == ["streams", "y2y", "hydrology"]

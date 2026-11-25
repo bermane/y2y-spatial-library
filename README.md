@@ -145,7 +145,7 @@ y2y refresh <dataset_id>
   prompts for confirmation.
 - **`refresh`** re-stats the file in `library/` and updates the
   inventory's intrinsic snapshot (`checksum_sha256`, `size_bytes`,
-  `mtime`, `crs`, `geographic_extent_bbox`) to match. Use after
+  `mtime`, `library_crs`, `geographic_extent_bbox`) to match. Use after
   editing a library file in place. Validators gate the update:
   refresh refuses to record a state where the file has lost canonical
   compliance. Mostly redundant with reconcile's auto-apply (below) —
