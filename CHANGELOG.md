@@ -55,6 +55,22 @@ Pilot release for the first deployment on the data steward's Windows machine.
   The audit only reports; it changes nothing.
 - A push that cannot share its layer to the group now records a warning
   instead of passing silently.
+- Setting a dataset to `deprecated` now removes its layer from ArcGIS Online.
+  `y2y update <id> --set status=deprecated` warns, asks for confirmation
+  (`--yes` skips it), then deletes the layer and its source item. The library
+  file and the catalogue row are kept. Setting the status back to `active`
+  publishes the dataset again as a new item.
+- `y2y tombstone` now removes the dataset's ArcGIS Online layer as well.
+  Running `y2y agol-sync unpublish` first is no longer needed.
+- `y2y agol-sync reconcile` removes the layer of any deprecated or tombstoned
+  dataset that is still on ArcGIS Online, so a removal that could not happen
+  at the time (offline, expired sign-in) completes on the next run.
+  `--dry-run` lists what would be removed, and `y2y agol-sync status` lists
+  the datasets that are waiting.
+- If ArcGIS Online refuses to delete a layer, `unpublish` now keeps the
+  catalogue link and marks the row `error`, instead of forgetting a layer
+  that is still live.
+- A deprecated dataset is no longer left stuck in `pending_push`.
 
 ## 0.1.0
 

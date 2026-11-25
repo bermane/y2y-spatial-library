@@ -2315,9 +2315,10 @@ def test_unpublish_rejects_row_without_agol_item_id(
 def test_unpublish_records_deletion_warning_in_changelog(
     project_tree, _config_no_cache,
 ) -> None:
-    """If AGOL deletion partially fails, unpublish still clears the
-    link but records the warning in internal_notes + changelog so the
-    steward can clean up the orphan."""
+    """If AGOL fails to delete the service item, the layer is still
+    live, so unpublish keeps the link, marks the row 'error' and
+    records why in internal_notes + changelog. (More cases in
+    tests/test_agol_retire.py.)"""
     from unittest.mock import MagicMock
     from pipeline import inventory_manager
     from tests.test_agol_push import _full_row
@@ -2343,12 +2344,14 @@ def test_unpublish_records_deletion_warning_in_changelog(
         db, "ds_warn", gis, _config_no_cache, actor="tester",
     )
 
-    # Link still cleared despite the failure.
-    assert result.sync_status_after == "unpublished"
+    # Link kept: the catalogue must keep tracking the live layer.
+    assert result.error
+    assert result.sync_status_after == "error"
     fresh = inventory_manager.get_dataset(db, "ds_warn")
-    assert fresh["agol_item_id"] is None
-    assert "unpublish warnings" in (fresh["internal_notes"] or "")
+    assert fresh["agol_item_id"] == "svc123"
+    assert fresh["sync_status"] == "error"
+    assert "unpublish failed" in (fresh["internal_notes"] or "")
 
     log = inventory_manager.load_changelog(db)
-    warned = [r for r in log if "Warnings" in (r["note"] or "")]
-    assert len(warned) == 1
+    failed = [r for r in log if "unpublish failed" in (r["note"] or "")]
+    assert len(failed) == 1

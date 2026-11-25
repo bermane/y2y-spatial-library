@@ -1362,8 +1362,13 @@ def _unpublish_agol_items(
     service_item: Any,
     dataset_id: str,
     properties: dict[str, Any],
-) -> None:
+) -> bool:
     """Delete a service item and any Service2Data-linked source items.
+
+    Returns True when the service item itself was deleted, False when
+    AGOL refused or the call failed (delete protection, a dependent
+    hosted view, a network error). Callers that clear the catalogue
+    link must check this so a still-live layer is never orphaned.
 
     Used by the target-switch path. Phase E's ``unpublish()``
     command will share this helper for the explicit
@@ -1419,22 +1424,26 @@ def _unpublish_agol_items(
     # Now delete the service itself, also permanently so the name
     # frees up for the new target's publish.
     try:
-        service_item.delete(permanent=True)
-    except TypeError:
         try:
-            service_item.delete()
-        except Exception as exc:
-            _record_warning(properties, (
-                f"failed to delete service item "
-                f"{getattr(service_item, 'id', '?')!r} during target "
-                f"switch: {exc}"
-            ))
+            outcome = service_item.delete(permanent=True)
+        except TypeError:
+            # SDK pre-2.4 didn't expose permanent= kwarg; fall back.
+            outcome = service_item.delete()
     except Exception as exc:
         _record_warning(properties, (
             f"failed to delete service item "
-            f"{getattr(service_item, 'id', '?')!r} during target "
-            f"switch: {exc}"
+            f"{getattr(service_item, 'id', '?')!r}: {exc}"
         ))
+        return False
+    if outcome is False:
+        # Item.delete() reports a refused deletion by returning False
+        # rather than raising.
+        _record_warning(properties, (
+            f"AGOL refused to delete service item "
+            f"{getattr(service_item, 'id', '?')!r} (delete returned False)"
+        ))
+        return False
+    return True
 
 
 def _find_source_item(service_item: Any) -> Any | None:
@@ -2430,6 +2439,104 @@ _AUTO_PUSHABLE_STATUSES: frozenset[str] = frozenset({
 })
 
 
+# Catalogue statuses that take a dataset off AGOL. A row in one of
+# these states that still carries an ``agol_item_id`` is "due for
+# removal": the auto-sync hook removes it right away and
+# ``reconcile_bidirectional`` removes it as a safety net. No extra
+# ``sync_status`` value is needed; the pair (status, agol_item_id)
+# is the whole signal.
+RETIRED_STATUSES: frozenset[str] = frozenset({"deprecated", "tombstoned"})
+
+
+def is_due_for_removal(row: dict[str, Any]) -> bool:
+    """True iff the row is retired but still linked to an AGOL item."""
+    return (
+        row.get("status") in RETIRED_STATUSES
+        and bool(row.get("agol_item_id"))
+    )
+
+
+def rows_due_for_removal(db_path: Path) -> list[dict[str, Any]]:
+    """Retired rows (deprecated / tombstoned) still linked to AGOL."""
+    from . import inventory_manager
+
+    return [
+        r for r in inventory_manager.load_inventory(db_path)
+        if is_due_for_removal(r)
+    ]
+
+
+def try_auto_remove(
+    db_path: Path,
+    dataset_id: str,
+    *,
+    actor: str,
+    trigger: str,
+) -> SyncResult | None:
+    """Best-effort AGOL removal fired after a row is retired.
+
+    The counterpart of :func:`try_auto_push` for rows whose ``status``
+    became ``deprecated`` or ``tombstoned`` while still linked to an
+    AGOL item. Same contract: a no-op when ``Y2Y_AGOL_AUTO_PUSH=false``,
+    never raises, and any AGOL failure is swallowed and audited. On
+    failure the row keeps its ``agol_item_id``, so the next
+    ``y2y agol-sync reconcile`` retries the removal.
+
+    Returns the ``SyncResult`` from :func:`unpublish` (check its
+    ``error``), or ``None`` when nothing was attempted or AGOL could
+    not be reached.
+    """
+    from . import agol_config, inventory_manager
+    from .utils import utc_now_iso
+
+    try:
+        config = agol_config.load_config()
+    except Exception:
+        return None
+    if not config.auto_push:
+        return None
+
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None or not is_due_for_removal(row):
+        return None
+
+    def _audit(detail: str) -> None:
+        try:
+            inventory_manager.append_changelog(
+                db_path,
+                timestamp=utc_now_iso(),
+                action="metadata",
+                dataset_id=dataset_id,
+                actor=actor,
+                path=str(row.get("file_path") or "—"),
+                detail=detail,
+            )
+        except Exception:
+            pass
+
+    try:
+        gis = get_gis(config)
+    except Exception as exc:
+        _audit(
+            f"AGOL removal deferred after {trigger}: AGOL connection "
+            f"unavailable ({exc.__class__.__name__}). Row is "
+            f"status={row.get('status')!r} and still linked to "
+            f"{row.get('agol_item_id')!r}; next `y2y agol-sync "
+            f"reconcile` will remove it."
+        )
+        return None
+
+    try:
+        return unpublish(db_path, dataset_id, gis, config, actor=actor)
+    except Exception as exc:
+        _audit(
+            f"AGOL removal attempt after {trigger} failed: {exc}. Row "
+            f"is still linked to {row.get('agol_item_id')!r}; next "
+            f"`y2y agol-sync reconcile` will retry."
+        )
+        return None
+
+
 def try_auto_push(
     db_path: Path,
     dataset_id: str,
@@ -2480,6 +2587,12 @@ def try_auto_push(
     row = inventory_manager.get_dataset(db_path, dataset_id)
     if row is None:
         return None
+    if is_due_for_removal(row):
+        # Retired (deprecated / tombstoned) but still on AGOL: the
+        # sync action for this row is removal, not a push.
+        return try_auto_remove(
+            db_path, dataset_id, actor=actor, trigger=trigger,
+        )
     if row.get("status") != "active":
         return None
     sync_status = row.get("sync_status") or "unpublished"
@@ -3479,10 +3592,14 @@ def unpublish(
     operation still succeeds: it clears the catalogue link and notes
     that AGOL had nothing to delete.
 
-    Per-item AGOL deletion failures are recorded as ``[agol]``
-    warnings in ``internal_notes`` + the changelog rather than
-    aborting — partial cleanup with a remediation note beats leaving
-    the catalogue pointing at a half-deleted item.
+    If AGOL refuses or fails to delete the **service** item (delete
+    protection, a dependent hosted view, a network error), the
+    catalogue link is **kept** and the row is set to
+    ``sync_status='error'``. The layer is still live, so the catalogue
+    must keep tracking it; the returned ``SyncResult`` carries
+    ``error`` and the next reconcile retries. A failure to delete only
+    a linked *source* item is recorded as an ``[agol]`` warning in
+    ``internal_notes`` + the changelog and does not block the unlink.
     """
     from . import inventory_manager
     from .utils import utc_now_iso
@@ -3502,13 +3619,14 @@ def unpublish(
     properties: dict[str, Any] = {}
 
     service_item = gis.content.get(agol_item_id)
+    service_deleted = True
     if service_item is None:
         note = (
             f"AGOL item {agol_item_id!r} already absent (deleted "
             f"out-of-band); cleared catalogue link only."
         )
     else:
-        _unpublish_agol_items(
+        service_deleted = _unpublish_agol_items(
             gis=gis,
             service_item=service_item,
             dataset_id=dataset_id,
@@ -3520,6 +3638,43 @@ def unpublish(
         )
 
     warnings = properties.get("_warnings", [])
+
+    if not service_deleted:
+        # The layer is still live on AGOL. Keep the link so the
+        # catalogue keeps tracking it, and surface the failure.
+        problem = "; ".join(warnings) or "service item was not deleted"
+        note = (
+            f"AGOL item {agol_item_id!r} was NOT deleted and is still "
+            f"live; catalogue link kept. {problem}"
+        )
+        inventory_manager.update_dataset(db_path, dataset_id, {
+            "sync_status": "error",
+            "internal_notes": _append_note(
+                row.get("internal_notes"),
+                "[agol] unpublish failed: " + problem,
+            ),
+        })
+        inventory_manager.append_changelog(
+            db_path,
+            timestamp=utc_now_iso(),
+            action="metadata",
+            dataset_id=dataset_id,
+            actor=actor,
+            path=row.get("file_path"),
+            field_changed="sync_status",
+            old_value=sync_status_before,
+            new_value="error",
+            detail=f"unpublish failed: {note}",
+        )
+        return SyncResult(
+            dataset_id=dataset_id,
+            action="unpublish",
+            sync_status_before=sync_status_before,
+            sync_status_after="error",
+            agol_item_id=agol_item_id,
+            note=note,
+            error=problem,
+        )
 
     updates: dict[str, Any] = {
         "agol_item_id": None,
@@ -3620,8 +3775,15 @@ def reconcile_bidirectional(
 ) -> ReconcileReport:
     """Bidirectional AGOL ↔ catalogue reconciliation.
 
-    Iterates every ``status='active'`` row and handles it based on
-    its current ``sync_status``:
+    First removes retired rows from AGOL: every ``deprecated`` or
+    ``tombstoned`` row that still has an ``agol_item_id`` is
+    unpublished (service + linked source deleted, link cleared; the
+    catalogue row, and for deprecated rows the library file, stay).
+    Outcome bucket ``removed_retired``, or ``remove_failed`` when AGOL
+    refused the deletion (link kept, retried next run).
+
+    Then iterates every ``status='active'`` row and handles it based
+    on its current ``sync_status``:
 
     * ``pending_push`` → call :func:`push`. On success the row
       becomes ``clean``; on failure it becomes ``error`` and a
@@ -3682,6 +3844,44 @@ def reconcile_bidirectional(
     def _record(outcome: ReconcileOutcome) -> None:
         outcomes.append(outcome)
         buckets[outcome.bucket] = buckets.get(outcome.bucket, 0) + 1
+
+    # --- retired rows still on AGOL: remove them ---------------------
+    for row in rows_due_for_removal(db_path):
+        did = row["dataset_id"]
+        title = row.get("title") or ""
+        status = row.get("sync_status") or "unpublished"
+        why = f"status={row.get('status')!r}"
+        if dry_run:
+            _record(ReconcileOutcome(
+                dataset_id=did, title=title,
+                sync_status_before=status, sync_status_after=status,
+                bucket="skipped",
+                note=(
+                    f"dry-run: would remove AGOL item "
+                    f"{row.get('agol_item_id')!r} ({why})"
+                ),
+            ))
+            continue
+        try:
+            result = unpublish(db_path, did, gis, config, actor=actor)
+        except Exception as exc:
+            # unpublish() failed before it could record anything
+            # (e.g. AGOL unreachable). The link is untouched; the
+            # next run retries.
+            _record(ReconcileOutcome(
+                dataset_id=did, title=title,
+                sync_status_before=status, sync_status_after=status,
+                bucket="remove_failed",
+                note=f"{why}; {exc}",
+            ))
+            continue
+        _record(ReconcileOutcome(
+            dataset_id=did, title=title,
+            sync_status_before=status,
+            sync_status_after=result.sync_status_after,
+            bucket="remove_failed" if result.error else "removed_retired",
+            note=f"{why}; {result.note}",
+        ))
 
     for row in rows:
         did = row["dataset_id"]
@@ -3905,9 +4105,11 @@ def reconcile_bidirectional(
 
 # Bucket ordering for the report (most-action-required first).
 _RECONCILE_BUCKET_ORDER: tuple[str, ...] = (
+    "remove_failed",
     "push_failed",
     "error_retry_failed",
     "pulled_flag",
+    "removed_retired",
     "pushed",
     "error_retry_ok",
     "clean_confirmed",
@@ -3915,6 +4117,10 @@ _RECONCILE_BUCKET_ORDER: tuple[str, ...] = (
 )
 
 _RECONCILE_BUCKET_HEADINGS: dict[str, str] = {
+    "remove_failed":
+        "Removal from AGOL failed (deprecated / tombstoned, still live)",
+    "removed_retired":
+        "Removed from AGOL (deprecated / tombstoned)",
     "push_failed":
         "Push failed (pending_push → error)",
     "error_retry_failed":

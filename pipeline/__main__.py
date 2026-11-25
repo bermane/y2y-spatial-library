@@ -247,6 +247,94 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
 
 # --- lifecycle: update / rename / refresh / tombstone -----------------
 
+def _agol_auto_push_enabled() -> bool:
+    """True iff the AGOL auto-sync hook is on (the default)."""
+    from . import agol_config
+
+    try:
+        return bool(agol_config.load_config().auto_push)
+    except Exception:
+        return False
+
+
+def _confirm_agol_removal(
+    db_path: Path, dataset_id: str, *, new_status: str, skip_confirm: bool,
+) -> dict | None:
+    """Warn and confirm before a status change takes a layer off AGOL.
+
+    Returns the row as it stood before the change when it is linked to
+    an AGOL item (so the caller can report the outcome afterwards), or
+    None when the dataset is not on AGOL or does not exist. Aborts the
+    command, changing nothing, if the steward answers no.
+    """
+    from . import inventory_manager
+
+    if not db_path.exists():
+        return None
+    row = inventory_manager.get_dataset(db_path, dataset_id)
+    if row is None or not row.get("agol_item_id"):
+        return None
+    if row.get("status") == "tombstoned":
+        return None
+
+    title = row.get("title") or dataset_id
+    item_id = row["agol_item_id"]
+    console.print(
+        f"[yellow]'{title}' is published on ArcGIS Online "
+        f"(item {item_id}).[/yellow]"
+    )
+    if not _agol_auto_push_enabled():
+        console.print(
+            "  Auto-push is off on this machine, so nothing on ArcGIS "
+            "Online changes now. The layer will be permanently deleted "
+            "by the next `y2y agol-sync reconcile`."
+        )
+        return row
+
+    console.print(
+        f"  Setting it to {new_status} permanently deletes that layer "
+        "and its source item from ArcGIS Online."
+    )
+    console.print(
+        "  Web maps and apps that use the layer will show it as broken. "
+        "Styling and pop-ups saved on the layer are lost."
+    )
+    if (row.get("sync_status") or "") in ("pending_pull", "conflict"):
+        console.print(
+            "  Edits made on ArcGIS Online that were not pulled into the "
+            "catalogue will be lost."
+        )
+    if new_status == "deprecated":
+        console.print("  The library file and the catalogue row are kept.")
+    if not skip_confirm and not click.confirm("Proceed?", default=False):
+        console.print("[yellow]aborted[/yellow]: nothing was changed")
+        raise click.exceptions.Exit(1)
+    return row
+
+
+def _report_agol_removal(
+    db_path: Path, dataset_id: str, before: dict | None,
+) -> None:
+    """Say what happened on AGOL after a deprecate / tombstone."""
+    from . import inventory_manager
+
+    if before is None or not _agol_auto_push_enabled():
+        return
+    after = inventory_manager.get_dataset(db_path, dataset_id) or {}
+    if not after.get("agol_item_id"):
+        console.print(
+            f"  [green]removed from ArcGIS Online[/green] "
+            f"(item {before['agol_item_id']})"
+        )
+    else:
+        console.print(
+            "  [yellow]could not remove the layer from ArcGIS Online "
+            "right now[/yellow]; it is still live. The next "
+            "`y2y agol-sync reconcile` will retry. See the changelog "
+            "for the reason."
+        )
+
+
 @cli.command()
 @click.argument("dataset_id")
 @click.option(
@@ -255,13 +343,31 @@ def ingest(ctx: click.Context, approve_flag: bool, actor: str | None) -> None:
     help="Field to update, in 'key=value' form. May be repeated.",
 )
 @click.option(
+    "--yes", "skip_confirm",
+    is_flag=True,
+    help="Skip the confirmation asked before deprecating a dataset that "
+         "is published on ArcGIS Online.",
+)
+@click.option(
     "--actor",
     default=None,
     help="Name to record as the changelog actor. Defaults to $USER.",
 )
 @click.pass_context
-def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], actor: str | None) -> None:
-    """Update non-locked fields on an inventory row."""
+def update(
+    ctx: click.Context,
+    dataset_id: str,
+    set_pairs: tuple[str, ...],
+    skip_confirm: bool,
+    actor: str | None,
+) -> None:
+    """Update non-locked fields on an inventory row.
+
+    Setting ``status=deprecated`` on a dataset that is published on
+    ArcGIS Online removes its layer there (after a confirmation); the
+    library file and the catalogue row are kept. Setting it back to
+    ``active`` publishes it again as a new item.
+    """
     from . import lifecycle
 
     if not set_pairs:
@@ -269,6 +375,15 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
 
     fields = _parse_set_pairs(set_pairs)
     db_path, library, _ = _resolve_paths(ctx.obj["root"])
+
+    removal_row = None
+    if str(fields.get("status") or "").strip().lower() == "deprecated":
+        removal_row = _confirm_agol_removal(
+            db_path, dataset_id,
+            new_status="deprecated", skip_confirm=skip_confirm,
+        )
+        if removal_row is not None and removal_row.get("status") == "deprecated":
+            removal_row = None  # already deprecated; nothing new to report
 
     try:
         row = lifecycle.update(
@@ -285,6 +400,8 @@ def update(ctx: click.Context, dataset_id: str, set_pairs: tuple[str, ...], acto
         f"dataset_id=[bold]{dataset_id}[/bold] fields=[bold]{list(fields)}[/bold]"
     )
     console.print(f"  date_modified: [cyan]{row.get('date_modified')}[/cyan]")
+    if row.get("status") == "deprecated":
+        _report_agol_removal(db_path, dataset_id, removal_row)
     _auto_export_xlsx(ctx)
 
 
@@ -363,23 +480,42 @@ def refresh(ctx: click.Context, dataset_id: str, actor: str | None) -> None:
     default=None,
     help="Name to record as the changelog actor. Defaults to $USER.",
 )
-@click.confirmation_option(prompt="Tombstone is irreversible — proceed?")
+@click.option(
+    "--yes", "skip_confirm",
+    is_flag=True,
+    help="Skip the confirmation prompts.",
+)
 @click.pass_context
 def tombstone(
     ctx: click.Context,
     dataset_id: str,
     reason: str | None,
     actor: str | None,
+    skip_confirm: bool,
 ) -> None:
-    """Soft-delete a row (status=tombstoned) and erase its file from library/."""
+    """Soft-delete a row (status=tombstoned) and erase its file from library/.
+
+    If the dataset is published on ArcGIS Online, its layer there is
+    removed as well.
+    """
     from . import lifecycle
 
     db_path, library, _ = _resolve_paths(ctx.obj["root"])
+
+    removal_row = _confirm_agol_removal(
+        db_path, dataset_id,
+        new_status="tombstoned", skip_confirm=True,
+    )
+    if not skip_confirm and not click.confirm(
+        "Tombstone is irreversible — proceed?", default=False,
+    ):
+        raise click.Abort()
 
     try:
         lifecycle.tombstone(
             db_path, library,
             dataset_id=dataset_id, actor=actor or _default_actor(), reason=reason,
+            auto_push=True,
         )
     except lifecycle.LifecycleError as exc:
         raise click.ClickException(str(exc))
@@ -388,6 +524,7 @@ def tombstone(
         f"[yellow]tombstoned[/yellow] dataset_id=[bold]{dataset_id}[/bold] "
         "(file deleted, inventory row preserved as audit record)"
     )
+    _report_agol_removal(db_path, dataset_id, removal_row)
     _auto_export_xlsx(ctx)
 
 
@@ -710,6 +847,20 @@ def agol_sync_status(ctx: click.Context, deep: bool) -> None:
     console.print("[bold]By agol_format:[/bold]")
     for target, n in sorted(target_counts.items(), key=lambda x: (x[0] or "")):
         console.print(f"  {n:3d}  {target}")
+
+    due = [r for r in rows if agol_sync.is_due_for_removal(r)]
+    if due:
+        console.print()
+        console.print(
+            f"[yellow]{len(due)} deprecated / tombstoned dataset(s) still "
+            f"on AGOL[/yellow]; the next `y2y agol-sync reconcile` "
+            f"removes them:"
+        )
+        for r in due:
+            console.print(
+                f"  {r['dataset_id']}  {r.get('status')}  "
+                f"item={r.get('agol_item_id')}"
+            )
 
     if not deep:
         return
@@ -1087,8 +1238,9 @@ def agol_sync_reconcile(
         f"[bold]{len(report.outcomes)}[/bold] rows processed"
     )
     for bucket in (
-        "pushed", "pulled_flag", "error_retry_ok", "clean_confirmed",
-        "push_failed", "error_retry_failed", "skipped",
+        "removed_retired", "pushed", "pulled_flag", "error_retry_ok",
+        "clean_confirmed", "remove_failed", "push_failed",
+        "error_retry_failed", "skipped",
     ):
         n = report.counts_by_bucket.get(bucket, 0)
         if n:
@@ -1259,7 +1411,8 @@ def agol_sync_pull(
 )
 @click.confirmation_option(
     prompt="Permanently delete this dataset's AGOL item(s)? The "
-           "catalogue row stays active and can be re-pushed.",
+           "catalogue row and library file are kept, and an active "
+           "dataset can be re-pushed.",
 )
 @click.pass_context
 def agol_sync_unpublish(
@@ -1270,8 +1423,14 @@ def agol_sync_unpublish(
     Permanently removes the AGOL service + any linked source item,
     then clears ``agol_item_id`` / ``agol_published_at`` /
     ``last_synced_at`` and sets ``sync_status='unpublished'``. The
-    catalogue row itself stays active — only the AGOL representation
-    is torn down. Re-publish any time with `y2y agol-sync push`.
+    catalogue row keeps its status — only the AGOL representation
+    is torn down. Re-publish an active row any time with
+    `y2y agol-sync push`.
+
+    If AGOL refuses the deletion, the catalogue link is kept and the
+    row is marked ``sync_status='error'``, because the layer is still
+    live. Deprecating or tombstoning a dataset does this removal
+    automatically; use this command to take an active dataset off AGOL.
     """
     from . import agol_config, agol_sync
 
@@ -1289,6 +1448,13 @@ def agol_sync_unpublish(
         )
     except agol_sync.AgolError as exc:
         raise click.ClickException(str(exc))
+
+    if result.error:
+        _auto_export_xlsx(ctx)
+        raise click.ClickException(
+            f"unpublish failed — {result.dataset_id} → "
+            f"sync_status={result.sync_status_after}. {result.note}"
+        )
 
     console.print(
         f"[green]unpublish complete[/green] — "

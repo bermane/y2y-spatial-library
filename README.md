@@ -130,7 +130,8 @@ y2y refresh <dataset_id>
 - **`update`** changes non-locked fields on a row — `title`,
   `classification`, `data_steward`, `summary`, `description`, `tags`,
   `terms_of_use`, `acknowledgements`, `agol_item_id`, `notes`, plus
-  `status` between `active` and `deprecated`. Locked columns
+  `status` between `active` and `deprecated` (deprecating a published
+  dataset removes its layer from AGOL; the file and row stay). Locked columns
   (checksum, size, mtime, CRS, bbox, `dataset_id`, `file_path`,
   `category`, `subcategory`, `date_added`, `source_format`,
   `source_filename`, `source_crs`, `source_layer`) cannot be edited
@@ -224,7 +225,7 @@ y2y agol-sync push --all-dirty           # push every pending_push row
 y2y agol-sync push --all-unpublished     # initial bulk publish of the backlog
 y2y agol-sync reconcile [--dry-run]      # weekly bidirectional sync + report
 y2y agol-sync pull <id> [--accept|--reject]   # resolve AGOL-side drift
-y2y agol-sync unpublish <id>             # delete AGOL item(s), keep catalogue row
+y2y agol-sync unpublish <id>             # take an active dataset off AGOL, keep catalogue row
 y2y agol-sync adopt <id>                 # bring a manually-published item under management
 ```
 

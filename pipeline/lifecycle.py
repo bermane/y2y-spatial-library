@@ -342,12 +342,18 @@ def tombstone(
     dataset_id: str,
     actor: str,
     reason: str | None = None,
+    auto_push: bool = False,
 ) -> dict[str, Any]:
     """Mark a row tombstoned and delete the file from library/.
 
     The row stays in the inventory permanently as an audit record.
     ``dataset_id`` remains reserved. Reconcile expects the file to be
     absent and will flag a violation if it reappears.
+
+    If the row is still linked to an AGOL item and ``auto_push`` is
+    true, a best-effort removal of that item is attempted via
+    :func:`agol_sync.try_auto_remove`. Failures are swallowed; the
+    next ``y2y agol-sync reconcile`` retries.
 
     If the file is already absent (manual deletion), the operation
     proceeds and notes that fact in the changelog.
@@ -387,6 +393,13 @@ def tombstone(
         old_value=str(target.get("status") or ""),
         new_value="tombstoned",
     )
+
+    if auto_push:
+        from . import agol_sync
+        agol_sync.try_auto_remove(
+            db_path, dataset_id, actor=actor, trigger="tombstone",
+        )
+
     return _require_row(db_path, dataset_id)
 
 
