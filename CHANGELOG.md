@@ -39,6 +39,8 @@ Pilot release for the first deployment on the data steward's Windows machine.
   that is an administrator or has the privilege to mark content as
   authoritative. Without it the push still succeeds and a warning is written
   to `internal_notes` and the changelog.
+- `title` is pre-filled in the review sheet with the source file name, minus
+  its extension, as a starting point to edit.
 - `temporal_start` and `temporal_end` can now be filled, in the review sheet
   and with `y2y update`.
 - Renamed the catalogue columns `format` and `crs` to `library_format` and

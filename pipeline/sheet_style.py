@@ -71,6 +71,10 @@ _FONT_LIGHT = Font(bold=True, color="FFFFFF")
 
 # Extra guidance shown under the colour key in the legend tab.
 FIELD_NOTES: dict[str, str] = {
+    "title": (
+        "Pre-filled with the source file name. Edit it into the title "
+        "people will see on ArcGIS Online."
+    ),
     "tags": (
         "Separate tags with a semicolon, for example: grizzly bear; habitat; "
         "Alberta. Enter NA if the dataset should have no tags. The cell "

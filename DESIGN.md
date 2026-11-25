@@ -313,7 +313,7 @@ placeholder metadata would erode that invariant over time.
 
 | Field              | Type                    | Notes                                                                     |
 | ------------------ | ----------------------- | ------------------------------------------------------------------------- |
-| `title`            | string                  | AGOL item title. Title Case display string authored by the steward — *not* derived from filename. The corresponding inventory record of the *file* is `file_path`; `title` is what AGOL users see. |
+| `title`            | string                  | AGOL item title. Title Case display string authored by the steward. Scan pre-fills it with the source file name minus its extension (`Y2Y_RegionBoundary.shp` gives `Y2Y_RegionBoundary`) as a starting point to edit; it is still required. The corresponding inventory record of the *file* is `file_path`; `title` is what AGOL users see. |
 | `summary`          | string (short)          | AGOL "snippet". One sentence; ~250 chars.                                 |
 | `description`      | string (plain text)     | AGOL description. Plain text only — no HTML, no rich formatting.          |
 | `tags`             | string (`;`-delimited)  | Flat list; not a join table. e.g., `caribou;telemetry;central_selkirks`. Never empty: a dataset with no tags stores the marker `NA`, which is recognised in any letter case, cannot be mixed with real tags, and is never published to AGOL as a tag. The steward may type `;` or `,` between tags; the catalogue stores `;`. See `pipeline/steward_fields.py`. |

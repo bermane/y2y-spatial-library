@@ -221,7 +221,8 @@ publish**. Repeat for each tutorial layer.
      (semicolon-separated, or `NA` if the dataset should have no tags),
      `terms_of_use`, `acknowledgements`, `data_steward`.
      (`category`, `agol_format` and `authoritative` are pre-filled; adjust if
-     needed.)
+     needed. `title` is pre-filled with the file name, so rewrite it into a
+     proper title.)
    - The header colours tell you what to touch: **blue** and **orange** columns
      are yours to fill (blue ones are published to ArcGIS Online), **grey** and
      **mauve** columns are filled automatically. The `legend` tab in the sheet

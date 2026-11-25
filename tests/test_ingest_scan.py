@@ -63,8 +63,9 @@ def test_scan_pending_row_captures_source_metadata(project_tree, valid_gpkg_fact
     assert row["dataset_id"].startswith("ds_")
     assert row["status"] == "active"
     assert row["ready"] is False
-    # Title is required-empty (steward fills it; not auto-derived from filename)
-    assert row["title"] is None
+    # Title is pre-filled with the source file name, minus its extension,
+    # as a starting point for the steward to edit.
+    assert row["title"] == Path(row["source_filename"]).stem
 
     # Source provenance — captured from the incoming file
     assert row["source_format"] == "GeoPackage"

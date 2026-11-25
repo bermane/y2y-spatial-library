@@ -636,6 +636,9 @@ def _build_row(
         pending_sheet.READY_COLUMN: False,
         # identity & location
         "dataset_id": dataset_id,
+        # Starting point for the steward: the source file name without
+        # its extension. They edit it into the title AGOL users see.
+        "title": primary_in_processing.stem,
         "category": guessed_category,
         "subcategory": guessed_subcategory,
         "file_path": None,                    # set at approve
