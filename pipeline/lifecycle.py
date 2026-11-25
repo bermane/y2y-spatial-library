@@ -30,7 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import inventory_manager, taxonomy, utils
+from . import inventory_manager, steward_fields, taxonomy, utils
 from .validators import validate_all
 from .validators.naming import validate_naming
 
@@ -45,6 +45,8 @@ UPDATABLE_FIELDS: frozenset[str] = frozenset({
     "data_steward",
     "summary", "description", "tags", "terms_of_use", "acknowledgements",
     "agol_item_id", "internal_notes",
+    "authoritative",                   # yes / no
+    "temporal_start", "temporal_end",  # optional time coverage
     # AGOL publish-target intent — steward changes their mind about
     # how a dataset should be published (e.g., promoting a large
     # vector from feature-layer to vector-tile-layer). See DESIGN.md
@@ -68,6 +70,41 @@ def _require_row(db_path: Path, dataset_id: str) -> dict[str, Any]:
     if row is None:
         raise LifecycleError(f"dataset_id {dataset_id!r} not found in inventory")
     return row
+
+
+def _normalize_steward_fields(
+    fields: dict[str, Any], target: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn steward-typed values into their catalogue form.
+
+    Same rules as the ingest sheet (see :mod:`pipeline.steward_fields`):
+    tags are ``;``-joined or ``NA``, authoritative is 1/0, and the
+    temporal columns are ISO-8601 UTC or NULL.
+    """
+    out = dict(fields)
+    try:
+        if "tags" in out:
+            out["tags"] = steward_fields.normalize_tags(out["tags"])
+        if "authoritative" in out:
+            out["authoritative"] = steward_fields.parse_authoritative(
+                out["authoritative"]
+            )
+        if "temporal_start" in out:
+            out["temporal_start"] = steward_fields.parse_temporal(
+                out["temporal_start"]
+            )
+        if "temporal_end" in out:
+            out["temporal_end"] = steward_fields.parse_temporal(
+                out["temporal_end"], end=True
+            )
+        if "temporal_start" in out or "temporal_end" in out:
+            steward_fields.check_temporal_order(
+                out.get("temporal_start", target.get("temporal_start")),
+                out.get("temporal_end", target.get("temporal_end")),
+            )
+    except ValueError as exc:
+        raise LifecycleError(str(exc)) from None
+    return out
 
 
 # --- update -------------------------------------------------------------
@@ -118,6 +155,8 @@ def update(
     target = _require_row(db_path, dataset_id)
     if target.get("status") == "tombstoned":
         raise LifecycleError(f"dataset_id {dataset_id!r} is tombstoned; updates not allowed")
+
+    fields = _normalize_steward_fields(fields, target)
 
     # Compute the diff so we can produce a useful changelog entry and
     # silently no-op when nothing actually changed.
@@ -356,7 +395,7 @@ def tombstone(
 # Snapshot fields recomputed from disk. Other locked columns
 # (dataset_id, file_path, source_*, date_added) are not touched.
 _REFRESH_SNAPSHOT_FIELDS: tuple[str, ...] = (
-    "checksum_sha256", "size_bytes", "mtime", "crs", "geographic_extent_bbox",
+    "checksum_sha256", "size_bytes", "mtime", "library_crs", "geographic_extent_bbox",
 )
 
 
@@ -421,7 +460,7 @@ def refresh(
         "checksum_sha256": new_checksum,
         "size_bytes": new_size,
         "mtime": new_mtime,
-        "crs": new_crs,
+        "library_crs": new_crs,
         "geographic_extent_bbox": new_bbox,
     }
 

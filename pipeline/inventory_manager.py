@@ -46,17 +46,17 @@ DB_FILENAME = "inventory.db"                 # source of truth
 DATASETS_COLUMNS: tuple[str, ...] = (
     # identity & taxonomy
     "dataset_id", "dataset_type", "title", "category", "subcategory",
-    "file_path", "format",
+    "file_path", "library_format",
     # extrinsic metadata
     "summary", "description", "tags", "terms_of_use",
-    "acknowledgements", "data_steward", "internal_notes",
+    "acknowledgements", "data_steward", "internal_notes", "authoritative",
     # lifecycle state
     "status", "date_added", "date_modified",
     # AGOL linkage
     "agol_item_id", "agol_published_at", "last_synced_at", "sync_status",
     "agol_format",
     # intrinsic snapshot
-    "checksum_sha256", "size_bytes", "mtime", "crs",
+    "checksum_sha256", "size_bytes", "mtime", "library_crs",
     "geographic_extent_bbox", "classification",
     # spatial properties
     "footprint_wkt", "temporal_start", "temporal_end",
@@ -154,8 +154,13 @@ def _row_for_insert(row: dict[str, Any]) -> tuple[Any, ...]:
 
     Missing keys → NULL. Unknown keys are silently dropped — callers
     sometimes hand us pending-sheet rows with extra columns.
+    ``authoritative`` is the exception: a row that doesn't say gets the
+    schema default (1 = yes), since the column is NOT NULL.
     """
-    return tuple(row.get(c) for c in DATASETS_COLUMNS)
+    return tuple(
+        1 if c == "authoritative" and row.get(c) is None else row.get(c)
+        for c in DATASETS_COLUMNS
+    )
 
 
 def insert_dataset(db_path: Path, row: dict[str, Any]) -> None:

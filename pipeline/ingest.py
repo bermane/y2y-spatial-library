@@ -42,8 +42,8 @@ import yaml
 from pyproj import Transformer
 
 from . import (
-    agol_vtpk, inventory_manager, pending_sheet, source_formats, taxonomy,
-    transformations, utils,
+    agol_vtpk, inventory_manager, pending_sheet, source_formats,
+    steward_fields, taxonomy, transformations, utils,
 )
 from .source_formats import (
     SHAPEFILE_SIDECAR_EXTS,
@@ -636,10 +636,13 @@ def _build_row(
         pending_sheet.READY_COLUMN: False,
         # identity & location
         "dataset_id": dataset_id,
+        # Starting point for the steward: the source file name without
+        # its extension. They edit it into the title AGOL users see.
+        "title": primary_in_processing.stem,
         "category": guessed_category,
         "subcategory": guessed_subcategory,
         "file_path": None,                    # set at approve
-        "format": _FORMAT_LABEL_BY_TARGET[target_ext],
+        "library_format": _FORMAT_LABEL_BY_TARGET[target_ext],
         # source provenance (locked at scan)
         "source_format": meta.source_format,
         "source_filename": meta.source_filename,
@@ -648,7 +651,7 @@ def _build_row(
         # transform inputs
         pending_sheet.TARGET_FILENAME_COLUMN: target_filename,
         # intrinsic snapshot (computed at approve)
-        "crs": None,
+        "library_crs": None,
         "checksum_sha256": None,
         "size_bytes": None,
         "mtime": None,
@@ -662,13 +665,20 @@ def _build_row(
         "date_added": today,
         "date_modified": today,
         "data_steward": None,
+        # Pre-filled yes: the library holds authoritative datasets.
+        # The steward sets no for the exceptions.
+        "authoritative": "yes",
+        # optional time coverage, steward-declared
+        "temporal_start": None,
+        "temporal_end": None,
         # extrinsic
         "summary": None,
         "description": None,
         "tags": None,
         "terms_of_use": None,
         "acknowledgements": None,
-        # AGOL linkage & freeform
+        # AGOL linkage (written by the first push, never by the
+        # steward) & freeform
         "agol_item_id": None,
         "notes": None,
         # Default AGOL publish target derived from source format
@@ -689,10 +699,12 @@ def _build_row(
 
 # Required-non-empty fields a steward must fill before approval.
 _REQUIRED_NON_EMPTY = (
-    "title", "category", "format",
+    "title", "category", "library_format",
     pending_sheet.TARGET_FILENAME_COLUMN,
     "status", "data_steward",
-    "summary", "description", "tags", "terms_of_use", "acknowledgements",
+    "summary", "description", "terms_of_use", "acknowledgements",
+    # ``tags`` is checked separately (see _validate_declarations): it
+    # must hold tags or the explicit "no tags" marker NA.
     # agol_format is pre-filled by _build_row from format (vector →
     # feature-layer, raster → imagery-layer); the steward may
     # override to vector-tile-layer. Empty values shouldn't reach
@@ -747,6 +759,35 @@ def _validate_declarations(row: dict[str, Any], processing_dir: Path) -> list[st
         v = row.get(field)
         if v is None or (isinstance(v, str) and not v.strip()):
             errors.append(f"required field '{field}' is empty")
+
+    # Tags: real tags, or NA on its own to say "no tags". Never empty.
+    try:
+        steward_fields.parse_tags(row.get("tags"))
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    # Authoritative: yes or no.
+    try:
+        steward_fields.parse_authoritative(row.get("authoritative"))
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    # Optional time coverage.
+    try:
+        steward_fields.check_temporal_order(
+            steward_fields.parse_temporal(row.get("temporal_start")),
+            steward_fields.parse_temporal(row.get("temporal_end"), end=True),
+        )
+    except ValueError as exc:
+        errors.append(f"temporal coverage: {exc}")
+
+    # agol_item_id is written by the first AGOL push, not by the steward.
+    item_id = row.get("agol_item_id")
+    if item_id is not None and str(item_id).strip():
+        errors.append(
+            "agol_item_id must be left empty; it is filled in automatically "
+            "when the dataset is published to ArcGIS Online"
+        )
 
     # Category enum
     cat = row.get("category")
@@ -868,7 +909,7 @@ def _populate_snapshot(row: dict[str, Any], target_path: Path) -> None:
             row["pixel_size_y"] = float(-ds.transform.e)
         row["feature_count"] = None
 
-    row["crs"] = utils.crs_to_authority_string(crs) if crs else None
+    row["library_crs"] = utils.crs_to_authority_string(crs) if crs else None
     row["checksum_sha256"] = checksum
     row["size_bytes"] = size_bytes
     row["mtime"] = mtime
@@ -935,11 +976,11 @@ def _normalize_for_insert(row: dict[str, Any]) -> dict[str, Any]:
     else:
         out.pop("notes", None)
 
-    fmt = out.get("format")
+    fmt = out.get("library_format")
     if isinstance(fmt, str):
         if fmt not in _FORMAT_TO_SCHEMA:
             raise ValueError(f"unknown format value {fmt!r}")
-        out["format"] = _FORMAT_TO_SCHEMA[fmt]
+        out["library_format"] = _FORMAT_TO_SCHEMA[fmt]
 
     src_fmt = out.get("source_format")
     if isinstance(src_fmt, str) and src_fmt:
@@ -951,14 +992,6 @@ def _normalize_for_insert(row: dict[str, Any]) -> dict[str, Any]:
     out.setdefault("sync_status", "unpublished")
 
     return out
-
-
-def _normalize_tags(value: Any) -> Any:
-    """Strip whitespace around each ``;``-separated tag and drop empties."""
-    if not isinstance(value, str):
-        return value
-    parts = [p.strip() for p in value.split(";")]
-    return ";".join(p for p in parts if p)
 
 
 def _promote(
@@ -1002,7 +1035,16 @@ def _promote(
 
     finalized = dict(row)
     finalized["file_path"] = str(rel_target)
-    finalized["tags"] = _normalize_tags(finalized.get("tags"))
+    finalized["tags"] = steward_fields.normalize_tags(finalized.get("tags"))
+    finalized["authoritative"] = steward_fields.parse_authoritative(
+        finalized.get("authoritative")
+    )
+    finalized["temporal_start"] = steward_fields.parse_temporal(
+        finalized.get("temporal_start")
+    )
+    finalized["temporal_end"] = steward_fields.parse_temporal(
+        finalized.get("temporal_end"), end=True
+    )
     canonical_row = _normalize_for_insert(finalized)
 
     inventory_manager.insert_dataset(db_path, canonical_row)

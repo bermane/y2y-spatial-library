@@ -176,7 +176,26 @@
     <tr><td><code>--actor</code></td><td>Changelog actor at promotion. Defaults to <code>$USER</code>.</td></tr>
   </tbody>
 </table>
-<p><strong>Review-sheet fields:</strong> <code>title</code>, <code>summary</code>, <code>description</code>, <code>category</code>, <code>subcategory</code> (Species only), <code>tags</code>, <code>terms_of_use</code>, <code>acknowledgements</code>, <code>data_steward</code>, <code>agol_format</code>, <code>ready</code>. <code>agol_format</code> is pre-filled from the format.</p>
+<p><strong>Review-sheet fields:</strong> <code>title</code>, <code>summary</code>, <code>description</code>, <code>category</code>, <code>subcategory</code> (Species only), <code>tags</code>, <code>terms_of_use</code>, <code>acknowledgements</code>, <code>data_steward</code>, <code>agol_format</code>, <code>authoritative</code>, <code>ready</code>. <code>agol_format</code> is pre-filled from the format and <code>authoritative</code> is pre-filled <code>yes</code>. Optional: <code>temporal_start</code>, <code>temporal_end</code>, <code>notes</code>.</p>
+<p><strong>Header colours</strong> (also in the sheet's <code>legend</code> tab). Columns are laid out in this order, with <code>_validation_error</code> right after <code>ready</code>:</p>
+<table>
+  <thead><tr><th>Colour</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>Yellow</td><td><code>ready</code>, the control column.</td></tr>
+    <tr><td>Blue</td><td>You fill it; it is published to ArcGIS Online. Lighter blue = optional.</td></tr>
+    <tr><td>Orange</td><td>You fill it; it stays in the catalogue. Lighter orange = optional.</td></tr>
+    <tr><td>Grey</td><td>Filled by the pipeline. Do not edit.</td></tr>
+    <tr><td>Mauve</td><td>Written by the ArcGIS Online sync (<code>agol_item_id</code>). Do not edit.</td></tr>
+    <tr><td>Red</td><td><code>_validation_error</code>, the pipeline's error message.</td></tr>
+  </tbody>
+</table>
+<p><strong>Field rules</strong></p>
+<ul>
+  <li><code>tags</code>: separate tags with <code>;</code> (a <code>,</code> also works). The cell cannot be empty. Enter <code>NA</code> (any letter case) on its own if the dataset should have no tags; <code>NA</code> is never published as a tag and cannot be mixed with real tags.</li>
+  <li><code>authoritative</code>: <code>yes</code> or <code>no</code>. <code>yes</code> gives the ArcGIS Online item the "Authoritative" badge at push; <code>no</code> removes it.</li>
+  <li><code>temporal_start</code> / <code>temporal_end</code>: the period the data covers, as <code>YYYY</code>, <code>YYYY-MM</code> or <code>YYYY-MM-DD</code>. Leave empty if it does not apply.</li>
+  <li><code>agol_item_id</code>: leave empty. It is filled in when the dataset is published.</li>
+</ul>
 <div class="note"><strong>On validation failure:</strong> the row's <code>ready</code> flips to <code>FALSE</code> and <code>_validation_error</code> explains why. Fix the issue, set <code>ready=TRUE</code>, re-run <code>y2y ingest --approve</code>.</div>
 <pre><span class="c"># drop files into queue/incoming/</span>
 <span class="k">y2y ingest</span>
@@ -188,11 +207,13 @@
 <h3><code>y2y update</code></h3>
 <pre>y2y update [--set KEY=VALUE]... [--actor TEXT] DATASET_ID</pre>
 <p>Update non-locked metadata fields. Repeat <code>--set</code> per field.</p>
-<p><strong>Updatable fields:</strong> <code>title</code>, <code>status</code> (<code>active</code>/<code>deprecated</code>), <code>classification</code> (raster only), <code>data_steward</code>, <code>summary</code>, <code>description</code>, <code>tags</code> (<code>;</code>-delimited), <code>terms_of_use</code>, <code>acknowledgements</code>, <code>agol_item_id</code>, <code>internal_notes</code>, <code>agol_format</code>.</p>
-<p>Rejected: locked columns (<code>checksum_sha256</code>, <code>size_bytes</code>, <code>mtime</code>, <code>crs</code>, <code>geographic_extent_bbox</code> — only <code>refresh</code> changes these) and movement-bound columns (<code>file_path</code>, <code>category</code>, <code>subcategory</code> — use <code>rename</code>). <code>status='tombstoned'</code> is rejected here — use <code>tombstone</code>.</p>
+<p><strong>Updatable fields:</strong> <code>title</code>, <code>status</code> (<code>active</code>/<code>deprecated</code>), <code>classification</code> (raster only), <code>data_steward</code>, <code>summary</code>, <code>description</code>, <code>tags</code> (<code>;</code>-delimited, or <code>NA</code> for none), <code>terms_of_use</code>, <code>acknowledgements</code>, <code>agol_item_id</code>, <code>internal_notes</code>, <code>agol_format</code>, <code>authoritative</code> (<code>yes</code>/<code>no</code>), <code>temporal_start</code>, <code>temporal_end</code> (<code>YYYY</code>, <code>YYYY-MM</code> or <code>YYYY-MM-DD</code>; empty clears). <code>agol_item_id</code> is normally filled by the push; set it by hand only before <code>y2y agol-sync adopt</code>.</p>
+<p>Rejected: locked columns (<code>checksum_sha256</code>, <code>size_bytes</code>, <code>mtime</code>, <code>library_crs</code>, <code>geographic_extent_bbox</code> — only <code>refresh</code> changes these) and movement-bound columns (<code>file_path</code>, <code>category</code>, <code>subcategory</code> — use <code>rename</code>). <code>status='tombstoned'</code> is rejected here — use <code>tombstone</code>.</p>
 <pre><span class="k">y2y update</span> ds_01ABC --set summary=<span class="c">"Revised text"</span>
 <span class="k">y2y update</span> ds_01ABC --set tags=<span class="c">"caribou;telemetry"</span> --set data_steward=<span class="c">"Ethan"</span>
-<span class="k">y2y update</span> ds_01ABC --set agol_format=vector-tile-layer</pre>
+<span class="k">y2y update</span> ds_01ABC --set agol_format=vector-tile-layer
+<span class="k">y2y update</span> ds_01ABC --set tags=NA --set authoritative=no
+<span class="k">y2y update</span> ds_01ABC --set temporal_start=2020 --set temporal_end=2020</pre>
 
 <h3><code>y2y rename</code></h3>
 <pre>y2y rename [--actor TEXT] DATASET_ID NEW_PATH</pre>

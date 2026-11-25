@@ -4,18 +4,14 @@ The sheet is persistent across scans (DESIGN.md §8). On each scan the
 pipeline appends rows for newly-staged datasets; on approve it removes
 rows that have been promoted. Rows are identified by ``dataset_id``.
 
-Column layout: ``ready`` first (the steward's control), then every
-inventory column in canonical order (see ``inventory_manager``), then
-``_validation_error`` last as a pipeline-written error sink.
+Column layout: ``ready`` and ``_validation_error`` first, then the
+columns grouped by header colour: steward-filled and published to
+ArcGIS Online, steward-filled and catalogue-only, pipeline-filled.
 
-Column roles (colour-coded in the header):
-
-    control      ``ready``                  — steward flips to TRUE to promote
-    locked       auto-filled, never edit    — intrinsic snapshot + id + paths
-    overridable  auto-filled, can edit      — best-guess fields (title, category…)
-    required     empty, must be filled      — extrinsic Dublin Core+ metadata
-    optional     empty, may be filled       — AGOL item id, notes
-    error        pipeline-written           — ``_validation_error`` column
+Header colours come from :mod:`pipeline.sheet_style` and are explained
+in the workbook's ``legend`` tab: blue columns are steward-filled and
+published to ArcGIS Online, orange columns are steward-filled and stay
+in the catalogue, grey and mauve columns are never edited by hand.
 
 See DESIGN.md §7 for the full inventory schema and §8 for the two-phase
 ingestion workflow.
@@ -27,8 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 
+from . import sheet_style
 from .inventory_manager import assert_not_locked
 
 PENDING_FILENAME = "pending.xlsx"
@@ -43,81 +39,73 @@ ERROR_COLUMN = "_validation_error"
 TARGET_FILENAME_COLUMN = "target_filename"
 
 
-# Pending-sheet column order is *not* the inventory column order — it's
-# tuned for the steward's review workflow:
+# Columns are grouped by header colour, in the order the steward works
+# through a row (steward preference 2026-11-24):
 #
-#   1. control + error sink so the row's promote-state is visible at a glance
-#   2. source identity (what arrived) so the steward identifies the row
-#   3. transform inputs (what the pipeline will do with it)
-#   4. categorisation (auto-prefilled where possible; steward confirms/overrides)
-#   5. required extrinsic metadata (where the editing actually happens)
-#   6. optional / freeform
-#   7. derived / locked / will-be-populated-at-approve (tail; ignore during review)
+#   1. control + error sink, so the row's promote-state is visible first
+#   2. blue: steward-filled, published to ArcGIS Online
+#   3. orange: steward-filled, stays in the catalogue
+#   4. grey: pipeline-filled; nothing to do here during review
+#   5. mauve: written by the ArcGIS Online sync
 #
-# inventory.xlsx keeps the canonical-grouping order from inventory_manager;
-# this sheet's order is steward-facing only.
+# Within blue and orange the optional (lighter) columns sit next to the
+# column they belong with. inventory.xlsx follows the same grouping.
 COLUMNS: list[tuple[str, str]] = [
     # 1. control + error
     (READY_COLUMN, "control"),
     (ERROR_COLUMN, "error"),
-    # 2. identity & source provenance
-    ("dataset_id", "locked"),
-    ("source_format", "locked"),
-    ("source_filename", "locked"),
-    ("source_crs", "locked"),
-    ("source_layer", "locked"),
-    # 3. transform inputs
-    (TARGET_FILENAME_COLUMN, "transform"),
-    ("classification", "overridable"),
-    # 4. categorisation (auto-prefilled where possible)
-    ("category", "overridable"),
-    ("subcategory", "overridable"),
-    ("status", "overridable"),
-    # 5. required extrinsic metadata
-    ("title", "required"),
-    ("summary", "required"),
-    ("description", "required"),
-    ("tags", "required"),
-    ("terms_of_use", "required"),
-    ("acknowledgements", "required"),
-    # AGOL publish format sits with the steward-authored metadata
-    # block (immediately after acknowledgements, per steward
-    # preference 2026-05-27). Auto-prefilled from format:
-    # ``feature-layer`` for vectors, ``imagery-layer`` for rasters.
-    # Steward overrides to ``vector-tile-layer`` for large vectors
-    # that should be delivered as cached tiles. Coloured
-    # "required" — ingest.approve() rejects empty/invalid values.
+    # 2. blue: steward-filled, published to ArcGIS Online
+    ("title", "agol_required"),
+    ("summary", "agol_required"),
+    ("description", "agol_required"),
+    # ``tags`` is required, but ``NA`` marks "no tags on purpose".
+    # See pipeline/steward_fields.py.
+    ("tags", "agol_required"),
+    ("terms_of_use", "agol_required"),
+    ("acknowledgements", "agol_required"),
+    # Auto-prefilled where possible; the steward confirms or corrects.
+    ("category", "agol_required"),
+    ("subcategory", "agol_optional"),
+    # Auto-prefilled from format: ``feature-layer`` for vectors,
+    # ``imagery-layer`` for rasters. Steward overrides to
+    # ``vector-tile-layer`` for large vectors that should be delivered
+    # as cached tiles. ingest.approve() rejects empty/invalid values.
     # See DESIGN.md §15.
-    ("agol_format", "required"),
-    ("data_steward", "required"),
-    # 6. optional
-    ("agol_item_id", "optional"),
-    ("notes", "optional"),
-    # 7. derived / locked / will be populated at approve
-    ("format", "locked"),
-    ("file_path", "locked"),
-    ("crs", "locked"),
-    ("checksum_sha256", "locked"),
-    ("size_bytes", "locked"),
-    ("mtime", "locked"),
-    ("geographic_extent_bbox", "locked"),
-    ("date_added", "locked"),
-    ("date_modified", "locked"),
+    ("agol_format", "agol_required"),
+    # Pre-filled ``yes``; the steward sets ``no`` for the exceptions.
+    ("authoritative", "agol_required"),
+    # 3. orange: steward-filled, stays in the catalogue
+    (TARGET_FILENAME_COLUMN, "local_required"),
+    ("classification", "local_required"),
+    ("status", "local_required"),
+    ("data_steward", "local_required"),
+    ("temporal_start", "local_optional"),
+    ("temporal_end", "local_optional"),
+    ("notes", "local_optional"),
+    # 4. grey: pipeline-filled (steward-chosen order, 2026-11-24):
+    #    dates, then the file as it arrived (source_*), then the file
+    #    as stored in the library (library_*), then the technical
+    #    snapshot. The source_* and date_added columns are filled at
+    #    scan; the rest at approve.
+    ("date_added", "system"),
+    ("date_modified", "system"),
+    ("source_filename", "system"),
+    ("source_format", "system"),
+    ("source_crs", "system"),
+    ("source_layer", "system"),
+    ("file_path", "system"),
+    ("library_format", "system"),
+    ("library_crs", "system"),
+    ("dataset_id", "system"),
+    ("checksum_sha256", "system"),
+    ("size_bytes", "system"),
+    ("mtime", "system"),
+    ("geographic_extent_bbox", "system"),
+    # 5. mauve: written by the first AGOL push. Never filled in by the
+    #    steward; ingest.approve() rejects a row where it has been typed in.
+    ("agol_item_id", "agol_state"),
 ]
 COLUMN_NAMES: list[str] = [name for name, _ in COLUMNS]
-
-_FILLS: dict[str, PatternFill] = {
-    "control": PatternFill("solid", start_color="FFE066"),      # yellow
-    "locked": PatternFill("solid", start_color="D3D3D3"),       # grey
-    "overridable": PatternFill("solid", start_color="CFE2F3"),  # light blue
-    "transform": PatternFill("solid", start_color="FCE5CD"),    # light orange
-    "required": PatternFill("solid", start_color="F4CCCC"),     # pink
-    "optional": PatternFill("solid", start_color="D9EAD3"),     # light green
-    "error": PatternFill("solid", start_color="CC0000"),        # dark red
-}
-
-_HEADER_FONT_DARK = Font(bold=True, color="000000")
-_HEADER_FONT_LIGHT = Font(bold=True, color="FFFFFF")
 
 
 def load_pending(path: Path) -> list[dict[str, Any]]:
@@ -147,10 +135,9 @@ def save_pending(path: Path, rows: list[dict[str, Any]]) -> None:
     ws.title = PENDING_SHEET_NAME
 
     for col_idx, (name, role) in enumerate(COLUMNS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=name)
-        cell.font = _HEADER_FONT_LIGHT if role == "error" else _HEADER_FONT_DARK
-        cell.fill = _FILLS[role]
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet_style.style_header_cell(
+            ws.cell(row=1, column=col_idx, value=name), role,
+        )
 
     for row_idx, row in enumerate(rows, start=2):
         for col_idx, name in enumerate(COLUMN_NAMES, start=1):
@@ -161,6 +148,7 @@ def save_pending(path: Path, rows: list[dict[str, Any]]) -> None:
         ws.column_dimensions[letter].width = max(12, min(40, len(name) + 4))
 
     ws.freeze_panes = "A2"
+    sheet_style.write_legend_sheet(wb, [role for _, role in COLUMNS])
     wb.save(path)
 
 

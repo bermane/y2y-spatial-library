@@ -84,8 +84,10 @@ CREATE TABLE IF NOT EXISTS datasets (
                                 )),
     subcategory             TEXT,                            -- nullable; only Species has subs (enforced in code, not schema)
     file_path               TEXT NOT NULL,                   -- relative to library/spatial/
-    format                  TEXT NOT NULL
-                                CHECK (format IN ('geopackage', 'geotiff')),
+    -- The file as stored in the library (source_format is the file as
+    -- it arrived). Renamed from `format` by migration 012.
+    library_format          TEXT NOT NULL
+                                CHECK (library_format IN ('geopackage', 'geotiff')),
 
     -- [type-agnostic] Extrinsic metadata (Dublin Core+) ------------------
     -- description carries both the public-facing dataset description and
@@ -148,11 +150,18 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- ====================================================================
     summary                 TEXT NOT NULL,
     description             TEXT NOT NULL,
-    tags                    TEXT NOT NULL,                   -- ';'-delimited
+    tags                    TEXT NOT NULL,                   -- ';'-delimited, or 'NA' for no tags
     terms_of_use            TEXT NOT NULL,
     acknowledgements        TEXT NOT NULL,
     data_steward            TEXT NOT NULL,
     internal_notes          TEXT,                            -- freeform; renamed from xlsx 'notes'
+    -- Steward-declared: is this dataset the authoritative copy? 1 = yes,
+    -- 0 = no (INTEGER boolean, DESIGN.md §13). Defaults to yes because
+    -- the library exists to hold authoritative datasets; the steward
+    -- sets no for the exceptions. Added by migration 011. Pushed to AGOL
+    -- as the item's content status (agol_sync._apply_content_status).
+    authoritative           INTEGER NOT NULL DEFAULT 1
+                                CHECK (authoritative IN (0, 1)),
 
     -- [type-agnostic] Lifecycle state & timestamps -----------------------
     status                  TEXT NOT NULL DEFAULT 'active'
@@ -183,7 +192,7 @@ CREATE TABLE IF NOT EXISTS datasets (
     -- Pre-filled by ingest._build_row() from format; editable later
     -- via `y2y update <id> --set agol_format=...`. Added as
     -- agol_target by migration 007; renamed to agol_format by
-    -- migration 008 (naming alignment with format / source_format).
+    -- migration 008 (naming alignment with library_format / source_format).
     agol_format             TEXT
                                 CHECK (agol_format IS NULL OR agol_format IN (
                                     'feature-layer',
@@ -198,15 +207,15 @@ CREATE TABLE IF NOT EXISTS datasets (
     checksum_sha256         TEXT NOT NULL,
     size_bytes              INTEGER NOT NULL,
     mtime                   TEXT NOT NULL,                   -- ISO-8601 UTC
-    crs                     TEXT NOT NULL,                   -- canonical CRS (ESRI:102008 today)
+    library_crs             TEXT NOT NULL,                   -- canonical CRS (ESRI:102008 today); renamed from `crs` by migration 012
     geographic_extent_bbox  TEXT,                            -- 'minx,miny,maxx,maxy' in canonical CRS
     classification          TEXT NOT NULL
                                 CHECK (classification IN ('vector', 'continuous', 'categorical')),
 
     -- [spatial-specific] Spatial properties ------------------------------
     footprint_wkt           TEXT,                            -- bbox/footprint as WKT in EPSG:4326
-    temporal_start          TEXT,                            -- ISO-8601 UTC
-    temporal_end            TEXT,                            -- ISO-8601 UTC
+    temporal_start          TEXT,                            -- ISO-8601 UTC; steward-declared coverage
+    temporal_end            TEXT,                            -- ISO-8601 UTC; steward-declared coverage
     feature_count           INTEGER,                         -- vectors only
     raster_width            INTEGER,                         -- rasters only
     raster_height           INTEGER,                         -- rasters only
