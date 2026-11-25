@@ -411,7 +411,7 @@ layers have no export setting and stay view-only.
 a standard look: polygons as an outline with no fill, lines and points
 in the colour of the dataset's category, continuous rasters on a
 viridis ramp and categorical rasters in discrete class colours, both
-30% transparent. Styling that came with the data is kept: a raster's
+30% transparent. Every layer is visible at all zoom levels. Styling that came with the data is kept: a raster's
 own colour table is used, and a vector tile package you styled by
 attribute in ArcGIS Pro is published as built. Later pushes never touch
 the style, so anything you change in Map Viewer sticks. If the style

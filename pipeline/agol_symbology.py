@@ -11,6 +11,8 @@ hand (maintainer decision 2026-11-25). The rules:
   packages): polygons get an outline and no fill, lines a line,
   points a dot, all in the colour of the dataset's library category.
 * Continuous rasters: a viridis colour ramp, 30% transparent.
+* Every layer is visible at all zoom levels (no minimum or maximum
+  scale), so it never disappears as staff zoom in or out.
 * Categorical rasters: the file's own colour table if it has one,
   otherwise a colour-blind-friendly discrete palette; 30% transparent.
 
@@ -75,6 +77,12 @@ FALLBACK_COLOUR = "#4D4D4D"
 LINE_WIDTH_PT = 1.5
 POINT_SIZE_PT = 7.0
 POINT_OUTLINE_WIDTH_PT = 0.75
+
+#: Scale limits written with the default style. Zero means "no limit",
+#: so the layer is visible at every zoom level (maintainer decision
+#: 2026-11-25). A steward can still set a range by hand on AGOL, for
+#: example on a very large feature layer that draws slowly zoomed out.
+NO_SCALE_LIMIT = 0
 
 #: Rasters are drawn 30% transparent, i.e. 70% opaque.
 RASTER_OPACITY = 0.7
@@ -211,8 +219,9 @@ def build_feature_item_data(
     """Merge the standard renderer into a feature layer item's data.
 
     ``layers`` is ``[(layer id, geometry type), ...]`` from the
-    service. Only ``drawingInfo.renderer`` is set; pop-ups, labels and
-    anything else already saved on the item are kept.
+    service. Only ``drawingInfo.renderer`` and the scale range (set to
+    "all zoom levels") are written; pop-ups, labels and anything else
+    already saved on the item are kept.
     """
     data: dict[str, Any] = (
         copy.deepcopy(existing) if isinstance(existing, dict) else {}
@@ -243,6 +252,8 @@ def build_feature_item_data(
             drawing = {}
             definition["drawingInfo"] = drawing
         drawing["renderer"] = renderer
+        definition["minScale"] = NO_SCALE_LIMIT
+        definition["maxScale"] = NO_SCALE_LIMIT
         styled += 1
     if not styled:
         raise SymbologyError(
@@ -416,7 +427,7 @@ def raster_renderer(
 
 
 def build_imagery_item_data(existing: Any, renderer: dict[str, Any]) -> dict[str, Any]:
-    """Merge a raster renderer and the standard opacity into item data."""
+    """Merge a raster renderer, opacity and "all zoom levels" into item data."""
     data: dict[str, Any] = (
         copy.deepcopy(existing) if isinstance(existing, dict) else {}
     )
@@ -430,6 +441,8 @@ def build_imagery_item_data(existing: Any, renderer: dict[str, Any]) -> dict[str
         definition["drawingInfo"] = drawing
     drawing["renderer"] = renderer
     data["opacity"] = RASTER_OPACITY
+    data["minScale"] = NO_SCALE_LIMIT
+    data["maxScale"] = NO_SCALE_LIMIT
     return data
 
 
@@ -516,7 +529,9 @@ def standard_vector_tile_style(
 
     Polygons become a transparent fill plus an outline, lines a line,
     points a dot, all in ``rgb``. Zoom limits on the original rules
-    are kept. Relative links in the style are made absolute because
+    are dropped, so the layer is visible at all zoom levels (past the
+    deepest tile level in the package the map keeps drawing from that
+    level). Relative links in the style are made absolute because
     the copy is stored on the item, not next to the tiles.
     """
     if not is_single_symbol_style(style):
@@ -542,9 +557,6 @@ def standard_vector_tile_style(
             "source": rule.get("source", "esri"),
             "source-layer": name,
         }
-        for key in ("minzoom", "maxzoom"):
-            if key in rule:
-                base[key] = rule[key]
         rule_id = rule.get("id") or name
         if "fill" in kinds:
             new_rules.append({
@@ -801,15 +813,15 @@ def describe_standard(row: dict[str, Any], target: str) -> str:
     """One line saying what restyle would apply, for the confirmation."""
     if target == "imagery-layer":
         if row.get("classification") == "continuous":
-            return "viridis colour ramp, 30% transparent"
+            return "viridis colour ramp, 30% transparent, all zoom levels"
         return (
             "the file's own colour table if it has one, otherwise the "
-            "standard class colours; 30% transparent"
+            "standard class colours; 30% transparent, all zoom levels"
         )
     colour = CATEGORY_COLOURS.get(row.get("category") or "", FALLBACK_COLOUR)
     return (
         f"single symbol in the {row.get('category')} colour ({colour}); "
-        f"polygons as an outline with no fill"
+        f"polygons as an outline with no fill; all zoom levels"
     )
 
 

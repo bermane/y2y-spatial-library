@@ -209,7 +209,10 @@ def test_feature_item_data_keeps_what_is_already_saved() -> None:
     )
     first = data["layers"][0]
     assert first["popupInfo"] == {"title": "keep me"}
-    assert first["layerDefinition"]["minScale"] == 5000
+    # A saved scale range is replaced by "all zoom levels".
+    assert first["layerDefinition"]["minScale"] == 0
+    assert first["layerDefinition"]["maxScale"] == 0
+    assert data["layers"][1]["layerDefinition"]["minScale"] == 0
     assert first["layerDefinition"]["drawingInfo"]["labelingInfo"] == ["keep"]
     assert first["layerDefinition"]["drawingInfo"]["renderer"]["type"] == "simple"
     assert data["tables"] == ["keep"]
@@ -306,6 +309,7 @@ def test_imagery_item_data_sets_renderer_and_transparency() -> None:
     assert data["popupInfo"] == {"keep": 1}
     assert data["layerDefinition"]["drawingInfo"]["renderer"] == {"type": "rasterStretch"}
     assert data["opacity"] == 0.7
+    assert data["minScale"] == 0 and data["maxScale"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -353,7 +357,9 @@ def test_standard_vector_tile_style_outlines_polygons(tmp_path: Path) -> None:
     assert outline["type"] == "line"
     assert outline["source-layer"] == "main.parks"
     assert outline["paint"]["line-color"] == "#0072B2"
-    assert fill["minzoom"] == outline["minzoom"] == 4
+    # Zoom limits from Pro are dropped: visible at all zoom levels.
+    assert "minzoom" not in fill and "minzoom" not in outline
+    assert "maxzoom" not in fill and "maxzoom" not in outline
     # The copy lives on the item, so its links must be absolute.
     assert style["sources"]["esri"]["url"] == url
     assert style["sprite"] == f"{url}/resources/sprites/sprite"
