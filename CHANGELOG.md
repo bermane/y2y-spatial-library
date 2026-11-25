@@ -15,7 +15,8 @@ Pilot release for the first deployment on the data steward's Windows machine.
 - Newly published layers now get a standard default style: polygons as an
   outline with no fill, lines and points in the colour of the dataset's
   category, continuous rasters on a viridis ramp and categorical rasters in
-  colour-blind-friendly class colours, both 30% transparent. The style is set
+  colour-blind-friendly class colours, both 30% transparent. Every layer is
+  visible at all zoom levels. The style is set
   once, on first publish. Later pushes and reconcile never touch it, so a
   style changed by hand on ArcGIS Online is kept. The colours and defaults are
   a first version, to be checked and reviewed with the data steward for 0.9.1.

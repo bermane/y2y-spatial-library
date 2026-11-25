@@ -282,7 +282,8 @@ organization until you remove it in step 6.
      formats"** is ticked. (Vector tile and imagery layers are view-only.)
    - opened in Map Viewer, it draws in the standard default style: polygons
      as an outline with no fill, lines and points in the colour of the
-     dataset's category, rasters 30% transparent.
+     dataset's category, rasters 30% transparent. It stays visible at every
+     zoom level.
 
    The default style is set once, when the layer is first published. You can
    restyle a layer in Map Viewer and save it; later pushes keep your change.

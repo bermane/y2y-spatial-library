@@ -245,7 +245,7 @@ y2y agol-sync restyle <id>               # reset one layer to the default style
 
 Newly published layers get a standard default style, set once on first
 publish and never touched again; `y2y agol-sync restyle <id>` resets one
-layer to it. Newly published feature layers allow organization members to
+layer to it. Layers are visible at all zoom levels by default. Newly published feature layers allow organization members to
 export the data, and a dataset whose `authoritative` column is `yes` gets
 the "Authoritative" badge. The weekly reconcile also removes layers of
 deprecated or tombstoned datasets and audits the Y2Y Conservation Atlas

@@ -1343,6 +1343,11 @@ fill the gap when a file brings no styling of its own:
 | Continuous raster | Viridis ramp, stretched between the 2nd and 98th percentile, 30% transparent |
 | Categorical raster | The file's colour table if it has one; otherwise Okabe-Ito colours (up to 8 classes) or a 20-colour set (9 to 20, with a warning that it is no longer fully colour-blind safe); 30% transparent. More than 20 classes with no colour table: left on the AGOL default, with a warning |
 | Vector tile layer from a single-symbol package | Same as polygons / lines / points. Pro gives such a package one arbitrary colour, which is not a styling choice |
+| Every layer | Visible at all zoom levels: no minimum or maximum scale. For a vector tile layer, zoom limits on the package's drawing rules are dropped; past the deepest tile level the map keeps drawing from that level |
+
+A very large feature layer shown at every zoom can draw slowly when
+zoomed far out. That is the case vector tile layers are for; the
+steward can also set a visible range by hand on AGOL, and it sticks.
 
 Vector colour is by library category (maintainer decision 2026-11-25),
 so two layers from the same category look alike until one is restyled.
