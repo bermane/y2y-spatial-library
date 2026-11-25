@@ -58,7 +58,7 @@ def _full_row(
         "category": category,
         "subcategory": subcategory,
         "file_path": file_path,
-        "format": format_,
+        "library_format": format_,
         "summary": "Summary.",
         "description": "Description.",
         "tags": "test;y2y",
@@ -77,7 +77,7 @@ def _full_row(
         "checksum_sha256": "a" * 64,
         "size_bytes": 1024,
         "mtime": "2026-04-29T00:00:00Z",
-        "crs": "ESRI:102008",
+        "library_crs": "ESRI:102008",
         "geographic_extent_bbox": "0,0,1,1",
         "classification": classification,
         "footprint_wkt": None,
@@ -2188,3 +2188,152 @@ def test_push_all_unpublished_dry_run_does_not_mutate(
     )
     assert len(results) == 1
     assert inventory_manager.get_dataset(db, "ds_dry")["sync_status"] == "unpublished"
+
+
+# ----------------------------------------------------------------------------
+# Authoritative badge (AGOL content status)
+# ----------------------------------------------------------------------------
+
+class _StatusItem:
+    """Stand-in for an AGOL item's content_status behaviour.
+
+    ``accepts=False`` mimics an account without the privilege: the SDK
+    setter returns quietly and the status does not change.
+    """
+
+    def __init__(self, status: str = "", *, accepts: bool = True,
+                 raises: Exception | None = None) -> None:
+        self._status = status
+        self._accepts = accepts
+        self._raises = raises
+        self.set_calls: list[Any] = []
+
+    @property
+    def content_status(self) -> str:
+        return self._status
+
+    @content_status.setter
+    def content_status(self, value: Any) -> None:
+        self.set_calls.append(value)
+        if self._raises is not None:
+            raise self._raises
+        if self._accepts:
+            self._status = value or ""
+
+
+def test_content_status_follows_the_authoritative_flag() -> None:
+    assert agol_sync.compute_content_status({"authoritative": 1}) == "org_authoritative"
+    assert agol_sync.compute_content_status({"authoritative": 0}) is None
+    # The column defaults to yes, so a row that doesn't say is authoritative.
+    assert agol_sync.compute_content_status({}) == "org_authoritative"
+
+
+def test_apply_content_status_sets_badge_for_authoritative_row() -> None:
+    item, props = _StatusItem(""), {}
+    agol_sync._apply_content_status(item, {"authoritative": 1}, props)
+    assert item.content_status == "org_authoritative"
+    assert "_warnings" not in props
+
+
+@pytest.mark.parametrize("existing", ["org_authoritative", "public_authoritative"])
+def test_apply_content_status_leaves_an_existing_badge_alone(existing: str) -> None:
+    item, props = _StatusItem(existing), {}
+    agol_sync._apply_content_status(item, {"authoritative": 1}, props)
+    assert item.set_calls == []
+    assert item.content_status == existing
+
+
+def test_apply_content_status_clears_badge_when_not_authoritative() -> None:
+    item, props = _StatusItem("org_authoritative"), {}
+    agol_sync._apply_content_status(item, {"authoritative": 0}, props)
+    assert item.set_calls == [None]
+    assert item.content_status == ""
+    assert "_warnings" not in props
+
+
+@pytest.mark.parametrize("existing", ["", "deprecated"])
+def test_apply_content_status_no_leaves_other_statuses_alone(existing: str) -> None:
+    item, props = _StatusItem(existing), {}
+    agol_sync._apply_content_status(item, {"authoritative": 0}, props)
+    assert item.set_calls == []
+    assert item.content_status == existing
+
+
+def test_apply_content_status_warns_when_agol_silently_declines() -> None:
+    item, props = _StatusItem("", accepts=False), {}
+    agol_sync._apply_content_status(item, {"authoritative": 1}, props)
+    assert len(props["_warnings"]) == 1
+    assert "Authoritative" in props["_warnings"][0]
+    assert "administrator" in props["_warnings"][0]
+
+
+def test_apply_content_status_warns_when_agol_raises() -> None:
+    item, props = _StatusItem("", raises=RuntimeError("403 no privilege")), {}
+    agol_sync._apply_content_status(item, {"authoritative": 1}, props)
+    assert "403 no privilege" in props["_warnings"][0]
+
+
+def test_push_sets_authoritative_badge(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    inventory_manager.insert_dataset(
+        db, _full_row(dataset_id="ds_test", file_path="Water/v.gpkg"),
+    )
+    gis = _make_gis(new_item_id="new_fl_id")
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    service = gis.content.add.return_value.publish.return_value
+    folder_source = gis.content.folders.create.return_value.add.return_value.result.return_value
+    published = folder_source.publish.return_value
+    assert "org_authoritative" in (service.content_status, published.content_status)
+    assert result.sync_status_after == "clean"
+    assert inventory_manager.get_dataset(db, "ds_test")["internal_notes"] is None
+
+
+def test_push_succeeds_when_badge_is_refused(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """AGOL refusing the badge must not fail the push or the catalogue write."""
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    inventory_manager.insert_dataset(
+        db, _full_row(dataset_id="ds_test", file_path="Water/v.gpkg"),
+    )
+    gis = _make_gis(new_item_id="new_fl_id")
+    monkeypatch.setattr(
+        agol_sync, "_current_content_status", lambda item: "",
+    )  # the status never changes: the account lacks the privilege
+
+    result = agol_sync.push(
+        db, "ds_test", gis, _config_no_cache,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+
+    assert result.sync_status_after == "clean"
+    after = inventory_manager.get_dataset(db, "ds_test")
+    assert after["agol_item_id"] == "new_fl_id"
+    assert "could not mark the item Authoritative" in after["internal_notes"]
+
+
+def test_push_dry_run_reports_authoritative(
+    project_tree, _config_no_cache, valid_gpkg_factory,
+) -> None:
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    row = _full_row(dataset_id="ds_test", file_path="Water/v.gpkg")
+    row["authoritative"] = 0
+    inventory_manager.insert_dataset(db, row)
+
+    result = agol_sync.push(
+        db, "ds_test", _make_gis(), _config_no_cache,
+        library_root=project_tree["library"], actor="tester", dry_run=True,
+    )
+    assert "authoritative: no" in result.note

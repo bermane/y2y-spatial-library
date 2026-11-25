@@ -79,8 +79,35 @@ Two phases of one command:
 
 **Review-sheet fields** you fill before approve: `title`, `summary`,
 `description`, `category`, `subcategory` (Species only), `tags`,
-`terms_of_use`, `acknowledgements`, `data_steward`, `agol_format`, and
-`ready` (set to `TRUE`). `agol_format` is pre-filled from the format.
+`terms_of_use`, `acknowledgements`, `data_steward`, `agol_format`,
+`authoritative`, and `ready` (set to `TRUE`). `agol_format` is pre-filled
+from the format and `authoritative` is pre-filled `yes`. Optional:
+`temporal_start`, `temporal_end`, `notes`.
+
+**Header colours** (also in the sheet's `legend` tab). Columns are laid out
+in this order, with `_validation_error` right after `ready`:
+
+| Colour | Meaning |
+| ------ | ------- |
+| Yellow | `ready`, the control column. |
+| Blue | You fill it; it is published to ArcGIS Online. Lighter blue = optional. |
+| Orange | You fill it; it stays in the catalogue. Lighter orange = optional. |
+| Grey | Filled by the pipeline. Do not edit. |
+| Mauve | Written by the ArcGIS Online sync (`agol_item_id`). Do not edit. |
+| Red | `_validation_error`, the pipeline's error message. |
+
+**Field rules**
+
+- `tags`: separate tags with `;` (a `,` also works). The cell cannot be
+  empty. Enter `NA` (any letter case) on its own if the dataset should
+  have no tags; `NA` is never published as a tag and cannot be mixed
+  with real tags.
+- `authoritative`: `yes` or `no`. `yes` gives the ArcGIS Online item the
+  "Authoritative" badge at push; `no` removes it.
+- `temporal_start` / `temporal_end`: the period the data covers, as
+  `YYYY`, `YYYY-MM` or `YYYY-MM-DD`. Leave empty if it does not apply.
+- `agol_item_id`: leave empty. It is filled in when the dataset is
+  published.
 
 **On validation failure:** the row's `ready` flips back to `FALSE` and
 `_validation_error` explains the problem. Fix the underlying issue, set
@@ -108,11 +135,15 @@ Update non-locked metadata fields. Repeat `--set` per field.
 
 **Updatable fields:** `title`, `status` (`active` / `deprecated`),
 `classification` (raster only), `data_steward`, `summary`,
-`description`, `tags` (`;`-delimited), `terms_of_use`,
-`acknowledgements`, `agol_item_id`, `internal_notes`, `agol_format`.
+`description`, `tags` (`;`-delimited, or `NA` for none), `terms_of_use`,
+`acknowledgements`, `agol_item_id`, `internal_notes`, `agol_format`,
+`authoritative` (`yes` / `no`), `temporal_start`, `temporal_end`
+(`YYYY`, `YYYY-MM` or `YYYY-MM-DD`; empty clears). `agol_item_id` is
+normally filled by the push; set it by hand only before
+`y2y agol-sync adopt`.
 
 Rejected: locked columns (`checksum_sha256`, `size_bytes`, `mtime`,
-`crs`, `geographic_extent_bbox` — only `refresh` changes these) and
+`library_crs`, `geographic_extent_bbox` — only `refresh` changes these) and
 movement-bound columns (`file_path`, `category`, `subcategory` — use
 `rename`). `status='tombstoned'` is rejected here — use `tombstone`.
 
@@ -120,6 +151,8 @@ movement-bound columns (`file_path`, `category`, `subcategory` — use
 y2y update ds_01ABC --set summary="Revised text"
 y2y update ds_01ABC --set tags="caribou;telemetry" --set data_steward="Ethan"
 y2y update ds_01ABC --set agol_format=vector-tile-layer
+y2y update ds_01ABC --set tags=NA --set authoritative=no
+y2y update ds_01ABC --set temporal_start=2020 --set temporal_end=2020
 ```
 
 ### `y2y rename`

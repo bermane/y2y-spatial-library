@@ -182,6 +182,13 @@ account. In ArcGIS Online (signed in as yourself):
 > do **not** need to — check with him first. Re-running is only needed when the
 > typology itself changes.
 
+> **Authoritative badge.** Each push marks the ArcGIS Online item
+> "Authoritative" when the dataset's `authoritative` column is `yes`. Your
+> account needs to be an administrator, or have a role with the privilege to
+> mark content as authoritative. If it does not, the push still works, the
+> badge is skipped, and a note starting with `[agol]` appears in the dataset's
+> `internal_notes`. Tell Ethan if you see that note.
+
 ---
 
 ## 5. Your first ingest (the tutorial)
@@ -211,8 +218,15 @@ publish**. Repeat for each tutorial layer.
    start "$env:Y2Y_ROOT\queue\processing\pending.xlsx"
    ```
    - Fill the required fields: `title`, `summary`, `description`, `tags`
-     (semicolon-separated), `terms_of_use`, `acknowledgements`, `data_steward`.
-     (`category` and `agol_format` are pre-filled — adjust if needed.)
+     (semicolon-separated, or `NA` if the dataset should have no tags),
+     `terms_of_use`, `acknowledgements`, `data_steward`.
+     (`category`, `agol_format` and `authoritative` are pre-filled; adjust if
+     needed. `title` is pre-filled with the file name, so rewrite it into a
+     proper title.)
+   - The header colours tell you what to touch: **blue** and **orange** columns
+     are yours to fill (blue ones are published to ArcGIS Online), **grey** and
+     **mauve** columns are filled automatically. The `legend` tab in the sheet
+     explains them.
    - You can **copy-paste** these from the existing inventory spreadsheet Ethan
      has open (same column names).
    - Set **`ready` = TRUE**.

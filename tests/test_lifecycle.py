@@ -108,6 +108,51 @@ def test_update_no_change_is_noop(project_tree, populate_dataset) -> None:
     assert len(log_after) == len(log_before)
 
 
+def test_update_normalises_tags_and_accepts_na(project_tree, populate_dataset) -> None:
+    dataset_id, _ = populate_dataset()
+    db = project_tree["db"]
+
+    row = lifecycle.update(db, dataset_id=dataset_id, fields={"tags": "a, b ;A"}, actor="t")
+    assert row["tags"] == "a;b"
+
+    row = lifecycle.update(db, dataset_id=dataset_id, fields={"tags": "na"}, actor="t")
+    assert row["tags"] == "NA"
+
+    for bad in ("", "NA;rivers"):
+        with pytest.raises(lifecycle.LifecycleError, match="tags"):
+            lifecycle.update(db, dataset_id=dataset_id, fields={"tags": bad}, actor="t")
+
+
+def test_update_authoritative_yes_no(project_tree, populate_dataset) -> None:
+    dataset_id, _ = populate_dataset()
+    db = project_tree["db"]
+    assert inventory_manager.get_dataset(db, dataset_id)["authoritative"] == 1
+
+    row = lifecycle.update(db, dataset_id=dataset_id, fields={"authoritative": "no"}, actor="t")
+    assert row["authoritative"] == 0
+
+    with pytest.raises(lifecycle.LifecycleError, match="'yes' or 'no'"):
+        lifecycle.update(db, dataset_id=dataset_id, fields={"authoritative": "maybe"}, actor="t")
+
+
+def test_update_temporal_coverage(project_tree, populate_dataset) -> None:
+    dataset_id, _ = populate_dataset()
+    db = project_tree["db"]
+
+    row = lifecycle.update(
+        db, dataset_id=dataset_id,
+        fields={"temporal_start": "2020", "temporal_end": "2020"}, actor="t",
+    )
+    assert row["temporal_start"] == "2020-01-01T00:00:00Z"
+    assert row["temporal_end"] == "2020-12-31T00:00:00Z"
+
+    with pytest.raises(lifecycle.LifecycleError, match="before"):
+        lifecycle.update(db, dataset_id=dataset_id, fields={"temporal_end": "2019"}, actor="t")
+
+    row = lifecycle.update(db, dataset_id=dataset_id, fields={"temporal_end": ""}, actor="t")
+    assert row["temporal_end"] is None
+
+
 # --- rename -------------------------------------------------------------
 
 def test_rename_moves_file_and_updates_inventory(project_tree, populate_dataset) -> None:
