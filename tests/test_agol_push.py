@@ -1059,7 +1059,7 @@ def test_push_updates_existing_item_data_changed_uses_FLC_overwrite(
     existing.update.assert_called()
     # FeatureLayerCollection.fromitem(service).manager.overwrite was
     # called with the source path.
-    fake_flc_class.fromitem.assert_called_once_with(existing)
+    fake_flc_class.fromitem.assert_any_call(existing)
     fake_flc.manager.overwrite.assert_called_once()
     overwrite_arg = fake_flc.manager.overwrite.call_args.args[0]
     assert "v.gpkg" in overwrite_arg
@@ -1202,7 +1202,8 @@ def test_push_updates_existing_item_with_linked_source_uses_source_publish(
 
     # REGRESSION GUARD: FeatureLayerCollection.overwrite must NOT have
     # been used — that's the AGOL Error 500 path on linked-FS services.
-    fake_flc_class.fromitem.assert_not_called()
+    # (fromitem itself is called to read the export setting.)
+    fake_flc_class.fromitem.return_value.manager.overwrite.assert_not_called()
 
     # Service metadata was still re-applied.
     existing.update.assert_called()
@@ -2274,8 +2275,9 @@ def test_apply_content_status_warns_when_agol_raises() -> None:
 
 
 def test_push_sets_authoritative_badge(
-    project_tree, _config_no_cache, valid_gpkg_factory,
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
 ) -> None:
+    _patch_flc(monkeypatch)  # export setting succeeds, so no [agol] note
     db = project_tree["db"]
     valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
     inventory_manager.insert_dataset(
@@ -2337,3 +2339,158 @@ def test_push_dry_run_reports_authoritative(
         library_root=project_tree["library"], actor="tester", dry_run=True,
     )
     assert "authoritative: no" in result.note
+
+
+# ----------------------------------------------------------------------------
+# Feature layer export ("Allow others to export to different formats")
+# ----------------------------------------------------------------------------
+
+def _patch_flc(monkeypatch, capabilities="Query", update_raises=None):
+    """Replace arcgis.features.FeatureLayerCollection with a fake.
+
+    Returns the fake collection; ``.manager.update_definition`` records
+    capability writes and ``.manager.overwrite`` records data refreshes.
+    """
+    fake_flc = MagicMock()
+    fake_flc.properties.capabilities = capabilities
+    if update_raises is not None:
+        fake_flc.manager.update_definition.side_effect = update_raises
+    fake_flc_class = MagicMock()
+    fake_flc_class.fromitem = MagicMock(return_value=fake_flc)
+    fake_features = types.ModuleType("arcgis.features")
+    fake_features.FeatureLayerCollection = fake_flc_class
+    fake_arcgis = sys.modules.get("arcgis") or types.ModuleType("arcgis")
+    monkeypatch.setitem(sys.modules, "arcgis", fake_arcgis)
+    monkeypatch.setitem(sys.modules, "arcgis.features", fake_features)
+    return fake_flc
+
+
+def _push_new_feature_layer(project_tree, config, valid_gpkg_factory):
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    inventory_manager.insert_dataset(
+        db, _full_row(dataset_id="ds_test", file_path="Water/v.gpkg"),
+    )
+    agol_sync.push(
+        db, "ds_test", _make_gis(new_item_id="new_fl_id"), config,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+    return inventory_manager.get_dataset(db, "ds_test")
+
+
+def _push_existing_feature_layer(
+    project_tree, config, valid_gpkg_factory, *, data_changed,
+):
+    db = project_tree["db"]
+    valid_gpkg_factory("v.gpkg", dest_dir=project_tree["library"] / "Water")
+    existing = MagicMock()
+    existing.id = "preexisting_id"
+    existing.sharing = MagicMock()
+    existing.sharing.sharing_level = "ORGANIZATION"
+    existing.sharing.groups = MagicMock()
+    existing.related_items.return_value = []
+    row = _full_row(
+        dataset_id="ds_test", file_path="Water/v.gpkg",
+        sync_status="pending_push", agol_item_id="preexisting_id",
+    )
+    row["date_modified"] = "2026-04-29T00:00:00Z"
+    row["last_synced_at"] = (
+        "2026-01-01T00:00:00Z" if data_changed else "2026-05-01T00:00:00Z"
+    )
+    inventory_manager.insert_dataset(db, row)
+    agol_sync.push(
+        db, "ds_test", _make_gis(existing_item=existing), config,
+        library_root=project_tree["library"], actor="tester",
+        cache_dir=project_tree["root"] / ".y2y",
+    )
+    return inventory_manager.get_dataset(db, "ds_test")
+
+
+def test_capabilities_with_export() -> None:
+    f = agol_sync._capabilities_with_export
+    assert f("Query") == "Query,Extract"
+    assert f("Create,Query, Editing") == "Create,Query,Editing,Extract"
+    assert f("Query,Extract") == "Query,Extract"
+    assert f(None) == "Query,Extract"
+    assert f("") == "Query,Extract"
+
+
+def test_push_new_feature_layer_turns_export_on(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    fake_flc = _patch_flc(monkeypatch, capabilities="Query")
+    after = _push_new_feature_layer(
+        project_tree, _config_no_cache, valid_gpkg_factory,
+    )
+    fake_flc.manager.update_definition.assert_called_once_with(
+        {"capabilities": "Query,Extract"}
+    )
+    assert after["sync_status"] == "clean"
+    assert "capabilities" not in (after["internal_notes"] or "")
+
+
+def test_push_new_feature_layer_export_already_on_writes_nothing(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    fake_flc = _patch_flc(monkeypatch, capabilities="Query,Extract")
+    _push_new_feature_layer(project_tree, _config_no_cache, valid_gpkg_factory)
+    fake_flc.manager.update_definition.assert_not_called()
+
+
+def test_push_new_feature_layer_export_failure_is_a_warning(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """A failed export setting never blocks the push or the catalogue."""
+    _patch_flc(monkeypatch, update_raises=RuntimeError("boom"))
+    after = _push_new_feature_layer(
+        project_tree, _config_no_cache, valid_gpkg_factory,
+    )
+    assert after["sync_status"] == "clean"
+    assert after["agol_item_id"] == "new_fl_id"
+    assert "[agol] could not set feature layer capabilities" in (
+        after["internal_notes"]
+    )
+
+
+def test_push_metadata_only_update_leaves_export_setting_alone(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """Export turned off by hand on AGOL is not turned back on."""
+    fake_flc = _patch_flc(monkeypatch, capabilities="Query")
+    _push_existing_feature_layer(
+        project_tree, _config_no_cache, valid_gpkg_factory,
+        data_changed=False,
+    )
+    fake_flc.manager.update_definition.assert_not_called()
+
+
+def test_push_data_refresh_keeps_export_off_when_it_was_off(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    fake_flc = _patch_flc(monkeypatch, capabilities="Query")
+    _push_existing_feature_layer(
+        project_tree, _config_no_cache, valid_gpkg_factory,
+        data_changed=True,
+    )
+    fake_flc.manager.overwrite.assert_called_once()
+    fake_flc.manager.update_definition.assert_not_called()
+
+
+def test_push_data_refresh_restores_export_setting_if_reset(
+    project_tree, _config_no_cache, valid_gpkg_factory, monkeypatch,
+) -> None:
+    """If a data refresh resets the capabilities, push puts them back."""
+    fake_flc = _patch_flc(monkeypatch, capabilities="Query,Extract")
+
+    def _reset(_path):
+        fake_flc.properties.capabilities = "Query"
+
+    fake_flc.manager.overwrite.side_effect = _reset
+    _push_existing_feature_layer(
+        project_tree, _config_no_cache, valid_gpkg_factory,
+        data_changed=True,
+    )
+    fake_flc.manager.update_definition.assert_called_once_with(
+        {"capabilities": "Query,Extract"}
+    )

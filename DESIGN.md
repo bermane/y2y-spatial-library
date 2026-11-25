@@ -1286,6 +1286,33 @@ Linked via `Service2Data`. `unpublish` walks that link to delete both.
 no separate source TIFF item exists. Refreshing imagery re-runs the
 hosted-imagery publish.
 
+### Downloading data: feature layer export
+
+All library data is authoritative, so staff should be able to download
+it. When push first publishes a **feature layer**, it turns on AGOL's
+"Allow others to export to different formats" setting (the `Extract`
+capability). Anyone in the organization who can open the layer can then
+export it from its item page (shapefile, file geodatabase, GeoPackage,
+CSV and others).
+
+- **Set once.** Push turns export on only when it first publishes the
+  layer. Later pushes leave the setting as the steward has it on AGOL,
+  so turning it off by hand (for example for a third-party licence)
+  sticks. After a data refresh, push restores the setting to what it
+  was before the refresh.
+- **Never blocks.** If the setting cannot be read or written, push
+  records an `[agol]` warning in `internal_notes` and carries on.
+- **Not tracked.** There is no catalogue column for it, and reconcile
+  does not report a layer whose export setting was changed on AGOL.
+- **Sources stay private.** The items in `_sources/` are not shared.
+
+**Future work:** vector tile layers and imagery layers have no export
+setting on AGOL, so they are view-only for staff. Revisit how feature
+layer export is working once the library is in use, and decide whether
+those two layer types need a downloadable copy (for example the library
+GeoPackage or GeoTIFF uploaded as a separate item shared with the
+organization).
+
 ### The three publish targets (`agol_format`)
 
 | `agol_format`       | Source format | Path |
